@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qtqp"
+version = "0.0.1"
+description = "The 'cutie' QP solver."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "Brendan O'Donoghue", email = "bodonoghue85@gmail.com"}]
+requires-python = ">=3.9"
+
+# Runtime deps (install-time)
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.9"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+# Tell setuptools to find packages in the 'src' directory
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
