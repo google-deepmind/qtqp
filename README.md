@@ -1,9 +1,7 @@
-# qtqp
+# QTQP
 
-The cutie QP solver.
-
-This package is a Primal-dual interior point method for solving quadratic
-programs (QPs). It solves primal QP problem:
+The cutie QP solver implements a primal-dual interior point method for solving
+convex quadratic programs (QPs). It solves primal QP problem:
 
 ```
     min. (1/2) x.T @ p @ x + c.T @ x
@@ -31,15 +29,15 @@ The current status is 'early research prototype, not ready for prime time'.
 To install, first clone the repository:
 
 ```bash
-git clone <repository_url>
+git clone https://github.com/google-deepmind/qtqp.git
 cd qtqp
 ```
 
-Then, create and activate a virtual environment:
+Then, assuming conda is installed, create a new conda environment:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+conda create -n tmp python=3.12
+conda activate tmp
 ```
 
 Finally, install the package:
@@ -53,11 +51,13 @@ To run the tests, inside the qtqp directory:
 ```bash
 python -m pytest .
 ```
+
 Note tests will fail for linear solvers that are not installed on your system.
 
 ## Usage
 
-Here is an example usage (taken from [here](https://www.cvxgrp.org/scs/examples/python/basic_qp.html#py-basic-qp)):
+Here is an example usage (taken from
+[here](https://www.cvxgrp.org/scs/examples/python/basic_qp.html#py-basic-qp)):
 
 ```python
 import qtqp
@@ -98,6 +98,72 @@ sol.y=array([2.69999964e+00, 2.09999968e+00, 3.86572055e-07])
 sol.s=array([0.00000000e+00, 7.13141634e-09, 1.99999944e-01])
 ```
 
+## Linear solvers
+
+By default `scipy.linalg.factorized` is used to factorize the linear systems
+that arise in each step of the interior point algorithm (explicitly specified in
+the `solve` method via `linear_solver=qtqp.LinearSolver.SCIPY`). However, this
+may not be the fastest option. QTQP supports several other linear solvers that
+may be faster or more reliable for your problem.
+
+#### MKL Pardiso
+
+Pardiso is available via the pydiso package (only available for Intel CPUs). To
+install
+
+```bash
+conda install pydiso --channel conda-forge
+```
+
+To use
+
+```python
+sol = solver.solve(linear_solver=qtqp.LinearSolver.PARDISO)
+```
+
+#### QDLDL
+
+To install QDLDL
+
+```bash
+python -m pip install qdldl
+```
+
+To use
+
+```python
+sol = solver.solve(linear_solver=qtqp.LinearSolver.QDLDL)
+```
+
+#### CHOLMOD
+
+Cholmod is available in the scikit sparse package. To install
+
+```bash
+conda install -c conda-forge scikit-sparse
+```
+
+To use
+
+```python
+sol = solver.solve(linear_solver=qtqp.LinearSolver.CHOLMOD)
+```
+
+#### Nvidia cuDSS
+
+cuDSS uses a GPU accelerated direct solver (requires a GPU). To install
+
+```bash
+python -m pip install nvidia-cudss-cu12
+python -m pip install nvmath-python[cu12]
+```
+
+To use
+
+```python
+sol = solver.solve(linear_solver=qtqp.LinearSolver.CUDSS)
+```
+
 ## Citing this work
 
 Coming soon, in the meantime the closest work is:
@@ -119,9 +185,9 @@ Coming soon, in the meantime the closest work is:
 
 Copyright 2025 Google LLC
 
-All software is licensed under the Apache License, Version 2.0 (Apache 2.0);
-you may not use this file except in compliance with the Apache 2.0 license.
-You may obtain a copy of the Apache 2.0 license at:
+All software is licensed under the Apache License, Version 2.0 (Apache 2.0); you
+may not use this file except in compliance with the Apache 2.0 license. You may
+obtain a copy of the Apache 2.0 license at:
 https://www.apache.org/licenses/LICENSE-2.0
 
 All other materials are licensed under the Creative Commons Attribution 4.0

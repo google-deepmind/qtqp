@@ -73,7 +73,7 @@ class Solution:
   y: np.ndarray
   s: np.ndarray
   stats: List[Dict[str, Any]]
-  status: str
+  status: SolutionStatus
 
 
 class QTQP:
