@@ -16,17 +16,33 @@
 """Direct KKT linear system solvers."""
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import scipy.sparse as sp
 
 
-class MklPardisoSolver:
+class LinearSolver(Protocol):
+  """Protocol defining the interface for linear solvers."""
+
+  def update(self, kkt: sp.spmatrix) -> None:
+    """Factorizes or refactorizes the KKT matrix."""
+    ...
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the linear system."""
+    ...
+
+  def format(self) -> str:
+    """Returns the expected sparse matrix format ('csc' or 'csr')."""
+    ...
+
+
+class MklPardisoSolver(LinearSolver):
   """Wrapper around pydiso.mkl_solver.MKLPardisoSolver.
 
-  This class provides an interface to the MKL Pardiso solver for
-  symmetric indefinite matrices.
+  Provides an interface to the MKL Pardiso solver for symmetric indefinite
+  matrices.
   """
 
   def __init__(self):
@@ -37,11 +53,7 @@ class MklPardisoSolver:
     self.factorization: self.module.MKLPardisoSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or refactorizes the KKT matrix.
-
-    Args:
-      kkt: The sparse KKT matrix to be factorized.
-    """
+    """Factorizes or refactorizes the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.MKLPardisoSolver(
           kkt, matrix_type="real_symmetric_indefinite"
@@ -50,14 +62,7 @@ class MklPardisoSolver:
       self.factorization.refactor(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix.
-
-    Args:
-      rhs: The right-hand side vector.
-
-    Returns:
-      The solution vector.
-    """
+    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csr"]:
@@ -65,11 +70,8 @@ class MklPardisoSolver:
     return "csr"
 
 
-class QdldlSolver:
-  """Wrapper around qdldl.Solver.
-
-  This class provides an interface to the QDLDL solver.
-  """
+class QdldlSolver(LinearSolver):
+  """Wrapper around qdldl.Solver for quasi-definite LDL factorization."""
 
   def __init__(self):
     """Initializes the QdldlSolver."""
@@ -79,25 +81,14 @@ class QdldlSolver:
     self.factorization: self.module.Solver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or updates the factorization of the KKT matrix.
-
-    Args:
-      kkt: The sparse KKT matrix.
-    """
+    """Factorizes or updates the factorization of the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.Solver(kkt)
     else:
       self.factorization.update(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix.
-
-    Args:
-      rhs: The right-hand side vector.
-
-    Returns:
-      The solution vector.
-    """
+    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
@@ -105,29 +96,19 @@ class QdldlSolver:
     return "csc"
 
 
-class ScipySolver:
-  """Wrapper around scipy.linalg.factorized.
+class ScipySolver(LinearSolver):
+  """Wrapper around scipy.linalg.factorized."""
 
-  This class uses `scipy.linalg.factorized` for solving linear systems.
-  """
+  def __init__(self):
+    self.factorization = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes the KKT matrix.
-
-    Args:
-      kkt: The sparse KKT matrix to be factorized.
-    """
+    """Factorizes the KKT matrix."""
+    # Use to_csc() to ensure correct format, though usually it's a cheap view.
     self.factorization = sp.linalg.factorized(kkt.tocsc())
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix.
-
-    Args:
-      rhs: The right-hand side vector.
-
-    Returns:
-      The solution vector.
-    """
+    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
@@ -135,12 +116,8 @@ class ScipySolver:
     return "csc"
 
 
-class CholModSolver:
-  """Wrapper around sksparse.cholmod.
-
-  This class provides an interface to the CHOLMOD sparse Cholesky factorization
-  solver.
-  """
+class CholModSolver(LinearSolver):
+  """Wrapper around sksparse.cholmod for Cholesky LDLt factorization."""
 
   def __init__(self):
     """Initializes the CholModSolver."""
@@ -150,25 +127,14 @@ class CholModSolver:
     self.factorization: self.module.CholeskyFactor | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or updates the factorization of the KKT matrix.
-
-    Args:
-      kkt: The sparse KKT matrix.
-    """
+    """Factorizes or updates the factorization of the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.cholesky(kkt, mode="simplicial")
     else:
       self.factorization.cholesky_inplace(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix.
-
-    Args:
-      rhs: The right-hand side vector.
-
-    Returns:
-      The solution vector.
-    """
+    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
@@ -176,12 +142,8 @@ class CholModSolver:
     return "csc"
 
 
-class CuDssSolver:
-  """Wrapper around Nvidia's CuDSS for GPUs.
-
-  This class provides an interface to the NVIDIA cuDSS library for solving
-  sparse linear systems on GPUs.
-  """
+class CuDssSolver(LinearSolver):
+  """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
 
   def __init__(self):
     """Initializes the CuDssSolver."""
@@ -191,23 +153,19 @@ class CuDssSolver:
     self.solver: self.module.advanced.DirectSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes the KKT matrix and stores the factorization.
-
-    Args:
-      kkt: The sparse KKT matrix.
-    """
+    """Factorizes the KKT matrix and stores the factorization."""
     if self.solver is None:
       sparse_system_type = self.module.advanced.DirectSolverMatrixType.SYMMETRIC
-      # Turn off annoying logs.
+      # Turn off annoying logs by default.
       logger = logging.getLogger("null")
       logger.disabled = True
       options = self.module.advanced.DirectSolverOptions(
           sparse_system_type=sparse_system_type, logger=logger
       )
-      # RHS must be in column major order (Fortran).
-      dummy = np.ones(kkt.shape[1], order="F")
+      # RHS must be in column major order (Fortran) for cuDSS.
+      dummy_rhs = np.empty(kkt.shape[1], order="F", dtype=np.float64)
       self.solver = self.module.advanced.DirectSolver(
-          kkt, dummy, options=options
+          kkt, dummy_rhs, options=options
       )
       self.solver.plan()
     else:
@@ -216,15 +174,10 @@ class CuDssSolver:
     self.solver.factorize()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix.
-
-    Args:
-      rhs: The right-hand side vector.
-
-    Returns:
-      The solution vector.
-    """
-    self.solver.reset_operands(b=np.asfortranarray(rhs))
+    """Solves the linear system using the factorized KKT matrix."""
+    # Ensure RHS is Fortran contiguous for cuDSS expected input format
+    rhs_fortran = np.asfortranarray(rhs, dtype=np.float64)
+    self.solver.reset_operands(b=rhs_fortran)
     return self.solver.solve()
 
   def format(self) -> Literal["csr"]:
@@ -238,10 +191,12 @@ class CuDssSolver:
 
 
 class DirectKktSolver:
-  """Direct KKT linear system solver.
+  """Direct KKT linear system solver with iterative refinement.
 
-  This class constructs and solves KKT linear systems arising in interior-point
-  methods for quadratic programming. It supports iterative refinement.
+  Constructs a quasidefinite KKT system:
+      [ P + mu * I       A.T     ] [ x ]   [ rhs_x ]
+      [     A      -(D + mu * I) ] [ y ] = [ rhs_y ]
+  where D is a diagonal matrix derived from slacks and duals.
   """
 
   def __init__(
@@ -254,7 +209,7 @@ class DirectKktSolver:
       max_iterative_refinement_steps: int,
       atol: float,
       rtol: float,
-      solver: Any,
+      solver: LinearSolver,
   ):
     """Initializes the DirectKktSolver.
 
@@ -280,40 +235,50 @@ class DirectKktSolver:
     self.rtol = rtol
     self.solver = solver
 
-    # P and A are in csc so these should be csc.
-    n_nans = sp.diags(np.nan * np.ones(self.n), format="csc")
-    m_nans = sp.diags(np.nan * np.ones(self.m), format="csc")
+    # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
+    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
+    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
+
+    # Construct the sparse block matrix once.
     self.kkt = sp.bmat(
-        [
-            [p + n_nans, a.T],
-            [a, m_nans],
-        ],
+        [[p + n_nans, a.T], [a, m_nans]],
         format=self.solver.format(),
+        dtype=np.float64,
     )
+    # Cache indices of the diagonal elements for fast updates.
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
-    """Forms the KKT matrix and factorizes it.
+    """Forms the KKT matrix diagonals and factorizes it.
+
+    This method employs an optimization to avoid copying the full sparse KKT
+    matrix. It temporarily injects the regularized diagonals for the solver,
+    then immediately restores the true diagonals for residual calculation.
 
     Args:
       mu: The barrier parameter.
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
+    # Calculate the dynamic diagonal block D = s / y for inequality rows.
+    # For equality rows (first z), the diagonal is 0.
     h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
+
+    # "True" diagonals for accurate residual calculation (no regularization).
+    # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     true_diags = np.concatenate([self.p_diags, h]) + mu
-    # Add regularization to the diagonal.
+    # "Regularized" diagonals for stable factorization.
     reg_diags = np.maximum(true_diags, self.min_static_regularization)
     # Flip the sign of the cone variables.
-    true_diags[self.n :] *= -1
-    # Update the matrix with the true diagonal values.
+    true_diags[self.n :] *= -1.0
+    reg_diags[self.n :] *= -1.0
+
+    # 1. Inject regularized values for the factorization step.
+    self.kkt.data[self.kkt_nan_idxs] = reg_diags
+    self.solver.update(self.kkt)
+
+    # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
-    # Flip the sign of the regularization.
-    reg_diags[self.n :] *= -1
-    regularized_kkt = self.kkt.copy()
-    regularized_kkt.data[self.kkt_nan_idxs] = reg_diags
-    # Refactor the *regularized* KKT matrix.
-    self.solver.update(regularized_kkt)
 
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
@@ -338,37 +303,47 @@ class DirectKktSolver:
     Raises:
       ValueError: If the solution contains NaN values.
     """
+    # Adjust RHS to match the quasidefinite KKT form (second block negated).
     rhs = rhs.copy()
-    rhs[self.n :] *= -1
+    rhs[self.n :] *= -1.0
+
     sol = warm_start.copy()
+    rhs_norm = np.linalg.norm(rhs, np.inf)
+    tolerance = self.atol + self.rtol * rhs_norm
+
+    # Initial residual
     residual = rhs - self.kkt @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
-    i = 0
-    # Enter the iterative refinement loop.
-    while residual_norm > self.atol + self.rtol * np.linalg.norm(rhs, np.inf):
-      logging.debug("lin sys solves=%d, residual: %s", i, residual_norm)
-      if i > self.max_iterative_refinement_steps:  # Always do 1 solve.
-        logging.debug(
-            "Iterative refinement did not converge after %d steps. This may be"
-            " caused by poor numerical conditioning.",
-            self.max_iterative_refinement_steps,
-        )
-        status = "non-converged"
-        break
-      i += 1
 
-      # Perform refinement step
+    status = "non-converged"
+    solves = 0
+
+    # Iterative refinement loop.
+    # Allows 0 solves if warm_start is already good enough.
+    while residual_norm > tolerance:
+      if solves > self.max_iterative_refinement_steps:
+        logging.debug(
+            "Iterative refinement did not converge after %d solves."
+            " Final residual: %e > tolerance: %e",
+            solves,
+            residual_norm,
+            tolerance,
+        )
+        break
+
+      solves += 1
+
+      # Perform correction step using the generic solver
       correction = self.solver.solve(residual)
       new_sol = sol + correction
       new_residual = rhs - self.kkt @ new_sol
       new_residual_norm = np.linalg.norm(new_residual, np.inf)
 
-      # Check for stalling
+      # Check for stalling (residual not improving)
       if new_residual_norm >= residual_norm:
         logging.debug(
-            "Iterative refinement stalled at step %d. This may be caused by"
-            " poor numerical conditioning. Previous residual: %s, new: %s.",
-            i + 1,
+            "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
+            solves,
             residual_norm,
             new_residual_norm,
         )
@@ -379,15 +354,18 @@ class DirectKktSolver:
       residual = new_residual
       residual_norm = new_residual_norm
     else:
+      # Loop finished normally because residual_norm <= tolerance
       status = "converged"
 
     if np.any(np.isnan(sol)):
-      raise ValueError(f"NaN in sol: {sol=}")
+      raise ValueError("Linear solver returned NaNs.")
 
-    logging.debug("lin sys solves=%d, residual: %s", i, residual_norm)
+    logging.debug(
+        "KKT solve: status=%s, solves=%d, res=%e", status, solves, residual_norm
+    )
 
     return sol, {
-        "solves": i,
+        "solves": solves,
         "final_residual_norm": residual_norm,
         "status": status,
     }

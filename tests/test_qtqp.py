@@ -216,8 +216,46 @@ def test_solve_warm_start(equilibrate, seed, linear_solver):
 def test_raise_error_no_positive_constraints():
   """Test that an error is raised when z >= m."""
   rng = np.random.default_rng(42)
-  m, n = 100, 100
+  m, n = 10, 10
   z = m
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   with pytest.raises(ValueError):
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve()
+
+
+def test_raise_error_invalid_initial_y():
+  """Test that an error is raised when initial y has negative values."""
+  rng = np.random.default_rng(42)
+  m, n, z = 3, 2, 1
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError):  # Violates y[z:] >= 0
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(y=np.array([1.0, -1.0, 1.0]))
+  with pytest.raises(ValueError):  # Shape mismatch
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(y=np.array([1.0]))
+
+
+def test_raise_error_invalid_initial_s():
+  """Test that an error is raised when initial s has negative values."""
+  rng = np.random.default_rng(42)
+  m, n, z = 3, 2, 1
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError):  # Violates s[z:] >= 0
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([0.0, -1.0, 1.0]))
+  with pytest.raises(ValueError):  # Violates s[:z] == 0
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([1.0, 0.0, 0.0]))
+  with pytest.raises(ValueError):  # Shape mismatch
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([0.0]))
+
+
+def test_raise_error_negative_invalid_shapes():
+  """Test that an error is raised when shapes are invalid."""
+  rng = np.random.default_rng(42)
+  m, n, z = 6, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError):
+    _ = qtqp.QTQP(a=a, b=np.zeros(m + 1), c=c, z=z, p=p).solve()
+  with pytest.raises(ValueError):
+    _ = qtqp.QTQP(a=a, b=b, c=np.zeros(m + 1), z=z, p=p).solve()
+  with pytest.raises(ValueError):
+    p_invalid = sparse.csc_matrix(np.ones((n + 1, n)))
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
