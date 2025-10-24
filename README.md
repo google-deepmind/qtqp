@@ -1,4 +1,5 @@
 # QTQP
+
 [![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
 
 The cutie QP solver implements a primal-dual interior point method for solving
@@ -188,13 +189,15 @@ This method will return a `qtqp.Solution` object, with fields:
 
 ## Linear solvers
 
-By default `scipy.linalg.factorized` is used to factorize the linear systems
-that arise in each step of the interior point algorithm (explicitly specified in
-the `solve` method via `linear_solver=qtqp.LinearSolver.SCIPY`). However, this
-may not be the fastest option. QTQP supports several other linear solvers that
-may be faster or more reliable for your problem.
+The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
+to the `solve` method via the `linear_solver` arg. By default
+`linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
+However, this may not be the fastest option. QTQP supports several other linear
+solvers that may be faster or more reliable for your problem. The enum
+`qtqp.LinearSolver` contains options `SCIPY`, `PARDISO`, `QDLDL`, `CHOLMOD`,
+`CUDSS`, corresponding to the following backend solvers.
 
-#### MKL Pardiso
+#### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
 Pardiso is available via the pydiso package (only available for Intel CPUs). To
 install
@@ -203,13 +206,7 @@ install
 conda install pydiso --channel conda-forge
 ```
 
-To use
-
-```python
-sol = solver.solve(linear_solver=qtqp.LinearSolver.PARDISO)
-```
-
-#### QDLDL
+#### QDLDL: `qtqp.LinearSolver.QDLDL`
 
 To install QDLDL
 
@@ -217,13 +214,7 @@ To install QDLDL
 python -m pip install qdldl
 ```
 
-To use
-
-```python
-sol = solver.solve(linear_solver=qtqp.LinearSolver.QDLDL)
-```
-
-#### CHOLMOD
+#### CHOLMOD: `qtqp.LinearSolver.CHOLMOD`
 
 Cholmod is available in the scikit sparse package. To install
 
@@ -231,25 +222,13 @@ Cholmod is available in the scikit sparse package. To install
 conda install -c conda-forge scikit-sparse
 ```
 
-To use
-
-```python
-sol = solver.solve(linear_solver=qtqp.LinearSolver.CHOLMOD)
-```
-
-#### Nvidia cuDSS
+#### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
 
 cuDSS uses a GPU accelerated direct solver (requires a GPU). To install
 
 ```bash
 python -m pip install nvidia-cudss-cu12
 python -m pip install nvmath-python[cu12]
-```
-
-To use
-
-```python
-sol = solver.solve(linear_solver=qtqp.LinearSolver.CUDSS)
 ```
 
 ## Citing this work
