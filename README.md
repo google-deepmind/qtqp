@@ -28,7 +28,13 @@ The current status is 'early research prototype, not ready for prime time'.
 
 ## Installation
 
-To install, first clone the repository:
+QTQP is available via pip:
+
+```bash
+python -m pip install qtqp
+```
+
+To install from source, first clone the repository:
 
 ```bash
 git clone https://github.com/google-deepmind/qtqp.git
