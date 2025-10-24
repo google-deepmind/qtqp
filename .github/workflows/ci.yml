@@ -38,12 +38,11 @@ jobs:
           auto-update-conda: true
           channels: conda-forge
           channel-priority: strict
-          use-mamba: true
 
       - name: Install dependencies
         shell: bash -l {0}
         run: |
-          mamba install -y scikit-sparse
+          conda install -y -c conda-forge scikit-sparse
           pip install -U pip
           pip install qdldl pytest
           pip install -e .[test] || pip install -e .
