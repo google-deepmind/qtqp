@@ -1,7 +1,6 @@
 # QTQP
 [![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
 
-
 The cutie QP solver implements a primal-dual interior point method for solving
 convex quadratic programs (QPs). It solves primal QP problem:
 
@@ -62,7 +61,7 @@ python -m pytest .
 
 Note tests will fail for linear solvers that are not installed on your system.
 
-## Usage
+## Quick start
 
 Here is an example usage (taken from
 [here](https://www.cvxgrp.org/scs/examples/python/basic_qp.html#py-basic-qp)):
@@ -105,6 +104,87 @@ sol.x=array([ 0.29999999, -0.69999997])
 sol.y=array([2.69999964e+00, 2.09999968e+00, 3.86572055e-07])
 sol.s=array([0.00000000e+00, 7.13141634e-09, 1.99999944e-01])
 ```
+
+## API reference
+
+Once installed QTQP is imported using
+
+```python
+import qtqp
+```
+
+This exposes the main solver class `qtqp.QTQP` with constructor:
+
+```python
+QTQP(
+    *,
+    a: scipy.sparse.csc_matrix,
+    b: np.ndarray,
+    c: np.ndarray,
+    z: int,
+    p: scipy.sparse.csc_matrix | None = None,
+)
+```
+
+Arguments:
+
+-   `a`: (m×n) Constraint matrix.
+-   `b`: (m) RHS vector.
+-   `c`: (n) Cost vector.
+-   `z`: Number of equality constraints (size of the zero-cone). Must satisfy `0
+    ≤ z < m`.
+-   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
+
+This class has a single API method `solve`:
+
+```python
+solve(
+    *,
+    atol: float = 1e-7,
+    rtol: float = 1e-8,
+    atol_infeas: float = 1e-8,
+    rtol_infeas: float = 1e-9,
+    max_iter: int = 100,
+    step_size_scale: float = 0.99,
+    min_static_regularization: float = 1e-7,
+    max_iterative_refinement_steps: int = 50,
+    linear_solver_atol: float = 1e-12,
+    linear_solver_rtol: float = 1e-12,
+    linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.SCIPY,
+    verbose: bool = True,
+    equilibrate: bool = True,
+    x: np.ndarray | None = None,
+    y: np.ndarray | None = None,
+    s: np.ndarray | None = None,
+) -> qtqp.Solution
+```
+
+Key parameters:
+
+-   `atol`, `rtol`: Absolute/relative stopping tolerances for optimality.
+-   `atol_infeas`, `rtol_infeas`: Thresholds for (primal/dual) infeasibility
+    detection.
+-   `max_iter`: Iteration cap.
+-   `step_size_scale` (0,1): Scale for line search step size to stay strictly
+    interior.
+-   `min_static_regularization`: Diagonal regularization on KKT for robustness.
+-   `max_iterative_refinement_steps`, `linear_solver_atol/rtol`: Control
+    iterative refinement of the linear solve.
+-   `linear_solver`: (`qtqp.LinearSolver`) Choose the KKT solver backend (see
+    below).
+-   `verbose`: Print per-iteration table with key metrics.
+-   `equilibrate`: Scale/equilibrate data for numerical stability.
+-   `x`, `y`, `s`: Optional warm-starts (must satisfy conic interiority).
+
+This method will return a `qtqp.Solution` object, with fields:
+
+-   `x`: (n) Primal variable or certificate of unboundedness.
+-   `y`: (m) Dual variable or certificate of infeasibility.
+-   `s`: (m) Slack variable or certificate of unboundedness.
+-   `status`: (`qtqp.SolutionStatus`) One of `SOLVED`, `INFEASIBLE`,
+    `UNBOUNDED`, `FAILED`.
+-   `stats`: (list of dicts) Includes primal/dual objective, residuals, gap, mu,
+    elapsed time, etc, for each iteration.
 
 ## Linear solvers
 
@@ -209,3 +289,4 @@ either express or implied. See the licenses for the specific language governing
 permissions and limitations under those licenses.
 
 This is not an official Google product.
+
