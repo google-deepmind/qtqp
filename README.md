@@ -1,4 +1,6 @@
 # QTQP
+[![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
+
 
 The cutie QP solver implements a primal-dual interior point method for solving
 convex quadratic programs (QPs). It solves primal QP problem:
