@@ -50,6 +50,7 @@ class SolutionStatus(enum.Enum):
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
   FAILED = "failed"
+  UNFINISHED = "unfinished"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -181,7 +182,8 @@ class QTQP:
         refinement process within the linear solver.
       linear_solver_rtol (float): Relative tolerance for the iterative
         refinement process within the linear solver.
-      linear_solver (LinearSolver): The linear solver to use.
+      linear_solver (LinearSolver): The linear solver to use when solving the
+        KKT system.
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
@@ -251,7 +253,7 @@ class QTQP:
     )
 
     stats = []
-    self.m_q = np.zeros_like(self.q)
+    self.kkt_inv_q = np.zeros_like(self.q)
     self._log_header()
 
     # --- Main Iteration Loop ---
@@ -267,10 +269,10 @@ class QTQP:
       mu = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
-      # --- Step 1: Solve for M * q ---
+      # --- Step 1: Solve for KKT @ q ---
       # This is reused for both predictor and corrector parts of the step.
-      self.m_q, q_lin_sys_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.m_q
+      self.kkt_inv_q, q_lin_sys_stats = self._linear_solver.solve(
+          rhs=self.q, warm_start=self.kkt_inv_q
       )
 
       # --- Step 2: Predictor (Affine) Step ---
@@ -339,42 +341,43 @@ class QTQP:
         x, y, s = self._unequilibrate_iterates(x, y, s)
 
       # --- Termination Check (non-equilibrated values)---
-      (pres, dres, gap, pinfeas, dinfeas, stats_i) = self._compute_residuals(
-          x, y, tau, s, alpha, mu, sigma
+      stats_i = self._compute_residuals(
+          x,
+          y,
+          tau,
+          s,
+          alpha,
+          mu,
+          sigma,
+          atol,
+          rtol,
+          atol_infeas,
+          rtol_infeas,
+          q_lin_sys_stats,
+          predictor_lin_sys_stats,
+          corrector_lin_sys_stats,
       )
-      stats_i.update(
-          q_lin_sys_stats=q_lin_sys_stats,
-          predictor_lin_sys_stats=predictor_lin_sys_stats,
-          corrector_lin_sys_stats=corrector_lin_sys_stats,
-      )
-      self._log_iteration(stats_i)
       stats.append(stats_i)
-
-      # Success criteria: primal/dual residuals and gap are below tolerances
-      if (
-          gap < atol + rtol * min(abs(stats_i["pcost"]), abs(stats_i["dcost"]))
-          and pres < atol + rtol * stats_i["prelrhs"]
-          and dres < atol + rtol * stats_i["drelrhs"]
-      ):
-        self._log_footer("Solved")
-        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.SOLVED)
-
-      ctx = stats_i["ctx"]
-      if ctx < -1e-12:
-        if dinfeas < atol_infeas + rtol_infeas * _norm(x, np.inf) / abs(ctx):
-          self._log_footer("Dual infeasible / primal unbounded")
-          y.fill(np.nan)
-          return Solution(
-              x / abs(ctx), y, s / abs(ctx), stats, SolutionStatus.UNBOUNDED
-          )
-
-      bty = stats_i["bty"]
-      if bty < -1e-12:
-        if pinfeas < atol_infeas + rtol_infeas * _norm(y, np.inf) / abs(bty):
+      self._log_iteration(stats_i)
+      status = stats_i["status"]
+      match status:
+        case SolutionStatus.UNFINISHED:
+          pass
+        case SolutionStatus.SOLVED:
+          self._log_footer("Solved")
+          return Solution(x / tau, y / tau, s / tau, stats, status)
+        case SolutionStatus.INFEASIBLE:
           self._log_footer("Primal infeasible / dual unbounded")
           x.fill(np.nan)
           s.fill(np.nan)
-          return Solution(x, y / abs(bty), s, stats, SolutionStatus.INFEASIBLE)
+          return Solution(x, y / abs(self.b @ y), s, stats, status)
+        case SolutionStatus.UNBOUNDED:
+          self._log_footer("Dual infeasible / primal unbounded")
+          y.fill(np.nan)
+          abs_ctx = abs(self.c @ x)
+          return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+        case _:
+          raise ValueError(f"Unknown convergence status: {status}")
 
     self._log_footer(f"Failed to converge in {max_iter} iterations")
     return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
@@ -485,7 +488,7 @@ class QTQP:
       tau_plus = tau
 
     # Reconstruct full (x, y) step from KKT solution components
-    vec_plus = m_r - self.m_q * tau_plus
+    vec_plus = m_r - self.kkt_inv_q * tau_plus
     x_plus, y_plus = vec_plus[: self.n], vec_plus[self.n :]
 
     return x_plus, y_plus, tau_plus, lin_sys_stats
@@ -494,15 +497,15 @@ class QTQP:
     """Solves the quadratic equation for the tau step in homogeneous embedding."""
     # Solve a quadratic equation for tau: t_a * tau^2 + t_b * tau + t_c = 0
     n = self.n
-    q, m_q = self.q, self.m_q
+    q, kinv_q = self.q, self.kkt_inv_q
 
     # v = P @ [m_r_x, m_q_x]^T
-    v = self.equilibrated_p @ np.stack([m_r[:n], m_q[:n]], axis=1)
-    p_m_r, p_m_q = v[:, 0], v[:, 1]
+    v = self.equilibrated_p @ np.stack([m_r[:n], kinv_q[:n]], axis=1)
+    p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
 
-    t_a = mu + m_q @ q - m_q[:n] @ p_m_q
-    t_b = -r_tau[0] - m_r @ q + m_r[:n] @ p_m_q + m_q[:n] @ p_m_r
-    t_c = -m_r[:n] @ p_m_r - mu_target
+    t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
+    t_b = -r_tau[0] - m_r @ q + m_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
+    t_c = -m_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     # Theoretical guarantees state t_a > 0 and t_c <= 0.
@@ -530,7 +533,7 @@ class QTQP:
   def _normalize(self, x, y, tau, s):
     """Normalizes the homogeneous iterates."""
     vec_norm = np.sqrt(x @ x + y @ y + tau @ tau)
-    scale = np.sqrt(self.m - self.z + 1) / max(1e-15, vec_norm)
+    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, vec_norm)
     return x * scale, y * scale, tau * scale, s * scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
@@ -539,7 +542,23 @@ class QTQP:
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
-  def _compute_residuals(self, x, y, tau_arr, s, alpha, mu, sigma):
+  def _compute_residuals(
+      self,
+      x,
+      y,
+      tau_arr,
+      s,
+      alpha,
+      mu,
+      sigma,
+      atol,
+      rtol,
+      atol_infeas,
+      rtol_infeas,
+      q_lin_sys_stats,
+      predictor_lin_sys_stats,
+      corrector_lin_sys_stats,
+  ):
     """Compute convergence residuals and statistics."""
     tau = tau_arr[0]  # Unbox
     inv_tau = 1.0 / max(tau, _EPS)
@@ -579,7 +598,28 @@ class QTQP:
         _norm(aty, np.inf) * inv_tau,
         _norm(self.c, np.inf),
     )
-    stats = {
+    norm_x = _norm(x, np.inf)
+    norm_y = _norm(y, np.inf)
+    norm_s = _norm(s, np.inf)
+
+    if (
+        gap < atol + rtol * min(abs(pcost), abs(dcost))
+        and pres < atol + rtol * prelrhs
+        and dres < atol + rtol * drelrhs
+    ):
+      status = SolutionStatus.SOLVED
+    elif ctx < -_EPS and (
+        dinfeas < atol_infeas + rtol_infeas * norm_x / abs(ctx)
+    ):
+      status = SolutionStatus.UNBOUNDED
+    elif bty < -_EPS and (
+        pinfeas < atol_infeas + rtol_infeas * norm_y / abs(bty)
+    ):
+      status = SolutionStatus.INFEASIBLE
+    else:
+      status = SolutionStatus.UNFINISHED
+
+    return {
         "iter": self.it,
         "ctx": ctx,
         "bty": bty,
@@ -597,12 +637,17 @@ class QTQP:
         "sigma": sigma,
         "alpha": alpha,
         "tau": tau,
+        "norm_x": norm_x,
+        "norm_y": norm_y,
+        "norm_s": norm_s,
+        "status": status,
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
+        "q_lin_sys_stats": q_lin_sys_stats,
+        "predictor_lin_sys_stats": predictor_lin_sys_stats,
+        "corrector_lin_sys_stats": corrector_lin_sys_stats,
     }
-
-    return pres, dres, gap, pinfeas, dinfeas, stats
 
   def _log_header(self):
     if self.verbose:
@@ -634,3 +679,4 @@ class QTQP:
   def _log_footer(self, message: str):
     if self.verbose:
       print(f"{_SEPARA}\n| {message}")
+
