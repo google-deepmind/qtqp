@@ -3,14 +3,11 @@ name: CI
 on:
   push:
     branches: [ main, master ]
-    tags: [ 'v*' ]   # e.g. v0.1.0 triggers a release
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
 jobs:
-  # --------------------------------
-  # 1. Test across OS and Python
-  # --------------------------------
   test:
     name: Test (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -23,13 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Install Python and cache pip
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # Use conda for scikit-sparse (simpler than trying to build SuiteSparse)
       - name: Set up conda
         uses: conda-incubator/setup-miniconda@v3
         with:
@@ -43,28 +38,22 @@ jobs:
         shell: bash -l {0}
         run: |
           conda install -y -c conda-forge scikit-sparse
-          pip install -U pip
-          pip install qdldl pytest
-          pip install -e .[test] || pip install -e .
+          python -m pip install -U pip
+          python -m pip install qdldl pytest
+          python -m pip install -e .[test] || python -m pip install -e .
 
       - name: Run tests
         shell: bash -l {0}
         run: pytest -q
 
-
-  # --------------------------------
-  # 2. Build & publish on tag push
-  # --------------------------------
   build-and-publish:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [test]  # only run if tests passed everywhere
+    needs: [test]
     name: Build & Publish to PyPI
     runs-on: ubuntu-latest
-
     permissions:
-      id-token: write   # required for PyPI Trusted Publishing
+      id-token: write
       contents: read
-
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -75,7 +64,7 @@ jobs:
       - name: Build sdist and wheel
         run: |
           python -m pip install -U pip build
-          python -m build  # outputs dist/*.tar.gz and dist/*.whl
+          python -m build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -87,7 +76,6 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           print-hash: true
-          # Uncomment the next line to test uploads safely first:
           # repository-url: https://test.pypi.org/legacy/
-          # skip-existing: true   # optional if re-running tags
+          # skip-existing: true
 
