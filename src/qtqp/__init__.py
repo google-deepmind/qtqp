@@ -349,15 +349,17 @@ class QTQP:
           alpha,
           mu,
           sigma,
+          atol,
+          rtol,
+          atol_infeas,
+          rtol_infeas,
           q_lin_sys_stats,
           predictor_lin_sys_stats,
           corrector_lin_sys_stats,
       )
       stats.append(stats_i)
       self._log_iteration(stats_i)
-      status = self._has_converged(
-          stats_i, atol, rtol, atol_infeas, rtol_infeas
-      )
+      status = stats_i["status"]
       match status:
         case SolutionStatus.UNFINISHED:
           pass
@@ -379,29 +381,6 @@ class QTQP:
 
     self._log_footer(f"Failed to converge in {max_iter} iterations")
     return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
-
-  def _has_converged(self, stats, atol, rtol, atol_infeas, rtol_infeas):
-    """Checks if converged to soliution or certificate of infeasibility."""
-    if (
-        stats["gap"]
-        < atol + rtol * min(abs(stats["pcost"]), abs(stats["dcost"]))
-        and stats["pres"] < atol + rtol * stats["prelrhs"]
-        and stats["dres"] < atol + rtol * stats["drelrhs"]
-    ):
-      return SolutionStatus.SOLVED
-
-    if stats["ctx"] < -1e-12 and (
-        stats["dinfeas"]
-        < atol_infeas + rtol_infeas * stats["norm_x"] / abs(stats["ctx"])
-    ):
-      return SolutionStatus.UNBOUNDED
-
-    if stats["bty"] < -1e-12 and stats[
-        "pinfeas"
-    ] < atol_infeas + rtol_infeas * stats["norm_y"] / abs(stats["bty"]):
-      return SolutionStatus.INFEASIBLE
-
-    return SolutionStatus.UNFINISHED
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Ruiz equilibration to improve numerical conditioning."""
@@ -554,7 +533,7 @@ class QTQP:
   def _normalize(self, x, y, tau, s):
     """Normalizes the homogeneous iterates."""
     vec_norm = np.sqrt(x @ x + y @ y + tau @ tau)
-    scale = np.sqrt(self.m - self.z + 1) / max(1e-15, vec_norm)
+    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, vec_norm)
     return x * scale, y * scale, tau * scale, s * scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
@@ -572,6 +551,10 @@ class QTQP:
       alpha,
       mu,
       sigma,
+      atol,
+      rtol,
+      atol_infeas,
+      rtol_infeas,
       q_lin_sys_stats,
       predictor_lin_sys_stats,
       corrector_lin_sys_stats,
@@ -615,6 +598,27 @@ class QTQP:
         _norm(aty, np.inf) * inv_tau,
         _norm(self.c, np.inf),
     )
+    norm_x = _norm(x, np.inf)
+    norm_y = _norm(y, np.inf)
+    norm_s = _norm(s, np.inf)
+
+    if (
+        gap < atol + rtol * min(abs(pcost), abs(dcost))
+        and pres < atol + rtol * prelrhs
+        and dres < atol + rtol * drelrhs
+    ):
+      status = SolutionStatus.SOLVED
+    elif ctx < -_EPS and (
+        dinfeas < atol_infeas + rtol_infeas * norm_x / abs(ctx)
+    ):
+      status = SolutionStatus.UNBOUNDED
+    elif bty < -_EPS and (
+        pinfeas < atol_infeas + rtol_infeas * norm_y / abs(bty)
+    ):
+      status = SolutionStatus.INFEASIBLE
+    else:
+      status = SolutionStatus.UNFINISHED
+
     return {
         "iter": self.it,
         "ctx": ctx,
@@ -633,9 +637,10 @@ class QTQP:
         "sigma": sigma,
         "alpha": alpha,
         "tau": tau,
-        "norm_x": _norm(x, np.inf),
-        "norm_y": _norm(y, np.inf),
-        "norm_s": _norm(s, np.inf),
+        "norm_x": norm_x,
+        "norm_y": norm_y,
+        "norm_s": norm_s,
+        "status": status,
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
