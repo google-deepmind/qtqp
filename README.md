@@ -194,8 +194,8 @@ to the `solve` method via the `linear_solver` arg. By default
 `linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
 However, this may not be the fastest option. QTQP supports several other linear
 solvers that may be faster or more reliable for your problem. The enum
-`qtqp.LinearSolver` contains options `SCIPY`, `PARDISO`, `QDLDL`, `CHOLMOD`,
-`CUDSS`, corresponding to the following backend solvers.
+`qtqp.LinearSolver` contains options `SCIPY`, `PARDISO`, `EIGEN`, `QDLDL`,
+`CHOLMOD`, `CUDSS`, corresponding to the following backend solvers.
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
@@ -204,6 +204,14 @@ install
 
 ```bash
 conda install pydiso --channel conda-forge
+```
+
+#### Eigen: `qtqp.LinearSolver.EIGEN`
+
+Available via EigenPy. To install
+
+```bash
+conda install eigenpy -c conda-forge
 ```
 
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
