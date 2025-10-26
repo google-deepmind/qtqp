@@ -33,26 +33,20 @@ class LinearSolver(Protocol):
     ...
 
   def format(self) -> str:
-    """Returns the expected sparse matrix format ('csc' or 'csr')."""
+    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
     ...
 
 
 class MklPardisoSolver(LinearSolver):
-  """Wrapper around pydiso.mkl_solver.MKLPardisoSolver.
-
-  Provides an interface to the MKL Pardiso solver for symmetric indefinite
-  matrices.
-  """
+  """Wrapper around pydiso.mkl_solver.MKLPardisoSolver."""
 
   def __init__(self):
-    """Initializes the MklPardisoSolver."""
     import pydiso.mkl_solver  # pylint: disable=g-import-not-at-top
 
     self.module = pydiso.mkl_solver
     self.factorization: self.module.MKLPardisoSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or refactorizes the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.MKLPardisoSolver(
           kkt, matrix_type="real_symmetric_indefinite"
@@ -61,11 +55,9 @@ class MklPardisoSolver(LinearSolver):
       self.factorization.refactor(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csr"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csr"
 
 
@@ -73,25 +65,21 @@ class QdldlSolver(LinearSolver):
   """Wrapper around qdldl.Solver for quasi-definite LDL factorization."""
 
   def __init__(self):
-    """Initializes the QdldlSolver."""
     import qdldl  # pylint: disable=g-import-not-at-top
 
     self.module = qdldl
-    self.factorization: self.module.Solver | None = None
+    self.factorization: qdldl.Solver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or updates the factorization of the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.Solver(kkt)
     else:
       self.factorization.update(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csc"
 
 
@@ -102,16 +90,13 @@ class ScipySolver(LinearSolver):
     self.factorization = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes the KKT matrix."""
     # Use to_csc() to ensure correct format, though usually it's a cheap view.
     self.factorization = sp.linalg.factorized(kkt.tocsc())
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csc"
 
 
@@ -119,25 +104,21 @@ class CholModSolver(LinearSolver):
   """Wrapper around sksparse.cholmod for Cholesky LDLt factorization."""
 
   def __init__(self):
-    """Initializes the CholModSolver."""
     from sksparse import cholmod  # pylint: disable=g-import-not-at-top
 
     self.module = cholmod
-    self.factorization: self.module.CholeskyFactor | None = None
+    self.factorization: cholmod.CholeskyFactor | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes or updates the factorization of the KKT matrix."""
     if self.factorization is None:
       self.factorization = self.module.cholesky(kkt, mode="simplicial")
     else:
       self.factorization.cholesky_inplace(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csc"
 
 
@@ -145,14 +126,12 @@ class EigenSolver(LinearSolver):
   """Wrapper around Eigen Simplicial LDL^T."""
 
   def __init__(self):
-    """Initializes the EigenSolver."""
     import eigenpy  # pylint: disable=g-import-not-at-top
 
     self.module = eigenpy
     self.solver: eigenpy.SimplicialLDLT | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes the KKT matrix and stores the factorization."""
     if self.solver is None:
       self.solver = self.module.SimplicialLDLT()
       self.solver.analyzePattern(kkt)
@@ -160,11 +139,9 @@ class EigenSolver(LinearSolver):
     self.solver.factorize(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     return self.solver.solve(rhs)
 
   def format(self) -> Literal["csc"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csc"
 
 
@@ -172,14 +149,12 @@ class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
 
   def __init__(self):
-    """Initializes the CuDssSolver."""
     import nvmath.sparse  # pylint: disable=g-import-not-at-top
 
     self.module = nvmath.sparse
-    self.solver: self.module.advanced.DirectSolver | None = None
+    self.solver: nvmath.sparse.advanced.DirectSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    """Factorizes the KKT matrix and stores the factorization."""
     if self.solver is None:
       sparse_system_type = self.module.advanced.DirectSolverMatrixType.SYMMETRIC
       # Turn off annoying logs by default.
@@ -200,14 +175,12 @@ class CuDssSolver(LinearSolver):
     self.solver.factorize()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     # Ensure RHS is Fortran contiguous for cuDSS expected input format
     rhs_fortran = np.asfortranarray(rhs, dtype=np.float64)
     self.solver.reset_operands(b=rhs_fortran)
     return self.solver.solve()
 
   def format(self) -> Literal["csr"]:
-    """Returns the sparse matrix format expected by the solver."""
     return "csr"
 
   def __del__(self):
