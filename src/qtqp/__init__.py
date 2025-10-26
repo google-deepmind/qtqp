@@ -259,8 +259,7 @@ class QTQP:
     self._log_header()
 
     # --- Main Iteration Loop ---
-    for it in range(max_iter):
-      self.it = it
+    for self.it in range(max_iter):
       stats_i = {}
 
       if equilibrate:
