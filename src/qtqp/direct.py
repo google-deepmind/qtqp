@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 """Direct KKT linear system solvers."""
 
 import logging
@@ -136,6 +135,33 @@ class CholModSolver(LinearSolver):
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     """Solves the linear system using the factorized KKT matrix."""
     return self.factorization(rhs)
+
+  def format(self) -> Literal["csc"]:
+    """Returns the sparse matrix format expected by the solver."""
+    return "csc"
+
+
+class EigenSolver(LinearSolver):
+  """Wrapper around Eigen Simplicial LDL^T."""
+
+  def __init__(self):
+    """Initializes the EigenSolver."""
+    import eigenpy  # pylint: disable=g-import-not-at-top
+
+    self.module = eigenpy
+    self.solver: eigenpy.SimplicialLDLT | None = None
+
+  def update(self, kkt: sp.spmatrix):
+    """Factorizes the KKT matrix and stores the factorization."""
+    if self.solver is None:
+      self.solver = self.module.SimplicialLDLT()
+      self.solver.analyzePattern(kkt)
+
+    self.solver.factorize(kkt)
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the linear system using the factorized KKT matrix."""
+    return self.solver.solve(rhs)
 
   def format(self) -> Literal["csc"]:
     """Returns the sparse matrix format expected by the solver."""
@@ -369,3 +395,4 @@ class DirectKktSolver:
         "final_residual_norm": residual_norm,
         "status": status,
     }
+

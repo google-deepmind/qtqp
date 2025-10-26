@@ -26,6 +26,7 @@ _SOLVERS = [
     # qtqp.LinearSolver.PARDISO,
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
+    qtqp.LinearSolver.EIGEN,
     # Requires GPU:
     # qtqp.LinearSolver.CUDSS,
 ]
