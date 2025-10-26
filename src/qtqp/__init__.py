@@ -195,8 +195,10 @@ class QTQP:
       A Solution object containing the solution and solve stats.
     """
     self.start_time = timeit.default_timer()
+    self.atol, self.rtol = atol, rtol
+    self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
-    if self.verbose:
+    if verbose:
       print(
           f"| QTQP v{__version__}:"
           f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
@@ -259,6 +261,7 @@ class QTQP:
     # --- Main Iteration Loop ---
     for it in range(max_iter):
       self.it = it
+      stats_i = {}
 
       if equilibrate:
         x, y, s = self._equilibrate_iterates(x, y, s)
@@ -274,6 +277,7 @@ class QTQP:
       self.kkt_inv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kkt_inv_q
       )
+      stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -287,6 +291,7 @@ class QTQP:
           tau=tau,
           cone_correction=None,
       )
+      stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       d_s_p = np.zeros(self.m)
@@ -312,6 +317,7 @@ class QTQP:
           tau=tau,
           cone_correction=cone_correction,
       )
+      stats_i.update(corrector_lin_sys_stats=corrector_lin_sys_stats)
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
@@ -341,25 +347,9 @@ class QTQP:
         x, y, s = self._unequilibrate_iterates(x, y, s)
 
       # --- Termination Check (non-equilibrated values)---
-      stats_i = self._compute_residuals(
-          x,
-          y,
-          tau,
-          s,
-          alpha,
-          mu,
-          sigma,
-          atol,
-          rtol,
-          atol_infeas,
-          rtol_infeas,
-          q_lin_sys_stats,
-          predictor_lin_sys_stats,
-          corrector_lin_sys_stats,
-      )
-      stats.append(stats_i)
+      status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i)
       self._log_iteration(stats_i)
-      status = stats_i["status"]
+      stats.append(stats_i)
       match status:
         case SolutionStatus.UNFINISHED:
           pass
@@ -542,24 +532,8 @@ class QTQP:
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
-  def _compute_residuals(
-      self,
-      x,
-      y,
-      tau_arr,
-      s,
-      alpha,
-      mu,
-      sigma,
-      atol,
-      rtol,
-      atol_infeas,
-      rtol_infeas,
-      q_lin_sys_stats,
-      predictor_lin_sys_stats,
-      corrector_lin_sys_stats,
-  ):
-    """Compute convergence residuals and statistics."""
+  def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
+    """Check termination criteria and compute iteration statistics."""
     tau = tau_arr[0]  # Unbox
     inv_tau = 1.0 / max(tau, _EPS)
 
@@ -603,23 +577,23 @@ class QTQP:
     norm_s = _norm(s, np.inf)
 
     if (
-        gap < atol + rtol * min(abs(pcost), abs(dcost))
-        and pres < atol + rtol * prelrhs
-        and dres < atol + rtol * drelrhs
+        gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
+        and pres < self.atol + self.rtol * prelrhs
+        and dres < self.atol + self.rtol * drelrhs
     ):
       status = SolutionStatus.SOLVED
     elif ctx < -_EPS and (
-        dinfeas < atol_infeas + rtol_infeas * norm_x / abs(ctx)
+        dinfeas < self.atol_infeas + self.rtol_infeas * norm_x / abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
     elif bty < -_EPS and (
-        pinfeas < atol_infeas + rtol_infeas * norm_y / abs(bty)
+        pinfeas < self.atol_infeas + self.rtol_infeas * norm_y / abs(bty)
     ):
       status = SolutionStatus.INFEASIBLE
     else:
       status = SolutionStatus.UNFINISHED
 
-    return {
+    stats_i.update({
         "iter": self.it,
         "ctx": ctx,
         "bty": bty,
@@ -644,36 +618,34 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
-        "q_lin_sys_stats": q_lin_sys_stats,
-        "predictor_lin_sys_stats": predictor_lin_sys_stats,
-        "corrector_lin_sys_stats": corrector_lin_sys_stats,
-    }
+    })
+    return status
 
   def _log_header(self):
     if self.verbose:
       print(f"{_SEPARA}\n{_HEADER}\n{_SEPARA}")
 
-  def _log_iteration(self, result: Dict[str, Any]):
+  def _log_iteration(self, stats_i: Dict[str, Any]):
     """Logs the iteration stats."""
     if not self.verbose:
       return
-    infeas = min(result["pinfeas"], result["dinfeas"])
+    infeas = min(stats_i["pinfeas"], stats_i["dinfeas"])
 
     # Parser for linear solver stats (handles stalled/failed sub-solves)
     def parse_ls(d):
       return " *" if d.get("status") == "stalled" else f"{d.get('solves', 0):2}"
 
     solves = (
-        f"{parse_ls(result['q_lin_sys_stats'])},"
-        f"{parse_ls(result['predictor_lin_sys_stats'])},"
-        f"{parse_ls(result['corrector_lin_sys_stats'])}"
+        f"{parse_ls(stats_i['q_lin_sys_stats'])},"
+        f"{parse_ls(stats_i['predictor_lin_sys_stats'])},"
+        f"{parse_ls(stats_i['corrector_lin_sys_stats'])}"
     )
     print(
-        f"| {result['iter']:>4} | {result['pcost']:>10.3e} |"
-        f" {result['dcost']:>10.3e} | {result['pres']:>8.2e} |"
-        f" {result['dres']:>8.2e} | {result['gap']:>8.2e} |"
-        f" {infeas:>8.2e} | {result['mu']:>8.2e} | {result['sigma']:>8.2e} |"
-        f" {result['alpha']:>8.2e} | {solves:>8} | {result['time']:>8.2e} |"
+        f"| {stats_i['iter']:>4} | {stats_i['pcost']:>10.3e} |"
+        f" {stats_i['dcost']:>10.3e} | {stats_i['pres']:>8.2e} |"
+        f" {stats_i['dres']:>8.2e} | {stats_i['gap']:>8.2e} |"
+        f" {infeas:>8.2e} | {stats_i['mu']:>8.2e} | {stats_i['sigma']:>8.2e} |"
+        f" {stats_i['alpha']:>8.2e} | {solves:>8} | {stats_i['time']:>8.2e} |"
     )
 
   def _log_footer(self, message: str):
