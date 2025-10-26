@@ -44,7 +44,10 @@ jobs:
 
       - name: Run tests
         shell: bash -l {0}
-        run: pytest -q
+        run: |
+          pytest -q
+          # Run one test verbose to see logging.
+          pytest -s tests/test_qtqp.py::test_solve[LinearSolver.SCIPY-seed0-True]
 
   build-and-publish:
     if: startsWith(github.ref, 'refs/tags/')
