@@ -41,6 +41,7 @@ class LinearSolver(enum.Enum):
   QDLDL = direct.QdldlSolver
   CHOLMOD = direct.CholModSolver
   CUDSS = direct.CuDssSolver
+  EIGEN = direct.EigenSolver
 
 
 class SolutionStatus(enum.Enum):
