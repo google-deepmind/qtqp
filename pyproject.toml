@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qtqp"
-version = "0.0.1"
+version = "0.0.2"
 description = "The 'cutie' QP solver."
 readme = "README.md"
 license = { file = "LICENSE" }
