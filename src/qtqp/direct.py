@@ -144,6 +144,26 @@ class EigenSolver(LinearSolver):
   def format(self) -> Literal["csc"]:
     return "csc"
 
+class MumpsSolver(LinearSolver):
+  """Wrapper around MUMPS linear solver."""
+
+  def __init__(self):
+    import mumps  # pylint: disable=g-import-not-at-top
+
+    self.solver = mumps.Context()
+
+  def update(self, kkt: sp.spmatrix):
+    # The first call will have self.solver.analyzed = False, triggering a full
+    # analysis. Subsequent calls will set reuse_analysis=True.
+    self.solver.factor(kkt, reuse_analysis=self.solver.analyzed)
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    return self.solver.solve(rhs)
+
+  def format(self) -> Literal["coo"]:
+    # python-mumps documentation states COO is best for performance.
+    return "coo"
+
 
 class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""

@@ -214,6 +214,14 @@ Available via EigenPy. To install
 conda install eigenpy -c conda-forge
 ```
 
+#### MUMPS: `qtqp.LinearSolver.MUMPS`
+
+Available via python-mumps. To install
+
+```bash
+conda install python-mumps -c conda-forge
+```
+
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
 
 To install QDLDL
