@@ -39,7 +39,7 @@ jobs:
         run: |
           conda install -y -c conda-forge scikit-sparse
           conda install -y -c conda-forge eigenpy
-          conda install -y -c conda-forge pydiso
+          conda install -y -c conda-forge mkl-devel pydiso
           python -m pip install -U pip
           python -m pip install qdldl pytest
           python -m pip install -e .[test] || python -m pip install -e .
