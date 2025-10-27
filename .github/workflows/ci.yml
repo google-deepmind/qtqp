@@ -47,7 +47,7 @@ jobs:
       - name: Run tests
         shell: bash -l {0}
         run: |
-          pytest -q
+          pytest -s
           # Run one test verbose to see logging.
           pytest -s tests/test_qtqp.py::test_solve[LinearSolver.SCIPY-seed0-True]
 
