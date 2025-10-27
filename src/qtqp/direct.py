@@ -55,7 +55,7 @@ class MklPardisoSolver(LinearSolver):
       # https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-2/pardiso-iparm-parameter.html
       self.factorization.set_iparm(10, 1)
       self.factorization.set_iparm(12, 1)
-      self.factorization.set_iparm(7, 1)
+      # self.factorization.set_iparm(7, 1)
 
     else:
       self.factorization.refactor(kkt)
