@@ -49,7 +49,7 @@ class MklPardisoSolver(LinearSolver):
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
       self.factorization = self.module.MKLPardisoSolver(
-          kkt, matrix_type="real_symmetric_indefinite"
+          kkt, matrix_type="real_symmetric_indefinite", verbose=True
       )
     else:
       self.factorization.refactor(kkt)
