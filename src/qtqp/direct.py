@@ -60,7 +60,6 @@ class MklPardisoSolver(LinearSolver):
       self.factorization.refactor(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system using the factorized KKT matrix."""
     try:
       return self.factorization.solve(rhs)
     except self.module.PardisoError as e:
