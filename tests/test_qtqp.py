@@ -15,6 +15,7 @@
 
 """Tests for QTQP solver."""
 
+import sys
 import numpy as np
 import pytest
 import qtqp
@@ -22,14 +23,16 @@ from scipy import sparse
 
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
-    # Some tests fail with PARDISO due to numerical issues.
-    # qtqp.LinearSolver.PARDISO,
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
     # Requires GPU:
     # qtqp.LinearSolver.CUDSS,
 ]
+
+# Only run PARDISO on linux for now.
+if sys.platform.startswith("linux"):
+  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 
 
 def _gen_feasible(m, n, z, random_state=None):

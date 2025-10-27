@@ -34,6 +34,12 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
+      # MKL Pardiso not available on MacOS and failing on Windows.
+      - name: Install MKL Pardiso (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash -l {0}
+        run: conda install -y -c conda-forge pydiso
+
       - name: Install dependencies
         shell: bash -l {0}
         run: |
