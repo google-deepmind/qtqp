@@ -49,7 +49,7 @@ class MklPardisoSolver(LinearSolver):
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
       self.factorization = self.module.MKLPardisoSolver(
-          kkt, matrix_type="real_symmetric_indefinite", verbose=True
+          kkt, matrix_type="real_symmetric_indefinite"
       )
       # Recommended iparms for IPMs from Pardiso docs.
       # https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-2/pardiso-iparm-parameter.html
