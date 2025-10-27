@@ -44,7 +44,7 @@ class MklPardisoSolver(LinearSolver):
     import pydiso.mkl_solver  # pylint: disable=g-import-not-at-top
 
     self.module = pydiso.mkl_solver
-    self.factorization: self.module.MKLPardisoSolver | None = None
+    self.factorization: pydiso.mkl_sovler.MKLPardisoSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
@@ -52,22 +52,22 @@ class MklPardisoSolver(LinearSolver):
           kkt, matrix_type="real_symmetric_indefinite"
       )
       # Recommended iparms for IPMs from Pardiso docs.
-      # https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-2/pardiso-iparm-parameter.html
+      # These only affect the analysis step so should be set before __init__,
+      # but this is not currently possible with the current interface.
       self.factorization.set_iparm(10, 1)
       self.factorization.set_iparm(12, 1)
-      # self.factorization.set_iparm(7, 1)
-
     else:
       self.factorization.refactor(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the linear system using the factorized KKT matrix."""
     try:
       return self.factorization.solve(rhs)
     except self.module.PardisoError as e:
-      print(e)
-      print('try again')
-      self.factorization._analyze()
-      self.factorization._factor()
+      print(f"PardisoError: {e}")
+      print("Performing the permutation and factorization steps again.")
+      self.factorization._analyze()  # pylint: disable=protected-access
+      self.factorization._factor()  # pylint: disable=protected-access
       return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csr"]:
