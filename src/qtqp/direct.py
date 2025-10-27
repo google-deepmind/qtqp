@@ -61,7 +61,14 @@ class MklPardisoSolver(LinearSolver):
       self.factorization.refactor(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization.solve(rhs)
+    try:
+      return self.factorization.solve(rhs)
+    except self.module.PardisoError as e:
+      print(e)
+      print('try again')
+      self.factorization._analyze()
+      self.factorization._factor()
+      return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csr"]:
     return "csr"
