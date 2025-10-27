@@ -23,7 +23,7 @@ from scipy import sparse
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
     # Some tests fail with PARDISO due to numerical issues.
-    # qtqp.LinearSolver.PARDISO,
+    qtqp.LinearSolver.PARDISO,
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
