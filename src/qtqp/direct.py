@@ -138,10 +138,10 @@ class EigenSolver(LinearSolver):
   """Wrapper around Eigen Simplicial LDL^T."""
 
   def __init__(self):
-    import eigenpy  # pylint: disable=g-import-not-at-top
+    import nanoeigenpy # pylint: disable=g-import-not-at-top
 
-    self.module = eigenpy
-    self.solver: eigenpy.SimplicialLDLT | None = None
+    self.module = nanoeigenpy
+    self.solver: nanoeigenpy.SimplicialLDLT | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.solver is None:
