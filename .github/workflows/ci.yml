@@ -34,12 +34,18 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
+      # MKL Pardiso not available on MacOS and failing on Windows.
+      - name: Install MKL Pardiso (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash -l {0}
+        run: conda install -y -c conda-forge pydiso
+
       - name: Install dependencies
         shell: bash -l {0}
         run: |
           conda install -y -c conda-forge scikit-sparse
-          conda install -y -c conda-forge eigenpy
-          conda install -y -c conda-forge python-mumps
+          conda install -y -c conda-forge petsc4py
+          conda install -y -c conda-forge nanoeigenpy
           python -m pip install -U pip
           python -m pip install qdldl pytest
           python -m pip install -e .[test] || python -m pip install -e .
@@ -72,7 +78,7 @@ jobs:
           python -m build
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/*

@@ -208,10 +208,10 @@ conda install pydiso --channel conda-forge
 
 #### Eigen: `qtqp.LinearSolver.EIGEN`
 
-Available via EigenPy. To install
+Available via nanoeigenpy. To install
 
 ```bash
-conda install eigenpy -c conda-forge
+conda install nanoeigenpy -c conda-forge
 ```
 
 #### MUMPS: `qtqp.LinearSolver.MUMPS`
