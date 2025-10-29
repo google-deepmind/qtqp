@@ -189,7 +189,12 @@ class MumpsSolver(LinearSolver):
     else:
       flag = self.module.Mat.Structure.DIFFERENT_NONZERO_PATTERN
 
-    self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
+    try:
+      self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
+    except TypeError:
+      # Fallback for older petsc4py API; usually auto-detects reuse
+      self.ksp.setOperators(kkt_wrapper, kkt_wrapper)
+
     # Force factorization (symbolic first time, numeric every time)
     self.ksp.setUp()
 
