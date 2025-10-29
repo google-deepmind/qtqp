@@ -216,10 +216,10 @@ conda install nanoeigenpy -c conda-forge
 
 #### MUMPS: `qtqp.LinearSolver.MUMPS`
 
-Available via python-mumps. To install
+Available via petsc4py. To install
 
 ```bash
-conda install python-mumps -c conda-forge
+conda install petsc4py -c conda-forge
 ```
 
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
