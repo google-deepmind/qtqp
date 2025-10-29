@@ -157,6 +157,57 @@ class EigenSolver(LinearSolver):
     return "csc"
 
 
+class MumpsSolver(LinearSolver):
+  """Wrapper for MUMPS solver (via petsc4py)."""
+
+  def __init__(self):
+    import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
+
+    self.module = petsc4py.PETSc
+    self.ksp = self.module.KSP().create()
+
+    # Configure as a direct solver (apply preconditioner only)
+    self.ksp.setType(self.module.KSP.Type.PREONLY)
+    self.ksp.getPC().setType(self.module.PC.Type.LU)
+    self.ksp.getPC().setFactorSolverType("mumps")
+
+    # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
+    self.ksp.setFromOptions()
+
+  def update(self, kkt: sp.spmatrix):
+    kkt_wrapper = self.module.Mat().createAIJ(
+        size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
+    )
+    kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
+    kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
+    kkt_wrapper.assemble()
+
+    # Check if KSP already has a matrix defined to determine the flag
+    already_factorized = self.ksp.getOperators()[0] is not None
+    if already_factorized:
+      flag = self.module.Mat.Structure.SAME_NONZERO_PATTERN
+    else:
+      flag = self.module.Mat.Structure.DIFFERENT_NONZERO_PATTERN
+
+    try:
+      self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
+    except TypeError:
+      # Fallback for older petsc4py API; usually auto-detects reuse
+      self.ksp.setOperators(kkt_wrapper, kkt_wrapper)
+
+    # Force factorization (symbolic first time, numeric every time)
+    self.ksp.setUp()
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    b = self.module.Vec().createWithArray(rhs.ravel())
+    x = self.module.Vec().createSeq(rhs.size)
+    self.ksp.solve(b, x)
+    return x.getArray().reshape(rhs.shape)
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
+
+
 class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
 

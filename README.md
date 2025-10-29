@@ -214,6 +214,14 @@ Available via nanoeigenpy. To install
 conda install nanoeigenpy -c conda-forge
 ```
 
+#### MUMPS: `qtqp.LinearSolver.MUMPS`
+
+Available via petsc4py. To install
+
+```bash
+conda install petsc4py -c conda-forge
+```
+
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
 
 To install QDLDL
