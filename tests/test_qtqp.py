@@ -26,14 +26,17 @@ _SOLVERS = [
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
-    qtqp.LinearSolver.MUMPS,
     # Requires GPU:
     # qtqp.LinearSolver.CUDSS,
 ]
 
 # Only run PARDISO on linux for now.
-if sys.platform.startswith("linux"):
+if sys.platform.startswith('linux'):
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+
+# Petsc4py not available on windows
+if not sys.platform.startswith('win32'):
+  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
 
 
 def _gen_feasible(m, n, z, random_state=None):

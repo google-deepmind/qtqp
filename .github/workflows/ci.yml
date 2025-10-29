@@ -40,11 +40,16 @@ jobs:
         shell: bash -l {0}
         run: conda install -y -c conda-forge pydiso
 
+      # Petsc4py is not available on Windows
+      - name: Install POSIX-only dependencies
+        if: matrix.os != 'windows-latest'
+        shell: bash -l {0}
+        run: conda install -y -c conda-forge petsc4py
+
       - name: Install dependencies
         shell: bash -l {0}
         run: |
           conda install -y -c conda-forge scikit-sparse
-          conda install -y -c conda-forge petsc4py
           conda install -y -c conda-forge nanoeigenpy
           python -m pip install -U pip
           python -m pip install qdldl pytest
