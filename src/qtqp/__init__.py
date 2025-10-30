@@ -140,9 +140,6 @@ class QTQP:
         )
       self.p = p
 
-    # Internal buffers
-    self._r_buffer = np.zeros(self.n + self.m)
-
   def solve(
       self,
       *,
@@ -239,15 +236,15 @@ class QTQP:
       raise ValueError("Initial s has nonzero values in the zero cone.")
 
     if equilibrate:
-      a, self.equilibrated_p, b, c, self.d, self.e = self._equilibrate()
-      self.q = np.concatenate([c, b])
+      a, p, b, c, self.d, self.e = self._equilibrate()
     else:
-      a, self.equilibrated_p = self.a, self.p
-      self.q = np.concatenate([self.c, self.b])
+      a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+
+    self.q = np.concatenate([c, b])
 
     self._linear_solver = direct.DirectKktSolver(
         a=a,
-        p=self.equilibrated_p,
+        p=p,
         z=self.z,
         min_static_regularization=min_static_regularization,
         max_iterative_refinement_steps=max_iterative_refinement_steps,
@@ -257,7 +254,7 @@ class QTQP:
     )
 
     stats = []
-    self.kkt_inv_q = np.zeros_like(self.q)
+    self.k_inv_q = np.zeros_like(self.q)  # Initialize for warm-start.
     self._log_header()
 
     # --- Main Iteration Loop ---
@@ -275,22 +272,23 @@ class QTQP:
 
       # --- Step 1: Solve for KKT @ q ---
       # This is reused for both predictor and corrector parts of the step.
-      self.kkt_inv_q, q_lin_sys_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.kkt_inv_q
+      self.k_inv_q, q_lin_sys_stats = self._linear_solver.solve(
+          rhs=self.q, warm_start=self.k_inv_q
       )
       stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
       x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
+          p=p,
           mu=mu,
           mu_target=0.0,
-          rhs_anchor=np.concatenate([x, y]),
+          r_anchor=np.concatenate([x, y]),
           tau_anchor=tau,
           y=y,
           s=s,
           tau=tau,
-          cone_correction=None,
+          correction=None,
       )
       stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
@@ -305,18 +303,18 @@ class QTQP:
       )
 
       # --- Step 3: Corrector Step ---
-      # Mehrotra correction term handles nonlinearity in complementarity.
-      cone_correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
-
+      # Mehrotra correction term handles extra nonlinearity in complementarity.
+      correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
+          p=p,
           mu=mu,
           mu_target=sigma * mu,
-          rhs_anchor=np.concatenate([x_p, y_p]),
+          r_anchor=np.concatenate([x_p, y_p]),
           tau_anchor=tau_p,
           y=y,
           s=s,
           tau=tau,
-          cone_correction=cone_correction,
+          correction=correction,
       )
       stats_i.update(corrector_lin_sys_stats=corrector_lin_sys_stats)
 
@@ -325,7 +323,7 @@ class QTQP:
       d_s = np.zeros(self.m)
       d_s[self.z :] = (
           sigma * mu / y[self.z :]
-          + cone_correction
+          + correction
           - y_c[self.z :] * s[self.z :] / y[self.z :]
       )
 
@@ -339,7 +337,6 @@ class QTQP:
       )
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
-      # 1e-30 is a safe small number that is >> 0 but << tolerances.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = np.maximum(tau, 1e-30)
@@ -448,55 +445,49 @@ class QTQP:
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
-      self, *, mu, mu_target, rhs_anchor, tau_anchor, y, s, tau, cone_correction
+      self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
     """Computes a search direction by solving the augmented KKT system."""
     # Prepare RHS for the linear system.
-    # r = [0, ..., 0, rhs_cone] + (mu - mu_target) * rhs_anchor
-    # We use a preallocated buffer to avoid repeated concatenation.
-    self._r_buffer.fill(0.0)
+    r_cone = mu_target / y[self.z :] + s[self.z :]
+    if correction is not None:
+      r_cone += correction
 
-    rhs_cone = mu_target / y[self.z :] + s[self.z :]
-    if cone_correction is not None:
-      rhs_cone += cone_correction
+    r = np.zeros(self.m + self.n)
+    r[self.n + self.z :] = r_cone
+    r += (mu - mu_target) * r_anchor
 
-    self._r_buffer[self.n + self.z :] = rhs_cone
-    self._r_buffer += (mu - mu_target) * rhs_anchor
-
-    m_r, lin_sys_stats = self._linear_solver.solve(
-        rhs=self._r_buffer,
-        warm_start=rhs_anchor,
+    kinv_r, lin_sys_stats = self._linear_solver.solve(
+        rhs=r,
+        warm_start=r_anchor,
     )
 
     # Solve the 1D quadratic equation for the homogeneous tau component
     try:
-      tau_plus = self._solve_for_tau(
-          m_r, mu, mu_target, (mu - mu_target) * tau_anchor
-      )
+      r_tau = (mu - mu_target) * tau_anchor
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
     # Reconstruct full (x, y) step from KKT solution components
-    vec_plus = m_r - self.kkt_inv_q * tau_plus
+    vec_plus = kinv_r - self.k_inv_q * tau_plus
     x_plus, y_plus = vec_plus[: self.n], vec_plus[self.n :]
-
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, m_r, mu, mu_target, r_tau) -> np.ndarray:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
     """Solves the quadratic equation for the tau step in homogeneous embedding."""
     # Solve a quadratic equation for tau: t_a * tau^2 + t_b * tau + t_c = 0
     n = self.n
-    q, kinv_q = self.q, self.kkt_inv_q
+    q, kinv_q = self.q, self.k_inv_q
 
-    # v = P @ [m_r_x, m_q_x]^T
-    v = self.equilibrated_p @ np.stack([m_r[:n], kinv_q[:n]], axis=1)
+    v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
     p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
 
     t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
-    t_b = -r_tau[0] - m_r @ q + m_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-    t_c = -m_r[:n] @ p_kinv_r - mu_target
+    t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
+    t_c = -kinv_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     # Theoretical guarantees state t_a > 0 and t_c <= 0.
@@ -522,7 +513,7 @@ class QTQP:
     return np.array([max(0.0, tau_sol)])
 
   def _normalize(self, x, y, tau, s):
-    """Normalizes the homogeneous iterates."""
+    """Normalizes iterates to have norm as determined by central path."""
     vec_norm = np.sqrt(x @ x + y @ y + tau @ tau)
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, vec_norm)
     return x * scale, y * scale, tau * scale, s * scale
@@ -535,8 +526,7 @@ class QTQP:
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
-    tau = tau_arr[0]  # Unbox
-    inv_tau = 1.0 / max(tau, _EPS)
+    inv_tau = 1.0 / max(tau_arr[0], _EPS)
 
     # Precompute commonly used matrix-vector products
     ax = self.a @ x
@@ -546,7 +536,7 @@ class QTQP:
     ctx = self.c @ x
     bty = self.b @ y
 
-    # Unscaled costs
+    # Costs
     pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
     dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
 
@@ -561,18 +551,21 @@ class QTQP:
     dinfeas_p = _norm(px, np.inf) / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     pinfeas = _norm(aty, np.inf) / (abs(bty) + _EPS)
-    # Primal residual check relative scale.
+
+    # Primal residual tolearance relative scale.
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
         _norm(s, np.inf) * inv_tau,
         _norm(self.b, np.inf),
     )
-    # Dual residual check relative scale.
+
+    # Dual residual tolearance relative scale.
     drelrhs = max(
         _norm(px, np.inf) * inv_tau,
         _norm(aty, np.inf) * inv_tau,
         _norm(self.c, np.inf),
     )
+
     norm_x = _norm(x, np.inf)
     norm_y = _norm(y, np.inf)
     norm_s = _norm(s, np.inf)
@@ -611,7 +604,7 @@ class QTQP:
         "mu": mu,
         "sigma": sigma,
         "alpha": alpha,
-        "tau": tau,
+        "tau": tau_arr[0],
         "norm_x": norm_x,
         "norm_y": norm_y,
         "norm_s": norm_s,
@@ -652,4 +645,3 @@ class QTQP:
   def _log_footer(self, message: str):
     if self.verbose:
       print(f"{_SEPARA}\n| {message}")
-
