@@ -2,8 +2,9 @@
 
 [![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
 
-The cutie QP solver implements a primal-dual interior point method for solving
-convex quadratic programs (QPs). It solves primal QP problem:
+The cutie QP solver is a primal-dual interior point method for solving
+convex quadratic programs (QPs), implemented in pure python. It solves
+primal QP problem:
 
 ```
     min. (1/2) x.T @ p @ x + c.T @ x
@@ -132,8 +133,8 @@ Arguments:
 -   `a`: (m×n) Constraint matrix.
 -   `b`: (m) RHS vector.
 -   `c`: (n) Cost vector.
--   `z`: Number of equality constraints (size of the zero-cone). Must satisfy `0
-    ≤ z < m`.
+-   `z`: Number of equality constraints (size of the zero cone). Must satisfy
+    `0 ≤ z < m`.
 -   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
 
 This class has a single API method `solve`:
@@ -190,12 +191,11 @@ This method will return a `qtqp.Solution` object, with fields:
 ## Linear solvers
 
 The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
-to the `solve` method via the `linear_solver` arg. By default
+to the `solve` method via the `linear_solver` argument. By default
 `linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
-However, this may not be the fastest option. QTQP supports several other linear
-solvers that may be faster or more reliable for your problem. The enum
-`qtqp.LinearSolver` contains options `SCIPY`, `PARDISO`, `EIGEN`, `QDLDL`,
-`CHOLMOD`, `CUDSS`, corresponding to the following backend solvers.
+QTQP supports several other linear solvers that may be faster or more reliable
+for your problem. The enum `qtqp.LinearSolver` contains values corresponding
+to the following backend solvers:
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
@@ -203,7 +203,7 @@ Pardiso is available via the pydiso package (only available for Intel CPUs). To
 install
 
 ```bash
-conda install pydiso --channel conda-forge
+conda install pydiso -c conda-forge
 ```
 
 #### Eigen: `qtqp.LinearSolver.EIGEN`
@@ -224,7 +224,7 @@ conda install petsc4py -c conda-forge
 
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
 
-To install QDLDL
+To install
 
 ```bash
 python -m pip install qdldl
@@ -235,7 +235,7 @@ python -m pip install qdldl
 Cholmod is available in the scikit sparse package. To install
 
 ```bash
-conda install -c conda-forge scikit-sparse
+conda install scikit-sparse -c conda-forge
 ```
 
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
