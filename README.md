@@ -194,7 +194,7 @@ The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
 to the `solve` method via the `linear_solver` argument. By default
 `linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
 QTQP supports several other linear solvers that may be faster or more reliable
-for your problem. The enum `qtqp.LinearSolver` contains options corresponding
+for your problem. The enum `qtqp.LinearSolver` contains values corresponding
 to the following backend solvers:
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
