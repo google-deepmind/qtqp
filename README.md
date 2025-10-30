@@ -203,7 +203,7 @@ Pardiso is available via the pydiso package (only available for Intel CPUs). To
 install
 
 ```bash
-conda install pydiso --channel conda-forge
+conda install pydiso -c conda-forge
 ```
 
 #### Eigen: `qtqp.LinearSolver.EIGEN`
@@ -224,7 +224,7 @@ conda install petsc4py -c conda-forge
 
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
 
-To install QDLDL
+To install
 
 ```bash
 python -m pip install qdldl
@@ -235,7 +235,7 @@ python -m pip install qdldl
 Cholmod is available in the scikit sparse package. To install
 
 ```bash
-conda install -c conda-forge scikit-sparse
+conda install scikit-sparse -c conda-forge
 ```
 
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
