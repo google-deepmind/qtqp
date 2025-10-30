@@ -254,7 +254,7 @@ class QTQP:
     )
 
     stats = []
-    self.k_inv_q = np.zeros_like(self.q)  # Initialize for warm-start.
+    self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
     self._log_header()
 
     # --- Main Iteration Loop ---
@@ -272,8 +272,8 @@ class QTQP:
 
       # --- Step 1: Solve for KKT @ q ---
       # This is reused for both predictor and corrector parts of the step.
-      self.k_inv_q, q_lin_sys_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.k_inv_q
+      self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
+          rhs=self.q, warm_start=self.kinv_q
       )
       stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
@@ -471,15 +471,15 @@ class QTQP:
       tau_plus = tau
 
     # Reconstruct full (x, y) step from KKT solution components
-    vec_plus = kinv_r - self.k_inv_q * tau_plus
-    x_plus, y_plus = vec_plus[: self.n], vec_plus[self.n :]
+    xy_plus = kinv_r - self.kinv_q * tau_plus
+    x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
     """Solves the quadratic equation for the tau step in homogeneous embedding."""
     # Solve a quadratic equation for tau: t_a * tau^2 + t_b * tau + t_c = 0
     n = self.n
-    q, kinv_q = self.q, self.k_inv_q
+    q, kinv_q = self.q, self.kinv_q
 
     v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
     p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
@@ -513,8 +513,8 @@ class QTQP:
 
   def _normalize(self, x, y, tau, s):
     """Normalizes iterates to have norm as determined by central path."""
-    vec_norm = np.sqrt(x @ x + y @ y + tau @ tau)
-    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, vec_norm)
+    xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
+    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     return x * scale, y * scale, tau * scale, s * scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
