@@ -2,8 +2,9 @@
 
 [![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
 
-The cutie QP solver implements a primal-dual interior point method for solving
-convex quadratic programs (QPs). It solves primal QP problem:
+The cutie QP solver is a primal-dual interior point method for solving
+convex quadratic programs (QPs), implemented in pure python. It solves
+primal QP problem:
 
 ```
     min. (1/2) x.T @ p @ x + c.T @ x
@@ -132,8 +133,8 @@ Arguments:
 -   `a`: (m×n) Constraint matrix.
 -   `b`: (m) RHS vector.
 -   `c`: (n) Cost vector.
--   `z`: Number of equality constraints (size of the zero-cone). Must satisfy `0
-    ≤ z < m`.
+-   `z`: Number of equality constraints (size of the zero cone). Must satisfy
+    `0 ≤ z < m`.
 -   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
 
 This class has a single API method `solve`:
@@ -194,8 +195,8 @@ to the `solve` method via the `linear_solver` arg. By default
 `linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
 However, this may not be the fastest option. QTQP supports several other linear
 solvers that may be faster or more reliable for your problem. The enum
-`qtqp.LinearSolver` contains options `SCIPY`, `PARDISO`, `EIGEN`, `QDLDL`,
-`CHOLMOD`, `CUDSS`, corresponding to the following backend solvers.
+`qtqp.LinearSolver` contains options corresponding to the following backend
+solvers:
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
