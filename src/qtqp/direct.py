@@ -63,8 +63,8 @@ class MklPardisoSolver(LinearSolver):
     try:
       return self.factorization.solve(rhs)
     except self.module.PardisoError as e:
-      print(f"PardisoError: {e}")
-      print("Performing the permutation and factorization steps again.")
+      logging.warning("PardisoError: %s", e)
+      logging.warning("Performing analysis and factorization steps again.")
       self.factorization._analyze()  # pylint: disable=protected-access
       self.factorization._factor()  # pylint: disable=protected-access
       return self.factorization.solve(rhs)
@@ -138,7 +138,7 @@ class EigenSolver(LinearSolver):
   """Wrapper around Eigen Simplicial LDL^T."""
 
   def __init__(self):
-    import nanoeigenpy # pylint: disable=g-import-not-at-top
+    import nanoeigenpy  # pylint: disable=g-import-not-at-top
 
     self.module = nanoeigenpy
     self.solver: nanoeigenpy.SimplicialLDLT | None = None
@@ -431,4 +431,3 @@ class DirectKktSolver:
         "final_residual_norm": residual_norm,
         "status": status,
     }
-
