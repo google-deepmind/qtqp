@@ -448,14 +448,13 @@ class QTQP:
       self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
     """Computes a search direction by solving the augmented KKT system."""
+
     # Prepare RHS for the linear system.
+    r = (mu - mu_target) * r_anchor
     r_cone = mu_target / y[self.z :] + s[self.z :]
     if correction is not None:
       r_cone += correction
-
-    r = np.zeros(self.m + self.n)
-    r[self.n + self.z :] = r_cone
-    r += (mu - mu_target) * r_anchor
+    r[self.n + self.z :] += r_cone
 
     kinv_r, lin_sys_stats = self._linear_solver.solve(
         rhs=r,
