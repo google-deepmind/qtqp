@@ -368,40 +368,27 @@ class DirectKktSolver:
     # Adjust RHS to match the quasidefinite KKT form (second block negated).
     rhs = rhs.copy()
     rhs[self.n :] *= -1.0
+    tolerance = self.atol + self.rtol * np.linalg.norm(rhs, np.inf)
 
+    # Initial sol and residual.
     sol = warm_start.copy()
-    rhs_norm = np.linalg.norm(rhs, np.inf)
-    tolerance = self.atol + self.rtol * rhs_norm
-
-    # Initial residual
     residual = rhs - self.kkt @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
-    status = "non-converged"
-    solves = 0
-
-    # Iterative refinement loop.
-    # Allows 0 solves if warm_start is already good enough.
-    while residual_norm > tolerance:
-      if solves > self.max_iterative_refinement_steps:
-        logging.debug(
-            "Iterative refinement did not converge after %d solves."
-            " Final residual: %e > tolerance: %e",
-            solves,
-            residual_norm,
-            tolerance,
-        )
-        break
-
-      solves += 1
-
-      # Perform correction step using the generic solver
-      correction = self.solver.solve(residual)
-      new_sol = sol + correction
+    # Iterative refinement loop, always do at least one solve.
+    status, solves = "non-converged", 0
+    for solves in range(1, self.max_iterative_refinement_steps + 1):
+      # Perform correction step using the linear system solver.
+      new_sol = sol + self.solver.solve(residual)
       new_residual = rhs - self.kkt @ new_sol
       new_residual_norm = np.linalg.norm(new_residual, np.inf)
 
-      # Check for stalling (residual not improving)
+      # Check for convergence.
+      if residual_norm < tolerance:
+        status = "converged"
+        break
+
+      # Check for stalling (residual not improving).
       if new_residual_norm >= residual_norm:
         logging.debug(
             "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
@@ -412,12 +399,15 @@ class DirectKktSolver:
         status = "stalled"
         break
 
-      sol = new_sol
-      residual = new_residual
-      residual_norm = new_residual_norm
+      sol, residual, residual_norm = new_sol, new_residual, new_residual_norm
     else:
-      # Loop finished normally because residual_norm <= tolerance
-      status = "converged"
+      logging.debug(
+          "Iterative refinement did not converge after %d solves."
+          " Final residual: %e > tolerance: %e",
+          solves,
+          residual_norm,
+          tolerance,
+      )
 
     if np.any(np.isnan(sol)):
       raise ValueError("Linear solver returned NaNs.")

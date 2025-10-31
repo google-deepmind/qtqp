@@ -193,6 +193,17 @@ class QTQP:
     Returns:
       A Solution object containing the solution and solve stats.
     """
+    assert atol >= 0
+    assert rtol >= 0
+    assert atol_infeas >= 0
+    assert rtol_infeas >= 0
+    assert max_iter > 0
+    assert 0 < step_size_scale < 1
+    assert min_static_regularization >= 0
+    assert max_iterative_refinement_steps >= 0
+    assert linear_solver_atol >= 0
+    assert linear_solver_rtol >= 0
+
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
