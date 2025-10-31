@@ -380,17 +380,18 @@ class DirectKktSolver:
     # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
       # Perform correction step using the linear system solver.
-      new_sol = sol + self.solver.solve(residual)
-      new_residual = rhs - self.kkt @ new_sol
-      new_residual_norm = np.linalg.norm(new_residual, np.inf)
+      old_residual_norm = residual_norm
+      sol += self.solver.solve(residual)
+      residual = rhs - self.kkt @ sol
+      residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.
-      if new_residual_norm < tolerance:
+      if residual_norm < tolerance:
         status = "converged"
         break
 
       # Check for stalling (residual not improving).
-      if new_residual_norm >= residual_norm:
+      if residual_norm >= old_residual_norm:
         logging.debug(
             "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
             solves,
@@ -399,8 +400,6 @@ class DirectKktSolver:
         )
         status = "stalled"
         break
-
-      sol, residual, residual_norm = new_sol, new_residual, new_residual_norm
     else:
       logging.debug(
           "Iterative refinement did not converge after %d solves."
