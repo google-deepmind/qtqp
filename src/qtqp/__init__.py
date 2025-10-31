@@ -27,8 +27,8 @@ import scipy.sparse as sp
 from . import direct
 
 __version__ = "0.0.3"
-_HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |    sigma |    alpha |  q, p, c |     time |"""
-_SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|----------|----------|"""
+_HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
+_SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
 
@@ -648,8 +648,8 @@ class QTQP:
         f"| {stats_i['iter']:>4} | {stats_i['pcost']:>10.3e} |"
         f" {stats_i['dcost']:>10.3e} | {stats_i['pres']:>8.2e} |"
         f" {stats_i['dres']:>8.2e} | {stats_i['gap']:>8.2e} |"
-        f" {infeas:>8.2e} | {stats_i['mu']:>8.2e} | {stats_i['sigma']:>8.2e} |"
-        f" {stats_i['alpha']:>8.2e} | {solves:>8} | {stats_i['time']:>8.2e} |"
+        f" {infeas:>8.2e} | {stats_i['mu']:>8.2e} | {solves:>8} |"
+        f" {stats_i['time']:>8.2e} |"
     )
 
   def _log_footer(self, message: str):
