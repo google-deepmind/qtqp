@@ -375,8 +375,9 @@ class DirectKktSolver:
     residual = rhs - self.kkt @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
-    # Iterative refinement loop, always do at least one solve.
+    # Iterative refinement loop.
     status, solves = "non-converged", 0
+    # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
       # Perform correction step using the linear system solver.
       new_sol = sol + self.solver.solve(residual)
