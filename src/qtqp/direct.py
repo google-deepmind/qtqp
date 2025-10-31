@@ -384,7 +384,7 @@ class DirectKktSolver:
       new_residual_norm = np.linalg.norm(new_residual, np.inf)
 
       # Check for convergence.
-      if residual_norm < tolerance:
+      if new_residual_norm < tolerance:
         status = "converged"
         break
 

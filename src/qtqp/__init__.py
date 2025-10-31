@@ -176,7 +176,7 @@ class QTQP:
       min_static_regularization (float): Minimum regularization value used in
         the KKT matrix diagonal for numerical stability.
       max_iterative_refinement_steps (int): Maximum iterative refinement steps
-        for the linear solves.
+        for the linear solves (includes the initial solve, so must be >= 1).
       linear_solver_atol (float): Absolute tolerance for the iterative
         refinement process within the linear solver.
       linear_solver_rtol (float): Relative tolerance for the iterative
@@ -200,7 +200,7 @@ class QTQP:
     assert max_iter > 0
     assert 0 < step_size_scale < 1
     assert min_static_regularization >= 0
-    assert max_iterative_refinement_steps >= 0
+    assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
 
