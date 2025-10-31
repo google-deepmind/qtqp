@@ -395,8 +395,8 @@ class DirectKktSolver:
         logging.debug(
             "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
             solves,
+            old_residual_norm,
             residual_norm,
-            new_residual_norm,
         )
         status = "stalled"
         break
