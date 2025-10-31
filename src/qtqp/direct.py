@@ -202,7 +202,7 @@ class MumpsSolver(LinearSolver):
     b = self.module.Vec().createWithArray(rhs.ravel())
     x = self.module.Vec().createSeq(rhs.size)
     self.ksp.solve(b, x)
-    return x.getArray().reshape(rhs.shape)
+    return x.getArray().real.reshape(rhs.shape)
 
   def format(self) -> Literal["csr"]:
     return "csr"
