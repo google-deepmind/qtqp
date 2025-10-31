@@ -158,7 +158,7 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', np.arange(10))
+@pytest.mark.parametrize('seed', 42 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_solve(equilibrate, seed, linear_solver):
   """Test the QTQP solver."""
@@ -172,7 +172,7 @@ def test_solve(equilibrate, seed, linear_solver):
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', np.arange(10))
+@pytest.mark.parametrize('seed', 142 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_unbounded(equilibrate, seed, linear_solver):
   """Test the QTQP solver with unbounded QP."""
@@ -186,7 +186,7 @@ def test_unbounded(equilibrate, seed, linear_solver):
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', np.arange(10))
+@pytest.mark.parametrize('seed', 242 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_infeasible(equilibrate, seed, linear_solver):
   """Test the QTQP solver with infeasible QP."""
@@ -200,7 +200,7 @@ def test_infeasible(equilibrate, seed, linear_solver):
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', np.arange(10))
+@pytest.mark.parametrize('seed', 342 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_solve_warm_start(equilibrate, seed, linear_solver):
   """Test the QTQP solver with warm start."""
@@ -223,7 +223,7 @@ def test_solve_warm_start(equilibrate, seed, linear_solver):
 
 def test_raise_error_no_positive_constraints():
   """Test that an error is raised when z >= m."""
-  rng = np.random.default_rng(42)
+  rng = np.random.default_rng(442)
   m, n = 10, 10
   z = m
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
@@ -233,7 +233,7 @@ def test_raise_error_no_positive_constraints():
 
 def test_raise_error_invalid_initial_y():
   """Test that an error is raised when initial y has negative values."""
-  rng = np.random.default_rng(42)
+  rng = np.random.default_rng(542)
   m, n, z = 3, 2, 1
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   with pytest.raises(ValueError):  # Violates y[z:] >= 0
@@ -244,7 +244,7 @@ def test_raise_error_invalid_initial_y():
 
 def test_raise_error_invalid_initial_s():
   """Test that an error is raised when initial s has negative values."""
-  rng = np.random.default_rng(42)
+  rng = np.random.default_rng(642)
   m, n, z = 3, 2, 1
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   with pytest.raises(ValueError):  # Violates s[z:] >= 0
@@ -257,7 +257,7 @@ def test_raise_error_invalid_initial_s():
 
 def test_raise_error_negative_invalid_shapes():
   """Test that an error is raised when shapes are invalid."""
-  rng = np.random.default_rng(42)
+  rng = np.random.default_rng(742)
   m, n, z = 6, 5, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   with pytest.raises(ValueError):
