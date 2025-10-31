@@ -172,7 +172,7 @@ def test_solve(equilibrate, seed, linear_solver):
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', 142 + np.arange(10))
+@pytest.mark.parametrize('seed', list(142 + np.arange(10)))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_unbounded(equilibrate, seed, linear_solver):
   """Test the QTQP solver with unbounded QP."""
