@@ -208,6 +208,7 @@ class QTQP:
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
+    self.equilibrate = equilibrate
     if verbose:
       print(
           f"| QTQP v{__version__}:"
@@ -246,7 +247,7 @@ class QTQP:
     if np.any(s[: self.z] != 0):
       raise ValueError("Initial s has nonzero values in the zero cone.")
 
-    if equilibrate:
+    if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
@@ -339,44 +340,39 @@ class QTQP:
       )
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
-      step_size = step_size_scale * alpha
-      x, y, tau, s = self._normalize(
-          x + step_size * d_x,
-          y + step_size * d_y,
-          tau + step_size * d_tau,
-          s + step_size * d_s,
-      )
+      x += step_size_scale * alpha * d_x
+      y += step_size_scale * alpha * d_y
+      tau += step_size_scale * alpha * d_tau
+      s += step_size_scale * alpha * d_s
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = np.maximum(tau, 1e-30)
 
-      if equilibrate:
-        x, y, s = self._unequilibrate_iterates(x, y, s)
-
-      # --- Termination Check (non-equilibrated values)---
+      # --- Termination Check---
       status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i)
       self._log_iteration(stats_i)
       stats.append(stats_i)
-      match status:
-        case SolutionStatus.UNFINISHED:
-          pass
-        case SolutionStatus.SOLVED:
-          self._log_footer("Solved")
-          return Solution(x / tau, y / tau, s / tau, stats, status)
-        case SolutionStatus.INFEASIBLE:
-          self._log_footer("Primal infeasible / dual unbounded")
-          x.fill(np.nan)
-          s.fill(np.nan)
-          return Solution(x, y / abs(self.b @ y), s, stats, status)
-        case SolutionStatus.UNBOUNDED:
-          self._log_footer("Dual infeasible / primal unbounded")
-          y.fill(np.nan)
-          abs_ctx = abs(self.c @ x)
-          return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
-        case _:
-          raise ValueError(f"Unknown convergence status: {status}")
+      if status != SolutionStatus.UNFINISHED:
+        if self.equilibrate:
+          x, y, s = self._unequilibrate_iterates(x, y, s)
+        match status:
+          case SolutionStatus.SOLVED:
+            self._log_footer("Solved")
+            return Solution(x / tau, y / tau, s / tau, stats, status)
+          case SolutionStatus.INFEASIBLE:
+            self._log_footer("Primal infeasible / dual unbounded")
+            x.fill(np.nan)
+            s.fill(np.nan)
+            return Solution(x, y / abs(self.b @ y), s, stats, status)
+          case SolutionStatus.UNBOUNDED:
+            self._log_footer("Dual infeasible / primal unbounded")
+            y.fill(np.nan)
+            abs_ctx = abs(self.c @ x)
+            return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+          case _:
+            raise ValueError(f"Unknown convergence status: {status}")
 
     self._log_footer(f"Failed to converge in {max_iter} iterations")
     return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
@@ -536,6 +532,9 @@ class QTQP:
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+
     inv_tau = 1.0 / max(tau_arr[0], _EPS)
 
     # Precompute commonly used matrix-vector products
