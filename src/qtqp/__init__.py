@@ -249,6 +249,7 @@ class QTQP:
 
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
+      x, y, s = self._equilibrate_iterates(x, y, s)
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
