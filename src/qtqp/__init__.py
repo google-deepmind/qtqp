@@ -273,9 +273,6 @@ class QTQP:
     for self.it in range(max_iter):
       stats_i = {}
 
-      if equilibrate:
-        x, y, s = self._equilibrate_iterates(x, y, s)
-
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
