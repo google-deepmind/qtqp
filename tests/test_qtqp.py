@@ -364,7 +364,7 @@ def test_resolvent_operator(seed, linear_solver):
 
 @pytest.mark.parametrize('seed', 1042 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_newton_step(seed, linear_solver):
+def test_newton_step_converges_to_central_path(seed, linear_solver):
   """Test that taking a few Newton steps converges for a fixed mu."""
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
