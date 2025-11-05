@@ -410,4 +410,4 @@ def test_newton_step(seed, linear_solver):
     s[z:] = np.maximum(s[z:], 1e-30)
     tau = np.maximum(tau, 1e-30)
 
-  np.testing.assert_allclose(s @ y, sigma * mu)
+  np.testing.assert_allclose(s[z:] * y[z:], sigma * mu * np.ones(m - z))
