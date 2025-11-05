@@ -271,8 +271,8 @@ def test_raise_error_negative_invalid_shapes():
 
 @pytest.mark.parametrize('seed', 842 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_linear_solver_parameters(seed, linear_solver):
-  """Test that the linear solver works as expected."""
+def test_direct_linear_solver(seed, linear_solver):
+  """Test that the direct linear solver works as expected."""
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
