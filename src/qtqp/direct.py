@@ -255,9 +255,9 @@ class CuDssSolver(LinearSolver):
 class DirectKktSolver:
   """Direct KKT linear system solver with iterative refinement.
 
-  Constructs a quasidefinite KKT system:
+  Solves a quasidefinite KKT system:
       [ P + mu * I       A.T     ] [ x ]   [ rhs_x ]
-      [     A      -(D + mu * I) ] [ y ] = [ rhs_y ]
+      [     A      -(D + mu * I) ] [ y ] = [ -rhs_y ]
   where D is a diagonal matrix derived from slacks and duals.
   """
 

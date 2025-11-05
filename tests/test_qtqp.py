@@ -267,3 +267,34 @@ def test_raise_error_negative_invalid_shapes():
   with pytest.raises(ValueError):
     p_invalid = sparse.csc_matrix(np.ones((n + 1, n)))
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
+
+@pytest.mark.parametrize('seed', 842 + np.arange(10))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_linear_solver_parameters(seed, linear_solver):
+  """Test that the linear solver parameters are used."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 100, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+  d = np.concatenate([np.zeros(z), s[z:] / y[z:]])
+  linear_solver = qtqp.direct.DirectKktSolver(
+      a=a,
+      p=p,
+      z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=10,
+      atol=1e-12,
+      rtol=1e-12,
+      solver=linear_solver.value(),
+  )
+  q = np.concatenate([c, b])
+  linear_solver.update(mu=mu, s=s, y=y)
+  sol, _ = linear_solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  rhx_x = p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:]
+  rhs_y = - a @ sol[:n] + (d + mu) * sol[n:]
+  np.testing.assert_allclose(rhx_x, c)
+  np.testing.assert_allclose(rhs_y, b)
+
