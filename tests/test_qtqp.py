@@ -300,15 +300,15 @@ def test_linear_solver_parameters(seed, linear_solver):
   np.testing.assert_allclose(rhs_y, b)
 
 
-@pytest.mark.parametrize('seed', 942 + np.arange(10))
+@pytest.mark.parametrize('seed', 942 + np.arange(20))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_resolvent_operator(seed, linear_solver):
-  """Test that the resolvent operator is correctly computed."""
+  """Test that the resolvent operator is correctly computed with regularization."""
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   mu = rng.uniform()
-  sigma = 1.0
+  sigma = rng.uniform()  # sigma < 1 applies regularization.
   s = rng.uniform(size=m)
   y = rng.uniform(size=m)
   s[:z] = 0.0
@@ -329,30 +329,40 @@ def test_resolvent_operator(seed, linear_solver):
   solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
       rhs=solver.q, warm_start=np.zeros(n + m)
   )
+  r_anchor = rng.uniform(size=n + m)
+  tau_anchor = np.array([rng.uniform()])
   x_new, y_new, tau_new, _ = solver._newton_step(  # pylint: disable=protected-access
       p=p,
       mu=mu,
       mu_target=sigma * mu,
-      r_anchor=np.zeros(n + m),
-      tau_anchor=np.array([0.0]),
+      r_anchor=r_anchor,
+      tau_anchor=tau_anchor,
       y=y,
       s=s,
       tau=tau,
       correction=None,
   )
   d = np.concatenate([np.zeros(z), s[z:] / y[z:]])
-  np.testing.assert_allclose(p @ x_new + mu * x_new + a.T @ y_new, -c * tau_new)
   np.testing.assert_allclose(
-      -a @ x_new + (d + mu) * y_new,
-      -b * tau_new + np.concatenate([np.zeros(z), sigma * mu / y[z:] + s[z:]]),
+      p @ x_new + mu * x_new + a.T @ y_new + c * tau_new,
+      (mu - sigma * mu) * r_anchor[:n],
   )
   np.testing.assert_allclose(
-      -c @ x_new - b @ y_new + mu * tau_new,
-      x_new.T @ p @ x_new / tau_new + mu / tau_new,
+      -a @ x_new + (d + mu) * y_new + b * tau_new,
+      np.concatenate([np.zeros(z), sigma * mu / y[z:] + s[z:]])
+      + (mu - sigma * mu) * r_anchor[n:],
+  )
+  np.testing.assert_allclose(
+      -c @ x_new
+      - b @ y_new
+      + mu * tau_new
+      - x_new.T @ p @ x_new / tau_new
+      - sigma * mu / tau_new,
+      (mu - sigma * mu) * tau_anchor,
   )
 
 
-@pytest.mark.parametrize('seed', 942 + np.arange(10))
+@pytest.mark.parametrize('seed', 1042 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_newton_step(seed, linear_solver):
   """Test that taking a few Newton steps converges for a fixed mu."""
@@ -360,7 +370,6 @@ def test_newton_step(seed, linear_solver):
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   mu = rng.uniform()
-  sigma = 1.0
   s = np.ones(m)
   y = np.ones(m)
   s[:z] = 0.0
@@ -386,7 +395,7 @@ def test_newton_step(seed, linear_solver):
     x_t, y_t, tau_t, _ = solver._newton_step(  # pylint: disable=protected-access
         p=p,
         mu=mu,
-        mu_target=sigma * mu,
+        mu_target=mu,  # fixed mu = mu_target for testing.
         r_anchor=np.zeros(n + m),
         tau_anchor=np.array([0.0]),
         y=y,
@@ -396,7 +405,7 @@ def test_newton_step(seed, linear_solver):
     )
     d_x, d_y, d_tau = x_t - x, y_t - y, tau_t - tau
     d_s = np.zeros(m)
-    d_s[z:] = sigma * mu / y[z:] - y_t[z:] * s[z:] / y[z:]
+    d_s[z:] = mu / y[z:] - y_t[z:] * s[z:] / y[z:]
 
     step_size = 0.99 * solver._compute_step_size(y, s, d_y, d_s)  # pylint: disable=protected-access
     x += step_size * d_x
@@ -419,4 +428,4 @@ def test_newton_step(seed, linear_solver):
       -c @ x - b @ y + mu * tau,
       x.T @ p @ x / tau + mu / tau,
   )
-  np.testing.assert_allclose(s[z:] * y[z:], sigma * mu * np.ones(m - z))
+  np.testing.assert_allclose(s[z:] * y[z:], mu * np.ones(m - z))
