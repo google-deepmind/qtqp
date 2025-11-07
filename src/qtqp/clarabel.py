@@ -1,6 +1,7 @@
 import timeit
 
 import numpy as np
+from scipy.sparse import csc_matrix
 
 from qtqp import QTQP, Solution, LinearSolver, SolutionStatus
 from qtqp.direct import DirectKktSolver
@@ -38,35 +39,18 @@ class Clarabel(QTQP):
         self.rtol_infeas = rtol_infeas
         self.equilibrate = equilibrate
 
-        m, n, z = self.m, self.n, self.z
-
-        # --- Initialization ---
-        x = np.zeros(n) if x is None else x
-        y = np.concatenate([np.zeros(z), np.ones(m - z)]) if y is None else y
-        s = np.concatenate([np.zeros(z), np.ones(m - z)]) if s is None else s
-        assert x.shape == (n,)
-        assert y.shape == (m,)
-        assert s.shape == (m,)
-        τ = κ = 1.0
-
-        # Store G(v0) used in Eq. (9a) as a three-element tuple corresponding
-        # to the three rows of G
-        Gv0 = self.G(x=x, y=y, s=s, τ=τ, κ=κ)
-
-        # --- Verify strict interiority ---
-        assert np.all(y[z:] > 0) and np.all(s[z:] > 0)
-        assert np.all(s[:z] == 0.0)
+        # TODO: Does Clarabel support user initialization?
+        assert x is None and y is None and s is None
 
         if self.equilibrate:
             a, p, b, c, self.d, self.e = self._equilibrate()
-            x, y, s = self._equilibrate_iterates(x=x, y=y, s=s)
         else:
             a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
         linear_solver = DirectKktSolver(
             a=a,
             p=p,
-            z=z,
+            z=self.z,
             min_static_regularization=min_static_regularization,
             max_iterative_refinement_steps=max_iterative_refinement_steps,
             atol=linear_solver_atol,
@@ -75,7 +59,15 @@ class Clarabel(QTQP):
         )
         # This is the second RHS in (12). When we call 'solve' the
         # b row will be negated (and hence positive, as in the paper)
-        constant_rhs = -np.concatenate([c, b])
+        constant_rhs = np.concatenate([-c, -b])
+
+        # --- Initialization ---
+        x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-12)
+        τ = κ = 1.0
+
+        # --- Verify strict interiority ---
+        assert np.all(y[self.z :] > 0) and np.all(s[self.z :] > 0)
+        assert np.all(s[: self.z] == 0.0)
 
         stats_list = []
 
@@ -84,7 +76,7 @@ class Clarabel(QTQP):
             stats = {}
 
             # Eq. (9c)
-            μ = s @ y / m
+            μ = s @ y / self.m
 
             # Pass mu=0 and let 'min_static_regularization' handle the
             # regularization they discuss in Section 3.3
@@ -93,10 +85,12 @@ class Clarabel(QTQP):
             # --- Step 0: Solve K @ Δ2 = q for Δ2 ---
             #   This calculation is half of Eq. (12)
             #   TODO: Should we use a different/better warm_start?
-            Δ2, _ = linear_solver.solve(rhs=constant_rhs, warm_start=np.zeros(m + n))
-            Δx2, Δy2 = np.split(Δ2, [n])
+            Δ2, _ = linear_solver.solve(
+                rhs=constant_rhs, warm_start=np.zeros(self.m + self.n)
+            )
+            Δx2, Δy2 = np.split(Δ2, [self.n])
             rx, ry, rτ = self.compute_residuals(
-                x=x, y=y, s=s, τ=τ, κ=κ, μ=μ, Gv0=Gv0
+                x=x, y=y, s=s, τ=τ, κ=κ, a=a, b=b, p=p, c=c
             )
 
             # --- Step 1: Predictor (affine) step ---
@@ -117,7 +111,6 @@ class Clarabel(QTQP):
             )
             α_aff = self._compute_step_size(y=y, s=s, d_y=Δy_aff, d_s=Δs_aff)
             σ = (1 - α_aff) ** 3
-            σ = np.clip(σ, a_min=0, a_max=1)
 
             # --- Step 2: Corrector step ---
             η = Δs_aff * Δy_aff
@@ -155,7 +148,7 @@ class Clarabel(QTQP):
             τ = np.maximum(τ, 1e-30)
 
             # --- Termination criteria ---
-            #   These are the QTPT termination criteria, which do not necessarily
+            #   These are the QPQT termination criteria, which do not necessarily
             #   agree perfectly with the termination criteria in Clarabel
             status = self._check_termination(x, y, [τ], s, α_cor, μ, σ, stats)
             stats_list.append(stats)
@@ -191,37 +184,39 @@ class Clarabel(QTQP):
             x, y, s = self._unequilibrate_iterates(x, y, s)
         return Solution(x / τ, y / τ, s / τ, stats_list, SolutionStatus.FAILED)
 
+    @staticmethod
     def compute_residuals(
-        self,
         *,
         x: np.ndarray,
         y: np.ndarray,
         s: np.ndarray,
         τ: float,
         κ: float,
-        μ: float,
-        Gv0: tuple[np.ndarray, np.ndarray, float]
+        a: csc_matrix,
+        p: csc_matrix,
+        c: np.ndarray,
+        b: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        """The residual G(v) - μG(v0) in Eq. (9a)."""
-        Gv = self.G(x=x, y=y, s=s, τ=τ, κ=κ)
-        rx = Gv[0] - μ * Gv0[0]
-        ry = Gv[1] - μ * Gv0[1]
-        rτ = Gv[2] - μ * Gv0[2]
+        rx, ry, rτ = Clarabel.G(x=x, y=y, s=s, τ=τ, κ=κ, a=a, b=b, p=p, c=c)
         return rx, ry, rτ
 
+    @staticmethod
     def G(
-        self,
         *,
         x: np.ndarray,
         y: np.ndarray,
         s: np.ndarray,
         τ: float,
         κ: float,
+        a: csc_matrix,
+        p: csc_matrix,
+        c: np.ndarray,
+        b: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        """The non-linear operator in Eq. (4)."""
-        row_1 = -self.p @ x - self.a.T @ y - τ * self.c
-        row_2 = s + self.a @ x - τ * self.b
-        row_3 = κ + self.c @ x + self.b @ y + x @ self.p @ x / τ
+        """The non-linear operator G given in Eq. (4)."""
+        row_1 = -p @ x - a.T @ y - τ * c
+        row_2 = s + a @ x - τ * b
+        row_3 = κ + c @ x + b @ y + x @ p @ x / τ
         return row_1, row_2, row_3
 
     def clarabel_newton_step(
@@ -241,6 +236,7 @@ class Clarabel(QTQP):
         dτ: float,
         dκ: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        """Equation (12)."""
         Δ1, _ = linear_solver.solve(
             rhs=np.concatenate([dx, dy - ds]),
             warm_start=np.zeros(self.n + self.m),  # TODO: Better warm-start?
@@ -261,3 +257,56 @@ class Clarabel(QTQP):
         Δs[self.z :] = -ds[self.z :] - s[self.z :] / y[self.z :] * Δy[self.z :]
 
         return Δx, Δy, Δs, Δτ, Δκ
+
+    def init_iterates(
+        self,
+        *,
+        linear_solver: DirectKktSolver,
+        c: np.ndarray,
+        b: np.ndarray,
+        ϵ: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute v0 as described in Section 2.4.1."""
+        # We pass 'h_override' to fill the diagonal with the identity.
+        # Since 'h_override' != None, both 's' and 'y' are ignored.
+        linear_solver.update(
+            mu=0,
+            s=np.empty(self.m),
+            y=np.empty(self.m),
+            h_override=np.ones(self.m),
+        )
+        if self.p.nnz > 0:
+            xy, _ = linear_solver.solve(
+                rhs=np.concatenate([-c, -b]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            x, y = np.split(xy, [self.n])
+
+            s = np.zeros_like(y)
+            s[self.z :] = -y[self.z :].copy()
+            if s[self.z :].min() < ϵ:
+                s[self.z :] += ϵ - s[self.z :].min()
+
+            if y[self.z :].min() < ϵ:
+                y[self.z :] += ϵ - y[self.z :].min()
+        else:
+            xs, _ = linear_solver.solve(
+                rhs=np.concatenate([np.zeros_like(c), -b]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            x, s = np.split(xs, [self.n])
+
+            s = -s.copy()
+            if s[self.z :].min() < ϵ:
+                s[self.z :] += ϵ - s[self.z :].min()
+
+            xy, _ = linear_solver.solve(
+                rhs=np.concatenate([-c, np.zeros_like(b)]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            _, y = np.split(xy, [self.n])
+
+            if y[self.z :].min() < ϵ:
+                y[self.z :] += ϵ - y[self.z :].min()
+
+        return x, y, s
