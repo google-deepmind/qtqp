@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Editor
+.idea
+
 # Distribution / packaging
 .Python
 build/
