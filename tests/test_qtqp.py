@@ -294,10 +294,12 @@ def test_direct_linear_solver(seed, linear_solver):
   q = np.concatenate([c, b])
   linear_solver.update(mu=mu, s=s, y=y)
   sol, _ = linear_solver.solve(rhs=q, warm_start=np.zeros(n + m))
-  rhx_x = p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:]
-  rhs_y = -a @ sol[:n] + (d + mu) * sol[n:]
-  np.testing.assert_allclose(rhx_x, c)
-  np.testing.assert_allclose(rhs_y, b)
+  np.testing.assert_allclose(
+      p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:], c, atol=1e-10, rtol=1e-10
+  )
+  np.testing.assert_allclose(
+      -a @ sol[:n] + (d + mu) * sol[n:], b, atol=1e-10, rtol=1e-10
+  )
 
 
 @pytest.mark.parametrize('seed', 942 + np.arange(20))
@@ -346,11 +348,15 @@ def test_resolvent_operator(seed, linear_solver):
   np.testing.assert_allclose(
       p @ x_new + mu * x_new + a.T @ y_new + c * tau_new,
       (mu - sigma * mu) * r_anchor[:n],
+      atol=1e-10,
+      rtol=1e-10,
   )
   np.testing.assert_allclose(
       -a @ x_new + (d + mu) * y_new + b * tau_new,
       np.concatenate([np.zeros(z), sigma * mu / y[z:] + s[z:]])
       + (mu - sigma * mu) * r_anchor[n:],
+      atol=1e-10,
+      rtol=1e-10,
   )
   np.testing.assert_allclose(
       -c @ x_new
@@ -359,6 +365,8 @@ def test_resolvent_operator(seed, linear_solver):
       - x_new.T @ p @ x_new / tau_new
       - sigma * mu / tau_new,
       (mu - sigma * mu) * tau_anchor,
+      atol=1e-10,
+      rtol=1e-10,
   )
 
 
@@ -387,7 +395,7 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
       rtol=1e-12,
       solver=linear_solver.value(),
   )
-  for _ in range(10):  # 10 steps should be enough for convergence.
+  for _ in range(20):  # 20 steps should be enough for convergence.
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
     solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
         rhs=solver.q, warm_start=np.zeros(n + m)
@@ -413,19 +421,27 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
     tau += step_size * d_tau
     s += step_size * d_s
 
-    # Ensure variables stay strictly in the cone to prevent numerical issu
+    # Ensure variables stay strictly in the cone to prevent numerical issues.
 
     y[z:] = np.maximum(y[z:], 1e-30)
     s[z:] = np.maximum(s[z:], 1e-30)
     tau = np.maximum(tau, 1e-30)
 
-  np.testing.assert_allclose(p @ x + mu * x + a.T @ y, -c * tau)
   np.testing.assert_allclose(
-      -a @ x + mu * y,
-      -b * tau + np.concatenate([np.zeros(z), s[z:]]),
+      p @ x + mu * x + a.T @ y + c * tau, np.zeros(n), atol=1e-9, rtol=1e-9
   )
   np.testing.assert_allclose(
-      -c @ x - b @ y + mu * tau,
-      x.T @ p @ x / tau + mu / tau,
+      -a @ x + mu * y + b * tau,
+      np.concatenate([np.zeros(z), s[z:]]),
+      atol=1e-9,
+      rtol=1e-9,
   )
-  np.testing.assert_allclose(s[z:] * y[z:], mu * np.ones(m - z))
+  np.testing.assert_allclose(
+      -c @ x - b @ y + mu * tau - x.T @ p @ x / tau - mu / tau,
+      0.0,
+      atol=1e-9,
+      rtol=1e-9,
+  )
+  np.testing.assert_allclose(
+      s[z:] * y[z:], mu * np.ones(m - z), atol=1e-9, rtol=1e-9
+  )
