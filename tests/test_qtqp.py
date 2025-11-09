@@ -511,7 +511,7 @@ def test_equivalent_tau_solution(seed, linear_solver):
   )
   tau_anchor = np.array([rng.uniform()])
   r_tau = (mu - mu_target) * tau_anchor
-  tau_qtqp = solver._solve_for_tau(s, y, kinv_r, mu, mu_target, r, r_tau)  # pylint: disable=protected-access
+  tau_qtqp = solver._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)  # pylint: disable=protected-access
   tau_1 = _solve_for_tau_alternative(
       n, solver.kinv_q, kinv_r, mu, mu_target, r, r_tau, s, y
   )
