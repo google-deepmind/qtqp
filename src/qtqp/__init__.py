@@ -652,4 +652,3 @@ class QTQP:
   def _log_footer(self, message: str):
     if self.verbose:
       print(f"{_SEPARA}\n| {message}")
-
