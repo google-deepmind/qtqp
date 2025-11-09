@@ -59,10 +59,10 @@ class Clarabel(QTQP):
         )
         # This is the second RHS in (12). When we call 'solve' the
         # b row will be negated (and hence positive, as in the paper)
-        constant_rhs = np.concatenate([-c, -b])
+        constant_rhs = np.concat([-c, -b])
 
         # --- Initialization ---
-        x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-12)
+        x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
         τ = κ = 1.0
 
         # --- Verify strict interiority ---
@@ -110,14 +110,17 @@ class Clarabel(QTQP):
                 dκ=κ * τ,
             )
             α_aff = self._compute_step_size(y=y, s=s, d_y=Δy_aff, d_s=Δs_aff)
+            if Δτ_aff < 0:
+                α_aff = min(α_aff, τ / -Δτ_aff)
+            if Δκ_aff < 0:
+                α_aff = min(α_aff, κ / -Δκ_aff)
+            assert 0 <= α_aff <= 1
             σ = (1 - α_aff) ** 3
 
             # --- Step 2: Corrector step ---
             η = Δs_aff * Δy_aff
             ds_cor = np.zeros(self.m, dtype="float")
-            ds_cor[self.z :] = s[self.z :] / (
-                s[self.z :] * y[self.z :] + η[self.z :] - σ * μ
-            )
+            ds_cor[self.z:] = s[self.z:] + (η[self.z:] - σ * μ) / y[self.z:]
             Δx_cor, Δy_cor, Δs_cor, Δτ_cor, Δκ_cor = self.clarabel_newton_step(
                 x=x,
                 y=y,
@@ -130,10 +133,15 @@ class Clarabel(QTQP):
                 dx=(1 - σ) * rx,
                 dy=(1 - σ) * ry,
                 ds=ds_cor,
-                dτ=(1 - σ) * τ,
+                dτ=(1 - σ) * rτ,
                 dκ=κ * τ + Δκ_aff * Δτ_aff - σ * μ,
             )
             α_cor = self._compute_step_size(y=y, s=s, d_y=Δy_cor, d_s=Δs_cor)
+            if Δτ_cor < 0:
+                α_cor = min(α_cor, τ / -Δτ_cor)
+            if Δκ_cor < 0:
+                α_cor = min(α_cor, κ / -Δκ_cor)
+            assert 0 <= α_cor <= 1
 
             # --- Step 3: Update iterates ---
             x += step_size_scale * α_cor * Δx_cor
@@ -150,7 +158,9 @@ class Clarabel(QTQP):
             # --- Termination criteria ---
             #   These are the QPQT termination criteria, which do not necessarily
             #   agree perfectly with the termination criteria in Clarabel
-            status = self._check_termination(x, y, [τ], s, α_cor, μ, σ, stats)
+            status = self._check_termination(
+                x=x, y=y, tau_arr=[τ], s=s, alpha=α_cor, mu=μ, sigma=σ, stats_i=stats
+            )
             stats_list.append(stats)
             match status:
                 case SolutionStatus.SOLVED:
@@ -238,13 +248,13 @@ class Clarabel(QTQP):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
         """Equation (12)."""
         Δ1, _ = linear_solver.solve(
-            rhs=np.concatenate([dx, dy - ds]),
+            rhs=np.concat([dx, dy - ds]),
             warm_start=np.zeros(self.n + self.m),  # TODO: Better warm-start?
         )
         Δx1, Δy1 = np.split(Δ1, [self.n])
 
         ξ = x / τ
-        Pξ = 2 * self.p @ ξ
+        Pξ = self.p @ ξ
 
         Δτ_num = dτ - dκ / τ + (2 * Pξ + self.c) @ Δx1 + self.b @ Δy1
         Δτ_den = κ / τ + ξ @ Pξ - (2 * Pξ + self.c) @ Δx2 - self.b @ Δy2
@@ -267,17 +277,10 @@ class Clarabel(QTQP):
         ϵ: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute v0 as described in Section 2.4.1."""
-        # We pass 'h_override' to fill the diagonal with the identity.
-        # Since 'h_override' != None, both 's' and 'y' are ignored.
-        linear_solver.update(
-            mu=0,
-            s=np.empty(self.m),
-            y=np.empty(self.m),
-            h_override=np.ones(self.m),
-        )
+        linear_solver.update(mu=0, s=np.ones(self.m), y=np.ones(self.m))
         if self.p.nnz > 0:
             xy, _ = linear_solver.solve(
-                rhs=np.concatenate([-c, -b]),
+                rhs=np.concat([-c, -b]),
                 warm_start=np.zeros(self.m + self.n),
             )
             x, y = np.split(xy, [self.n])
@@ -291,7 +294,7 @@ class Clarabel(QTQP):
                 y[self.z :] += ϵ - y[self.z :].min()
         else:
             xs, _ = linear_solver.solve(
-                rhs=np.concatenate([np.zeros_like(c), -b]),
+                rhs=np.concat([np.zeros_like(c), -b]),
                 warm_start=np.zeros(self.m + self.n),
             )
             x, s = np.split(xs, [self.n])
@@ -301,7 +304,7 @@ class Clarabel(QTQP):
                 s[self.z :] += ϵ - s[self.z :].min()
 
             xy, _ = linear_solver.solve(
-                rhs=np.concatenate([-c, np.zeros_like(b)]),
+                rhs=np.concat([-c, np.zeros_like(b)]),
                 warm_start=np.zeros(self.m + self.n),
             )
             _, y = np.split(xy, [self.n])
