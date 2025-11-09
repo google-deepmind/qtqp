@@ -445,3 +445,79 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
   np.testing.assert_allclose(
       s[z:] * y[z:], mu * np.ones(m - z), atol=1e-9, rtol=1e-9
   )
+
+
+def _solve_for_tau(n, q, p, kinv_r, kinv_q, mu, mu_target, r_tau):
+  """Solves the quadratic equation for the tau step in homogeneous embedding."""
+  v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
+  p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
+
+  t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
+  t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
+  t_c = -kinv_r[:n] @ p_kinv_r - mu_target
+  discriminant = t_b**2 - 4 * t_a * t_c
+  return (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
+
+
+def _solve_for_tau_alternative(
+    n, kinv_q, kinv_r, mu, mu_target, r, r_tau, s, y
+):
+  """Solves the quadratic equation for the tau step in homogeneous embedding."""
+  kinv_r_d_kinv_r = kinv_r[n:] @ (kinv_r[n:] * s / y)
+  kinv_q_d_kinv_q = kinv_q[n:] @ (kinv_q[n:] * s / y)
+  kinv_q_d_kinv_r = kinv_q[n:] @ (kinv_r[n:] * s / y)
+
+  t_a = mu + mu * kinv_q @ kinv_q + kinv_q_d_kinv_q
+  t_b = -r_tau[0] + kinv_q @ r - 2 * (mu * kinv_q @ kinv_r + kinv_q_d_kinv_r)
+  t_c = -kinv_r @ r + mu * kinv_r @ kinv_r + kinv_r_d_kinv_r - mu_target
+  discriminant = t_b**2 - 4 * t_a * t_c
+  return (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
+
+
+@pytest.mark.parametrize('seed', 1142 + np.arange(10))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_equivalent_tau_solution(seed, linear_solver):
+  """Test that solving for tau using different methods gives equivalent results."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  sigma = rng.uniform()  # sigma < 1 applies regularization.
+  mu_target = sigma * mu
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  solver.q = np.concatenate([c, b])
+  solver._linear_solver = qtqp.direct.DirectKktSolver(  # pylint: disable=protected-access
+      a=a,
+      p=p,
+      z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=10,
+      atol=1e-12,
+      rtol=1e-12,
+      solver=linear_solver.value(),
+  )
+  solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
+  solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
+      rhs=solver.q, warm_start=np.zeros(n + m)
+  )
+  r_anchor = rng.uniform(size=n + m)
+  r = (mu - mu_target) * r_anchor
+  r[n + z :] += mu_target / y[z:] + s[z:]
+  kinv_r, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
+      rhs=r, warm_start=np.zeros(n + m)
+  )
+  tau_anchor = np.array([rng.uniform()])
+  r_tau = (mu - mu_target) * tau_anchor
+  tau_qtqp = solver._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)  # pylint: disable=protected-access
+  tau_1 = _solve_for_tau_alternative(
+      n, solver.kinv_q, kinv_r, mu, mu_target, r, r_tau, s, y
+  )
+  tau_2 = _solve_for_tau(
+      n, solver.q, p, kinv_r, solver.kinv_q, mu, mu_target, r_tau
+  )
+  np.testing.assert_allclose(tau_qtqp, tau_1, atol=1e-11, rtol=1e-11)
+  np.testing.assert_allclose(tau_qtqp, tau_2, atol=1e-11, rtol=1e-11)
+  np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
