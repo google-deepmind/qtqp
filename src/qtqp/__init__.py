@@ -290,7 +290,6 @@ class QTQP:
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
       x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
-          p=p,
           mu=mu,
           mu_target=0.0,
           r_anchor=np.concatenate([x, y]),
@@ -316,7 +315,6 @@ class QTQP:
       # Mehrotra correction term handles extra nonlinearity in complementarity.
       correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-          p=p,
           mu=mu,
           mu_target=sigma * mu,
           r_anchor=np.concatenate([x_p, y_p]),
@@ -450,7 +448,7 @@ class QTQP:
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
-      self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
+      self, *, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
     """Computes a search direction by solving the augmented KKT system."""
 
@@ -469,7 +467,7 @@ class QTQP:
     # Solve the 1D quadratic equation for the homogeneous tau component
     try:
       r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+      tau_plus = self._solve_for_tau(s, y, kinv_r, mu, mu_target, r, r_tau)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
@@ -480,18 +478,19 @@ class QTQP:
     x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
+  def _solve_for_tau(self, s, y, kinv_r, mu, mu_target, r, r_tau) -> np.ndarray:
     """Solves the quadratic equation for the tau step in homogeneous embedding."""
     # Solve a quadratic equation for tau: t_a * tau^2 + t_b * tau + t_c = 0
     n = self.n
-    q, kinv_q = self.q, self.kinv_q
+    kinv_q = self.kinv_q
 
-    v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
-    p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
+    kinv_r_d_kinv_r = kinv_r[n:] @ (kinv_r[n:] * s / y)
+    kinv_q_d_kinv_q = kinv_q[n:] @ (kinv_q[n:] * s / y)
+    kinv_q_d_kinv_r = kinv_q[n:] @ (kinv_r[n:] * s / y)
 
-    t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
-    t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-    t_c = -kinv_r[:n] @ p_kinv_r - mu_target
+    t_a = mu + mu * kinv_q @ kinv_q + kinv_q_d_kinv_q
+    t_b = -r_tau[0] + kinv_q @ r - 2 * (mu * kinv_q @ kinv_r + kinv_q_d_kinv_r)
+    t_c = -kinv_r @ r + mu * kinv_r @ kinv_r + kinv_r_d_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     # Theoretical guarantees state t_a > 0 and t_c <= 0.
