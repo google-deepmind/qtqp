@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Interior point method for solving QPs."""
+"""Interior point method for solving QPs with Multiple Centrality Corrections."""
 
 import dataclasses
 import enum
@@ -26,7 +26,7 @@ import scipy.sparse as sp
 
 from . import direct
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
@@ -149,6 +149,8 @@ class QTQP:
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
+      max_mcc_iterations: int = 3,
+      mcc_improvement_threshold: float = 1.05,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 50,
       linear_solver_atol: float = 1e-12,
@@ -173,6 +175,11 @@ class QTQP:
       max_iter (int): Maximum number of iterations before stopping.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
+      max_mcc_iterations (int): Maximum number of extra Multiple Centrality
+        Correction (MCC) steps to take per iteration.
+      mcc_improvement_threshold (float): Minimum ratio of improvement in step
+        size required to accept an additional MCC step (e.g., 1.05 means 5%
+        improvement needed).
       min_static_regularization (float): Minimum regularization value used in
         the KKT matrix diagonal for numerical stability.
       max_iterative_refinement_steps (int): Maximum iterative refinement steps
@@ -199,6 +206,8 @@ class QTQP:
     assert rtol_infeas >= 0
     assert max_iter > 0
     assert 0 < step_size_scale < 1
+    assert max_mcc_iterations >= 0
+    assert mcc_improvement_threshold >= 1.0
     assert min_static_regularization >= 0
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
@@ -312,32 +321,63 @@ class QTQP:
           x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
       )
 
-      # --- Step 3: Corrector Step ---
-      # Mehrotra correction term handles extra nonlinearity in complementarity.
+      # --- Step 3: Corrector Step with Multiple Centrality Corrections ---
+      # Start with Mehrotra correction term.
       correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
-      x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-          p=p,
-          mu=mu,
-          mu_target=sigma * mu,
-          r_anchor=np.concatenate([x_p, y_p]),
-          tau_anchor=tau_p,
-          y=y,
-          s=s,
-          tau=tau,
-          correction=correction,
-      )
-      stats_i.update(corrector_lin_sys_stats=corrector_lin_sys_stats)
+
+      best_alpha = -1.0
+      best_step = None
+      corrector_stats_agg = {"solves": 0}
+
+      # Loop for MCC: Standard Mehrotra is iteration 0.
+      for mcc_i in range(1 + max_mcc_iterations):
+        x_c, y_c, tau_c, corr_stats = self._newton_step(
+            p=p,
+            mu=mu,
+            mu_target=sigma * mu,
+            r_anchor=np.concatenate([x_p, y_p]),
+            tau_anchor=tau_p,
+            y=y,
+            s=s,
+            tau=tau,
+            correction=correction,
+        )
+        corrector_stats_agg["solves"] += corr_stats.get("solves", 0)
+
+        # Calculate full proposed direction for this correction level.
+        d_x_try = x_c - x
+        d_y_try = y_c - y
+        d_tau_try = tau_c - tau
+        d_s_try = np.zeros(self.m)
+        # Derive d_s consistent with the linearized complementarity equation
+        # used in this step (sigma*mu + y*correction).
+        d_s_try[self.z :] = (
+            sigma * mu / y[self.z :]
+            + correction
+            - y_c[self.z :] * s[self.z :] / y[self.z :]
+        )
+
+        alpha_try = self._compute_step_size(y, s, d_y_try, d_s_try)
+
+        # MCC Decision: Accept if it's the first one (standard Mehrotra) OR
+        # if it significantly improves the step size over the best found so far.
+        if mcc_i == 0 or alpha_try >= best_alpha * mcc_improvement_threshold:
+          best_alpha = alpha_try
+          best_step = (d_x_try, d_y_try, d_tau_try, d_s_try)
+
+          # Prepare correction for the NEXT potential iteration by using the
+          # latest, better Second-Order approximation.
+          if mcc_i < max_mcc_iterations:
+            correction = -d_s_try[self.z :] * d_y_try[self.z :] / y[self.z :]
+        else:
+          # If no significant improvement, stop wasting cheap backsolves.
+          break
+
+      stats_i.update(corrector_lin_sys_stats=corrector_stats_agg)
+      d_x, d_y, d_tau, d_s = best_step
+      alpha = best_alpha
 
       # --- Step 4: Update Iterates ---
-      d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      d_s = np.zeros(self.m)
-      d_s[self.z :] = (
-          sigma * mu / y[self.z :]
-          + correction
-          - y_c[self.z :] * s[self.z :] / y[self.z :]
-      )
-
-      alpha = self._compute_step_size(y, s, d_y, d_s)
       x += step_size_scale * alpha * d_x
       y += step_size_scale * alpha * d_y
       tau += step_size_scale * alpha * d_tau
