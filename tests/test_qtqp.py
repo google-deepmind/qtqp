@@ -334,6 +334,7 @@ def test_resolvent_operator(seed, linear_solver):
   r_anchor = rng.uniform(size=n + m)
   tau_anchor = np.array([rng.uniform()])
   x_new, y_new, tau_new, _ = solver._newton_step(  # pylint: disable=protected-access
+      p=p,
       mu=mu,
       mu_target=sigma * mu,
       r_anchor=r_anchor,
@@ -400,6 +401,7 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
         rhs=solver.q, warm_start=np.zeros(n + m)
     )
     x_t, y_t, tau_t, _ = solver._newton_step(  # pylint: disable=protected-access
+        p=p,
         mu=mu,
         mu_target=mu,  # fixed mu = mu_target for testing.
         r_anchor=np.zeros(n + m),
