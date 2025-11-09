@@ -310,7 +310,7 @@ class DirectKktSolver:
     # Cache indices of the diagonal elements for fast updates.
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
 
-  def update(self, mu: float, s: np.ndarray, y: np.ndarray, h_override: np.ndarray | None = None) -> None:
+  def update(self, mu: float, s: np.ndarray, y: np.ndarray) -> None:
     """Forms the KKT matrix diagonals and factorizes it.
 
     This method employs an optimization to avoid copying the full sparse KKT
@@ -322,12 +322,9 @@ class DirectKktSolver:
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
-    if h_override is not None:
-      h = h_override
-    else:
-      # Calculate the dynamic diagonal block D = s / y for inequality rows.
-      # For equality rows (first z), the diagonal is 0.
-      h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
+    # Calculate the dynamic diagonal block D = s / y for inequality rows.
+    # For equality rows (first z), the diagonal is 0.
+    h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
 
     # "True" diagonals for accurate residual calculation (no regularization).
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
