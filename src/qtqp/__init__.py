@@ -270,8 +270,13 @@ class QTQP:
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
     self._log_header()
 
+    self.it = 0
+    stats_i = {}
+    self._check_termination(x, y, tau, s, None, None, None, stats_i)
+    stats.append(stats_i)
+
     # --- Main Iteration Loop ---
-    for self.it in range(max_iter):
+    for self.it in range(1, max_iter + 1):
       stats_i = {}
 
       x, y, tau, s = self._normalize(x, y, tau, s)
