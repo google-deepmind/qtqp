@@ -39,9 +39,6 @@ class Clarabel(QTQP):
         self.rtol_infeas = rtol_infeas
         self.equilibrate = equilibrate
 
-        # TODO: Does Clarabel support user initialization?
-        assert x is None and y is None and s is None
-
         if self.equilibrate:
             a, p, b, c, self.d, self.e = self._equilibrate()
         else:
@@ -62,7 +59,8 @@ class Clarabel(QTQP):
         constant_rhs = np.concat([-c, -b])
 
         # --- Initialization ---
-        x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
+        if x is None and y is None and s is None:
+            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
         τ = κ = 1.0
 
         # --- Verify strict interiority ---
@@ -71,8 +69,13 @@ class Clarabel(QTQP):
 
         stats_list = []
 
+        self.it = 0
+        stats_i = {}
+        self._check_termination(x, y, [τ], s, None, None, None, stats_i)
+        stats_list.append(stats_i)
+
         # --- Main iteration loop ---
-        for self.it in range(max_iter):
+        for self.it in range(1, max_iter + 1):
             stats = {}
 
             # Eq. (9c)
@@ -156,7 +159,7 @@ class Clarabel(QTQP):
             τ = np.maximum(τ, 1e-30)
 
             # --- Termination criteria ---
-            #   These are the QPQT termination criteria, which do not necessarily
+            #   These are the QTQP termination criteria, which do not necessarily
             #   agree perfectly with the termination criteria in Clarabel
             status = self._check_termination(
                 x=x, y=y, tau_arr=[τ], s=s, alpha=α_cor, mu=μ, sigma=σ, stats_i=stats
