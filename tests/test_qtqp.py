@@ -34,10 +34,10 @@ _SOLVERS = [
 if sys.platform.startswith('linux'):
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 
-# MUMPS is producing NaNs:
+# MUMPS is producting NaNs, disable for now.
 # Petsc4py not available on windows
 # if not sys.platform.startswith('win32'):
-#   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+#  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
 
 
 def _gen_feasible(m, n, z, random_state=None):
@@ -93,8 +93,8 @@ def _gen_unbounded(m, n, z, random_state=None):
 
   p = p.T @ p * 0.01
   e, v = np.linalg.eig(p)
-  e[-1] = 0
-  x = v[:, -1]
+  e[:3] = 0  # Make problem not too hard.
+  x = v[:, 0]
   p = v @ np.diag(e) @ v.T
   a = a - np.outer(s + a @ x, x) / np.linalg.norm(x) ** 2
   c = -c / (c @ x)
