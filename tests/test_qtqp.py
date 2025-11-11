@@ -65,7 +65,7 @@ def _gen_feasible(m, n, z, random_state=None):
 def _gen_infeasible(m, n, z, random_state=None):
   """Generate an infeasible QP."""
   rng = np.random.default_rng(random_state)
-  w = rng.normal(size=m)
+  w = rng.random(size=m)
   b = rng.normal(size=m)
   y = w.copy()
   y[z:] = 0.5 * (w[z:] + np.abs(w[z:]))  # y = s - z;
@@ -83,7 +83,7 @@ def _gen_infeasible(m, n, z, random_state=None):
 def _gen_unbounded(m, n, z, random_state=None):
   """Generate an unbounded QP."""
   rng = np.random.default_rng(random_state)
-  w = rng.normal(size=m)
+  w = rng.random(size=m)
   c = rng.normal(size=n)
   s = np.zeros(m)
   s[z:] = 0.5 * (w[z:] + np.abs(w[z:]))
@@ -93,8 +93,8 @@ def _gen_unbounded(m, n, z, random_state=None):
 
   p = p.T @ p * 0.01
   e, v = np.linalg.eig(p)
-  e[:3] = 0  # Make problem not too hard.
-  x = v[:, 0]
+  e[-1] = 0.0
+  x = v[:, -1]
   p = v @ np.diag(e) @ v.T
   a = a - np.outer(s + a @ x, x) / np.linalg.norm(x) ** 2
   c = -c / (c @ x)
