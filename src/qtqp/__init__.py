@@ -156,9 +156,6 @@ class QTQP:
       linear_solver: LinearSolver = LinearSolver.SCIPY,
       verbose: bool = True,
       equilibrate: bool = True,
-      x: np.ndarray | None = None,
-      y: np.ndarray | None = None,
-      s: np.ndarray | None = None,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -186,9 +183,6 @@ class QTQP:
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
-      x: Initial primal solution vector.
-      y: Initial dual solution vector.
-      s: Initial slack vector.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -217,25 +211,13 @@ class QTQP:
       )
 
     # --- Initialization ---
-    # Use supplied warm-starts or default cold-starts.
-    x = np.zeros(self.n) if x is None else np.array(x, dtype=np.float64)
-    if y is None:
-      y = np.zeros(self.m)
-      # Initialize inequality duals to 1.0 for interiority
-      y[self.z :] = 1.0
-    else:
-      y = np.array(y, dtype=np.float64)
-      if y.shape != (self.m,):
-        raise ValueError(f"y must have shape ({self.m},), got {y.shape}")
+    x = np.zeros(self.n)
+    y = np.zeros(self.m)
+    s = np.zeros(self.m)
 
-    if s is None:
-      s = np.zeros(self.m)
-      # Initialize inequality slacks to 1.0 for interiority
-      s[self.z :] = 1.0
-    else:
-      s = np.array(s, dtype=np.float64)
-      if s.shape != (self.m,):
-        raise ValueError(f"s must have shape ({self.m},), got {s.shape}")
+    # Initialize inequality duals and slacksto 1.0 for interiority
+    y[self.z :] = 1.0
+    s[self.z :] = 1.0
 
     # tau is homogeneous embedding variable. Kept as 1-element array for
     # consistent vector operations (e.g., @ operator).

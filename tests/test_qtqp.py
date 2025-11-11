@@ -213,28 +213,6 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz):
   _assert_unbounded(solution, a, c, p, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
-@pytest.mark.parametrize('seed', 342 + np.arange(10))
-@pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_solve_warm_start(equilibrate, seed, linear_solver):
-  """Test the QTQP solver with warm start."""
-  rng = np.random.default_rng(seed)
-  m, n, z = 150, 100, 10
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver
-  )
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      x=solution.x,
-      y=solution.y,
-      s=solution.s,
-      equilibrate=equilibrate,
-      linear_solver=linear_solver,
-  )
-  _assert_solution(solution, a, b, c, p, z)
-  assert solution.stats[-1]['iter'] == 0
-
-
 def test_raise_error_no_positive_constraints():
   """Test that an error is raised when z >= m."""
   rng = np.random.default_rng(442)
@@ -243,30 +221,6 @@ def test_raise_error_no_positive_constraints():
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   with pytest.raises(ValueError):
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve()
-
-
-def test_raise_error_invalid_initial_y():
-  """Test that an error is raised when initial y has negative values."""
-  rng = np.random.default_rng(542)
-  m, n, z = 3, 2, 1
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  with pytest.raises(ValueError):  # Violates y[z:] >= 0
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(y=np.array([1.0, -1.0, 1.0]))
-  with pytest.raises(ValueError):  # Shape mismatch
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(y=np.array([1.0]))
-
-
-def test_raise_error_invalid_initial_s():
-  """Test that an error is raised when initial s has negative values."""
-  rng = np.random.default_rng(642)
-  m, n, z = 3, 2, 1
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  with pytest.raises(ValueError):  # Violates s[z:] >= 0
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([0.0, -1.0, 1.0]))
-  with pytest.raises(ValueError):  # Violates s[:z] == 0
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([1.0, 0.0, 0.0]))
-  with pytest.raises(ValueError):  # Shape mismatch
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(s=np.array([0.0]))
 
 
 def test_raise_error_negative_invalid_shapes():
