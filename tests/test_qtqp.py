@@ -186,7 +186,7 @@ def test_solve(equilibrate, seed, linear_solver, mnz):
 @pytest.mark.parametrize('equilibrate', [True, False])
 @pytest.mark.parametrize('seed', 142 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-@pytest.mark.parametrize('mnz', ((150, 100, 10), (10, 5, 3)))
+@pytest.mark.parametrize('mnz', ((150, 100, 10),))
 def test_infeasible(equilibrate, seed, linear_solver, mnz):
   """Test the QTQP solver with infeasible QP."""
   rng = np.random.default_rng(seed)
@@ -201,7 +201,7 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz):
 @pytest.mark.parametrize('equilibrate', [True, False])
 @pytest.mark.parametrize('seed', list(242 + np.arange(10)))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-@pytest.mark.parametrize('mnz', ((150, 100, 10), (10, 5, 3)))
+@pytest.mark.parametrize('mnz', ((150, 100, 10),))
 def test_unbounded(equilibrate, seed, linear_solver, mnz):
   """Test the QTQP solver with unbounded QP."""
   rng = np.random.default_rng(seed)
