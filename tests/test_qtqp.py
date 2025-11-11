@@ -76,7 +76,7 @@ def _gen_infeasible(m, n, z, random_state=None):
   a = a - np.outer(y, a.T @ y) / np.linalg.norm(y) ** 2
   b = -b / (b @ y)
   p = p.T @ p * 0.01
-  c = -a.T @ y
+  c = rng.normal(size=n)
   return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
 
 
@@ -98,7 +98,7 @@ def _gen_unbounded(m, n, z, random_state=None):
   p = v @ np.diag(e) @ v.T
   a = a - np.outer(s + a @ x, x) / np.linalg.norm(x) ** 2
   c = -c / (c @ x)
-  b = s + a @ x
+  b = rng.normal(size=m)
   return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
 
 
