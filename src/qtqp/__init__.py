@@ -268,6 +268,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
+    status = SolutionStatus.UNFINISHED
     self._log_header()
 
     # --- Main Iteration Loop ---
@@ -353,27 +354,30 @@ class QTQP:
       self._log_iteration(stats_i)
       stats.append(stats_i)
       if status != SolutionStatus.UNFINISHED:
-        if self.equilibrate:
-          x, y, s = self._unequilibrate_iterates(x, y, s)
-        match status:
-          case SolutionStatus.SOLVED:
-            self._log_footer("Solved")
-            return Solution(x / tau, y / tau, s / tau, stats, status)
-          case SolutionStatus.INFEASIBLE:
-            self._log_footer("Primal infeasible / dual unbounded")
-            x.fill(np.nan)
-            s.fill(np.nan)
-            return Solution(x, y / abs(self.b @ y), s, stats, status)
-          case SolutionStatus.UNBOUNDED:
-            self._log_footer("Dual infeasible / primal unbounded")
-            y.fill(np.nan)
-            abs_ctx = abs(self.c @ x)
-            return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
-          case _:
-            raise ValueError(f"Unknown convergence status: {status}")
+        break
 
-    self._log_footer(f"Failed to converge in {max_iter} iterations")
-    return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+    # We have terminated for one reason or another.
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+    match status:
+      case SolutionStatus.SOLVED:
+        self._log_footer("Solved")
+        return Solution(x / tau, y / tau, s / tau, stats, status)
+      case SolutionStatus.INFEASIBLE:
+        self._log_footer("Primal infeasible / dual unbounded")
+        x.fill(np.nan)
+        s.fill(np.nan)
+        return Solution(x, y / abs(self.b @ y), s, stats, status)
+      case SolutionStatus.UNBOUNDED:
+        self._log_footer("Dual infeasible / primal unbounded")
+        y.fill(np.nan)
+        abs_ctx = abs(self.c @ x)
+        return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+      case SolutionStatus.UNFINISHED:
+        self._log_footer(f"Failed to converge in {max_iter} iterations")
+        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+      case _:
+        raise ValueError(f"Unknown convergence status: {status}")
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Ruiz equilibration to improve numerical conditioning."""
@@ -384,15 +388,16 @@ class QTQP:
 
     for i in range(num_iters):
       # Row norms (infinity norm)
-      # Add small epsilon to avoid division by zero for zero rows
-      d_i = sp.linalg.norm(a, np.inf, axis=1) + _EPS
+      d_i = sp.linalg.norm(a, np.inf, axis=1)
+      d_i = np.where(d_i == 0.0, 1.0, d_i)  # If a row is zero, set d_i 1.0.
       d_i = 1.0 / np.sqrt(d_i)
       d_i = np.clip(d_i, min_scale, max_scale)
 
       # Column norms (max of A col norms and P col norms)
       e_i_a = sp.linalg.norm(a, np.inf, axis=0)
       e_i_p = sp.linalg.norm(p, np.inf, axis=0)
-      e_i = np.maximum(e_i_a, e_i_p) + _EPS
+      e_i = np.maximum(e_i_a, e_i_p)
+      e_i = np.where(e_i == 0.0, 1.0, e_i)  # If a col is zero, set e_i 1.0.
       e_i = 1.0 / np.sqrt(e_i)
       e_i = np.clip(e_i, min_scale, max_scale)
 
