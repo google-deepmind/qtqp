@@ -212,8 +212,9 @@ class MumpsSolver(LinearSolver):
 
   def free(self):
     """Frees the solver resources."""
-    if self.ksp:
+    if self.ksp is not None:
       self.ksp.destroy()
+      self.ksp = None
 
 
 class CuDssSolver(LinearSolver):
