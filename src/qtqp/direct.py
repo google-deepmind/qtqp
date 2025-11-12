@@ -163,31 +163,31 @@ class MumpsSolver(LinearSolver):
   def __init__(self):
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
-    self.petscpy = petsc4py.PETSc
-    self.ksp = self.petscpy.KSP().create()
+    self.PETSc = petsc4py.PETSc  # pylint: disable=invalid-name
+    self.ksp = self.PETSc.KSP().create()
 
     # Configure as a direct solver (apply preconditioner only)
-    self.ksp.setType(self.petscpy.KSP.Type.PREONLY)
-    self.ksp.getPC().setType(self.petscpy.PC.Type.LU)
+    self.ksp.setType(self.PETSc.KSP.Type.PREONLY)
+    self.ksp.getPC().setType(self.PETSc.PC.Type.LU)
     self.ksp.getPC().setFactorSolverType("mumps")
 
     # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
     self.ksp.setFromOptions()
 
   def update(self, kkt: sp.spmatrix):
-    kkt_wrapper = self.petscpy.Mat().createAIJ(
+    kkt_wrapper = self.PETSc.Mat().createAIJ(
         size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
     )
-    kkt_wrapper.setOption(self.petscpy.Mat.Option.SYMMETRIC, True)
-    kkt_wrapper.setOption(self.petscpy.Mat.Option.SPD, False)
+    kkt_wrapper.setOption(self.PETSc.Mat.Option.SYMMETRIC, True)
+    kkt_wrapper.setOption(self.PETSc.Mat.Option.SPD, False)
     kkt_wrapper.assemble()
 
     # Check if KSP already has a matrix defined to determine the flag
     already_factorized = self.ksp.getOperators()[0] is not None
     if already_factorized:
-      flag = self.petscpy.Mat.Structure.SAME_NONZERO_PATTERN
+      flag = self.PETSc.Mat.Structure.SAME_NONZERO_PATTERN
     else:
-      flag = self.petscpy.Mat.Structure.DIFFERENT_NONZERO_PATTERN
+      flag = self.PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN
 
     try:
       self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
@@ -199,8 +199,8 @@ class MumpsSolver(LinearSolver):
     self.ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    b = self.petscpy.Vec().createWithArray(rhs.ravel())
-    x = self.petscpy.Vec().createSeq(rhs.size)
+    b = self.PETSc.Vec().createWithArray(rhs.ravel())
+    x = self.PETSc.Vec().createSeq(rhs.size)
     self.ksp.solve(b, x)
     return x.getArray().real.reshape(rhs.shape)
 
