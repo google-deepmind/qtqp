@@ -262,7 +262,7 @@ class CuDssSolver(LinearSolver):
     if self.solver is not None:
       self.solver.free()
       self.solver = None
-      # Force Python to clean up any 'zombie' references held by tracebacks.
+      # Force clean up any 'zombie' references, in order to avoid cuda errors.
       import gc  # pylint: disable=g-import-not-at-top
       gc.collect(0)  # Run GC only on the youngest generation.
 
