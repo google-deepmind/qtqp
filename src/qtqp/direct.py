@@ -36,6 +36,9 @@ class LinearSolver(Protocol):
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
     ...
 
+  def free(self):
+    pass
+
 
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pydiso.mkl_solver.MKLPardisoSolver."""
@@ -207,6 +210,11 @@ class MumpsSolver(LinearSolver):
   def format(self) -> Literal["csr"]:
     return "csr"
 
+  def free(self):
+    """Frees the solver resources."""
+    if self.ksp:
+      self.ksp.destroy()
+
 
 class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
@@ -248,17 +256,11 @@ class CuDssSolver(LinearSolver):
   def format(self) -> Literal["csr"]:
     return "csr"
 
-  def __del__(self):
+  def free(self):
     """Frees the solver resources."""
     if self.solver is not None:
-      try:
-        # If the CUDA context is already dead (e.g. at shutdown), this may fail.
-        self.solver.free()
-      except self.nvmath.internal.bindings.CudaError as e:
-        logging.debug("CudaError during CuDssSolver deletion: %s", e)
-        pass
-      finally:
-        self.solver = None
+      self.solver.free()
+      self.solver = None
 
 
 class DirectKktSolver:
@@ -430,3 +432,7 @@ class DirectKktSolver:
         "final_residual_norm": residual_norm,
         "status": status,
     }
+
+  def free(self):
+    """Frees the solver resources."""
+    self.solver.free()

@@ -339,6 +339,7 @@ class QTQP:
         break
 
     # We have terminated for one reason or another.
+    self._linear_solver.free()
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
