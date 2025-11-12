@@ -116,10 +116,10 @@ class CholModSolver(LinearSolver):
   """Wrapper around sksparse.cholmod for Cholesky LDLt factorization."""
 
   def __init__(self):
-    from sksparse import cholmod  # pylint: disable=g-import-not-at-top
+    import sksparse.cholmod  # pylint: disable=g-import-not-at-top
 
-    self.cholmod = cholmod
-    self.factorization: cholmod.CholeskyFactor | None = None
+    self.cholmod = sksparse.cholmod
+    self.factorization: sksparse.cholmod.CholeskyFactor | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
