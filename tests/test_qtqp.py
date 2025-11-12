@@ -300,7 +300,6 @@ def test_resolvent_operator(seed, linear_solver):
   solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
       rhs=solver.q, warm_start=np.zeros(n + m)
   )
-  solver._linear_solver.free()  # pylint: disable=protected-access
   r_anchor = rng.uniform(size=n + m)
   tau_anchor = np.array([rng.uniform()])
   x_new, y_new, tau_new, _ = solver._newton_step(  # pylint: disable=protected-access
@@ -315,6 +314,7 @@ def test_resolvent_operator(seed, linear_solver):
       correction=None,
   )
   d = np.concatenate([np.zeros(z), s[z:] / y[z:]])
+  solver._linear_solver.free()  # pylint: disable=protected-access
   np.testing.assert_allclose(
       p @ x_new + mu * x_new + a.T @ y_new + c * tau_new,
       (mu - sigma * mu) * r_anchor[:n],
