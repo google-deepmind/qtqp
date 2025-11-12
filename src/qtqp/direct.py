@@ -232,10 +232,10 @@ class CuDssSolver(LinearSolver):
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
       )
       # Turn off annoying logs by default.
-      logger = logging.getLogger("null")
-      logger.disabled = True
+      # logger = logging.getLogger("null")
+      # logger.disabled = True
       options = self.nvmath.sparse.advanced.DirectSolverOptions(
-          sparse_system_type=sparse_system_type, logger=logger
+          sparse_system_type=sparse_system_type  # , logger=logger
       )
       # RHS must be in column major order (Fortran) for cuDSS.
       dummy_rhs = np.empty(kkt.shape[1], order="F", dtype=np.float64)
@@ -259,6 +259,10 @@ class CuDssSolver(LinearSolver):
 
   def free(self):
     """Frees the solver resources."""
+    print(
+        "************************************************* freeing CuDssSolver"
+        " *************************************************"
+    )
     if self.solver is not None:
       self.solver.free()
       self.solver = None
