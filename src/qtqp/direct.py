@@ -43,12 +43,12 @@ class MklPardisoSolver(LinearSolver):
   def __init__(self):
     import pydiso.mkl_solver  # pylint: disable=g-import-not-at-top
 
-    self.module = pydiso.mkl_solver
+    self.mkl_solver = pydiso.mkl_solver
     self.factorization: pydiso.mkl_sovler.MKLPardisoSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
-      self.factorization = self.module.MKLPardisoSolver(
+      self.factorization = self.mkl_solver.MKLPardisoSolver(
           kkt, matrix_type="real_symmetric_indefinite"
       )
       # Recommended iparms for IPMs from Pardiso docs.
@@ -62,7 +62,7 @@ class MklPardisoSolver(LinearSolver):
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
       return self.factorization.solve(rhs)
-    except self.module.PardisoError as e:
+    except self.mkl_solver.PardisoError as e:
       logging.warning("PardisoError: %s", e)
       logging.warning("Performing analysis and factorization steps again.")
       self.factorization._analyze()  # pylint: disable=protected-access
@@ -79,12 +79,12 @@ class QdldlSolver(LinearSolver):
   def __init__(self):
     import qdldl  # pylint: disable=g-import-not-at-top
 
-    self.module = qdldl
+    self.qdldl = qdldl
     self.factorization: qdldl.Solver | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
-      self.factorization = self.module.Solver(kkt)
+      self.factorization = self.qdldl.Solver(kkt)
     else:
       self.factorization.update(kkt)
 
@@ -118,12 +118,12 @@ class CholModSolver(LinearSolver):
   def __init__(self):
     from sksparse import cholmod  # pylint: disable=g-import-not-at-top
 
-    self.module = cholmod
+    self.cholmod = cholmod
     self.factorization: cholmod.CholeskyFactor | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.factorization is None:
-      self.factorization = self.module.cholesky(kkt, mode="simplicial")
+      self.factorization = self.cholmod.cholesky(kkt, mode="simplicial")
     else:
       self.factorization.cholesky_inplace(kkt)
 
@@ -140,12 +140,12 @@ class EigenSolver(LinearSolver):
   def __init__(self):
     import nanoeigenpy  # pylint: disable=g-import-not-at-top
 
-    self.module = nanoeigenpy
+    self.nanoeigenpy = nanoeigenpy
     self.solver: nanoeigenpy.SimplicialLDLT | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.solver is None:
-      self.solver = self.module.SimplicialLDLT()
+      self.solver = self.nanoeigenpy.SimplicialLDLT()
       self.solver.analyzePattern(kkt)
 
     self.solver.factorize(kkt)
@@ -163,31 +163,31 @@ class MumpsSolver(LinearSolver):
   def __init__(self):
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
-    self.module = petsc4py.PETSc
-    self.ksp = self.module.KSP().create()
+    self.petscpy = petsc4py.PETSc
+    self.ksp = self.petscpy.KSP().create()
 
     # Configure as a direct solver (apply preconditioner only)
-    self.ksp.setType(self.module.KSP.Type.PREONLY)
-    self.ksp.getPC().setType(self.module.PC.Type.LU)
+    self.ksp.setType(self.petscpy.KSP.Type.PREONLY)
+    self.ksp.getPC().setType(self.petscpy.PC.Type.LU)
     self.ksp.getPC().setFactorSolverType("mumps")
 
     # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
     self.ksp.setFromOptions()
 
   def update(self, kkt: sp.spmatrix):
-    kkt_wrapper = self.module.Mat().createAIJ(
+    kkt_wrapper = self.petscpy.Mat().createAIJ(
         size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
     )
-    kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
-    kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
+    kkt_wrapper.setOption(self.petscpy.Mat.Option.SYMMETRIC, True)
+    kkt_wrapper.setOption(self.petscpy.Mat.Option.SPD, False)
     kkt_wrapper.assemble()
 
     # Check if KSP already has a matrix defined to determine the flag
     already_factorized = self.ksp.getOperators()[0] is not None
     if already_factorized:
-      flag = self.module.Mat.Structure.SAME_NONZERO_PATTERN
+      flag = self.petscpy.Mat.Structure.SAME_NONZERO_PATTERN
     else:
-      flag = self.module.Mat.Structure.DIFFERENT_NONZERO_PATTERN
+      flag = self.petscpy.Mat.Structure.DIFFERENT_NONZERO_PATTERN
 
     try:
       self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
@@ -199,8 +199,8 @@ class MumpsSolver(LinearSolver):
     self.ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    b = self.module.Vec().createWithArray(rhs.ravel())
-    x = self.module.Vec().createSeq(rhs.size)
+    b = self.petscpy.Vec().createWithArray(rhs.ravel())
+    x = self.petscpy.Vec().createSeq(rhs.size)
     self.ksp.solve(b, x)
     return x.getArray().real.reshape(rhs.shape)
 
@@ -212,23 +212,25 @@ class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
 
   def __init__(self):
-    import nvmath.sparse  # pylint: disable=g-import-not-at-top
+    import nvmath  # pylint: disable=g-import-not-at-top
 
-    self.module = nvmath.sparse
+    self.nvmath = nvmath
     self.solver: nvmath.sparse.advanced.DirectSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
     if self.solver is None:
-      sparse_system_type = self.module.advanced.DirectSolverMatrixType.SYMMETRIC
+      sparse_system_type = (
+          self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
+      )
       # Turn off annoying logs by default.
       logger = logging.getLogger("null")
       logger.disabled = True
-      options = self.module.advanced.DirectSolverOptions(
+      options = self.nvmath.sparse.advanced.DirectSolverOptions(
           sparse_system_type=sparse_system_type, logger=logger
       )
       # RHS must be in column major order (Fortran) for cuDSS.
       dummy_rhs = np.empty(kkt.shape[1], order="F", dtype=np.float64)
-      self.solver = self.module.advanced.DirectSolver(
+      self.solver = self.nvmath.sparse.advanced.DirectSolver(
           kkt, dummy_rhs, options=options
       )
       self.solver.plan()
@@ -249,7 +251,14 @@ class CuDssSolver(LinearSolver):
   def __del__(self):
     """Frees the solver resources."""
     if self.solver is not None:
-      self.solver.free()
+      try:
+        # If the CUDA context is already dead (e.g. at shutdown), this may fail.
+        self.solver.free()
+      except self.nvmath.internal.bindings.CudaError as e:
+        logging.debug("CudaError during CuDssSolver deletion: %s", e)
+        pass
+      finally:
+        self.solver = None
 
 
 class DirectKktSolver:
