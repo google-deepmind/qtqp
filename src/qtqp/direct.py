@@ -266,6 +266,9 @@ class CuDssSolver(LinearSolver):
     if self.solver is not None:
       self.solver.free()
       self.solver = None
+      # Force Python to clean up any 'zombie' references held by tracebacks.
+      import gc  # pylint: disable=g-import-not-at-top
+      gc.collect()
 
 
 class DirectKktSolver:

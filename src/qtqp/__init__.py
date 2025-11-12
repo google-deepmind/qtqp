@@ -462,7 +462,6 @@ class QTQP:
       # Fallback if quadratic solve fails numerically (rare but possible)
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
-      del e  # Make sure this doesn't keep zombie references around.
 
     # Reconstruct full (x, y) step from KKT solution components
     xy_plus = kinv_r - self.kinv_q * tau_plus
