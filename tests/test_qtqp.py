@@ -262,6 +262,7 @@ def test_direct_linear_solver(seed, linear_solver):
   q = np.concatenate([c, b])
   linear_solver.update(mu=mu, s=s, y=y)
   sol, _ = linear_solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  linear_solver.free()
   np.testing.assert_allclose(
       p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:], c, atol=1e-10, rtol=1e-10
   )
@@ -299,6 +300,7 @@ def test_resolvent_operator(seed, linear_solver):
   solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
       rhs=solver.q, warm_start=np.zeros(n + m)
   )
+  solver._linear_solver.free()  # pylint: disable=protected-access
   r_anchor = rng.uniform(size=n + m)
   tau_anchor = np.array([rng.uniform()])
   x_new, y_new, tau_new, _ = solver._newton_step(  # pylint: disable=protected-access
@@ -395,6 +397,7 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
     s[z:] = np.maximum(s[z:], 1e-30)
     tau = np.maximum(tau, 1e-30)
 
+  solver._linear_solver.free()  # pylint: disable=protected-access
   np.testing.assert_allclose(
       p @ x + mu * x + a.T @ y + c * tau, np.zeros(n), atol=1e-9, rtol=1e-9
   )
