@@ -268,7 +268,7 @@ class CuDssSolver(LinearSolver):
       self.solver = None
       # Force Python to clean up any 'zombie' references held by tracebacks.
       import gc  # pylint: disable=g-import-not-at-top
-      gc.collect()
+      gc.collect(0)  # Run GC only on the youngest generation.
 
 
 class DirectKktSolver:
