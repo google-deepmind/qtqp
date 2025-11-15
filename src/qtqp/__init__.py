@@ -260,7 +260,7 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
-      mu = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
+      mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Solve for KKT @ q ---
