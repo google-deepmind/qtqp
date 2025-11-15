@@ -445,6 +445,21 @@ def _solve_for_tau_alternative(
   return (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
 
 
+def _solve_for_tau_iterative(n, kinv_q, kinv_r, mu, mu_target, r_tau, p, q, tau_init):
+  """Solves the quadratic equation for the tau step in homogeneous embedding."""
+  tau = tau_init
+  for _ in range(100):
+    t_a = mu
+    z = kinv_r - tau * kinv_q
+    t_b = -r_tau[0] - z @ q
+    t_c = -mu_target - z[:n] @ (p @ z[:n])
+    discriminant = t_b**2 - 4 * t_a * t_c
+    tau = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a) / 2 + tau / 2
+    print(tau)
+
+  return tau
+
+
 @pytest.mark.parametrize('seed', 1142 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_equivalent_tau_solution(seed, linear_solver):
@@ -489,6 +504,12 @@ def test_equivalent_tau_solution(seed, linear_solver):
   tau_2 = _solve_for_tau(
       n, solver.q, p, kinv_r, solver.kinv_q, mu, mu_target, r_tau
   )
+  print(tau_1)
+  print(tau_2)
+  tau_iterative = _solve_for_tau_iterative(
+      n, solver.kinv_q, kinv_r, mu, mu_target, r_tau, p, solver.q, tau_2
+  )
   np.testing.assert_allclose(tau_qtqp, tau_1, atol=1e-11, rtol=1e-11)
   np.testing.assert_allclose(tau_qtqp, tau_2, atol=1e-11, rtol=1e-11)
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
+  np.testing.assert_allclose(tau_qtqp, tau_iterative, atol=1e-11, rtol=1e-11)
