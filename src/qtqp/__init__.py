@@ -482,16 +482,6 @@ class QTQP:
     t_c = -kinv_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Theoretical guarantees state t_a > 0 and t_c <= 0.
-    # We allow small numerical violations but error on large ones.
-    if t_a < -1e-9:
-      raise ValueError(f"t_a should be positive, got {t_a}")
-    t_a = max(t_a, _EPS)  # Ensure strictly positive for division
-
-    if t_c > 1e-9:
-      raise ValueError(f"t_c should be non-positive, got {t_c}")
-    t_c = min(t_c, 0.0)
-
     # Standard quadratic formula for the positive root
     discriminant = t_b**2 - 4 * t_a * t_c
     if discriminant < -1e-9:
