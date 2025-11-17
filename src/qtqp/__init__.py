@@ -460,7 +460,7 @@ class QTQP:
       tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
-      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
+      print("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
     # Reconstruct full (x, y) step from KKT solution components
@@ -508,6 +508,8 @@ class QTQP:
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
+    sy = s * y
+    s_over_y = s / y
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -597,6 +599,12 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
+	"max_sy" :np.max(sy[z:])
+	"min_sy" :np.min(sy[z:])
+	"std_sy" :np.std(sy[z:])
+	"max_s_over_y" :np.max(s_over_y[z:])
+	"min_s_over_y" :np.min(s_over_y[z:])
+	"std_s_over_y" :np.std(s_over_y[z:])
     })
     return status
 
