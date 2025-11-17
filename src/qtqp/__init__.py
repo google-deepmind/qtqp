@@ -260,7 +260,7 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
-      mu = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
+      mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Solve for KKT @ q ---
@@ -482,16 +482,6 @@ class QTQP:
     t_c = -kinv_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Theoretical guarantees state t_a > 0 and t_c <= 0.
-    # We allow small numerical violations but error on large ones.
-    if t_a < -1e-9:
-      raise ValueError(f"t_a should be positive, got {t_a}")
-    t_a = max(t_a, _EPS)  # Ensure strictly positive for division
-
-    if t_c > 1e-9:
-      raise ValueError(f"t_c should be non-positive, got {t_c}")
-    t_c = min(t_c, 0.0)
-
     # Standard quadratic formula for the positive root
     discriminant = t_b**2 - 4 * t_a * t_c
     if discriminant < -1e-9:
@@ -518,6 +508,8 @@ class QTQP:
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
+    sy = s * y
+    s_over_y = s / y
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -607,6 +599,13 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
+        "max_sy": np.max(sy[self.z :]),
+        "min_sy": np.min(sy[self.z :]),
+        "std_sy": np.std(sy[self.z :]),
+        "max_s_over_y": np.max(s_over_y[self.z :]),
+        "min_s_over_y": np.min(s_over_y[self.z :]),
+        "mean_s_over_y": np.mean(s_over_y[self.z :]),
+        "std_s_over_y": np.std(s_over_y[self.z :]),
     })
     return status
 
