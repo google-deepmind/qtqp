@@ -153,9 +153,6 @@ solve(
     linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.SCIPY,
     verbose: bool = True,
     equilibrate: bool = True,
-    x: np.ndarray | None = None,
-    y: np.ndarray | None = None,
-    s: np.ndarray | None = None,
 ) -> qtqp.Solution
 ```
 
@@ -174,7 +171,6 @@ Key parameters:
     below).
 -   `verbose`: Print per-iteration table with key metrics.
 -   `equilibrate`: Scale/equilibrate data for numerical stability.
--   `x`, `y`, `s`: Optional warm-starts (must satisfy conic interiority).
 
 This method will return a `qtqp.Solution` object, with fields:
 
