@@ -460,7 +460,7 @@ class QTQP:
       tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
-      print("Tau solve failed, using previous tau. Error: %s", e)
+      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
     # Reconstruct full (x, y) step from KKT solution components
