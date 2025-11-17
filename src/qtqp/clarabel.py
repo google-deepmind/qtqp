@@ -8,7 +8,7 @@ from qtqp.direct import DirectKktSolver
 
 
 class Clarabel(QTQP):
-    def solve(
+    def solve_clarabel(
         self,
         *,
         atol: float = 1e-7,
@@ -281,7 +281,7 @@ class Clarabel(QTQP):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute v0 as described in Section 2.4.1."""
         linear_solver.update(mu=0, s=np.ones(self.m), y=np.ones(self.m))
-        if self.p.nnz > 0:
+        if self.p.count_nonzero() > 0:
             xy, _ = linear_solver.solve(
                 rhs=np.concat([-c, -b]),
                 warm_start=np.zeros(self.m + self.n),
