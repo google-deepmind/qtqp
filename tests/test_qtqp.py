@@ -50,10 +50,10 @@ def _gen_feasible(m, n, z, random_state=None):
   s = y - w
 
   a = sparse.random(
-      m, n, density=0.1, format='csc', data_rvs=lambda x: rng.normal(size=x)
+      m, n, density=0.1, format='csc', rng=rng, data_rvs=lambda x: rng.normal(size=x)
   )
   p = sparse.random(
-      n, n, density=0.01, format='csc', data_rvs=lambda x: rng.normal(size=x)
+      n, n, density=0.01, format='csc', rng=rng, data_rvs=lambda x: rng.normal(size=x)
   )
 
   c = -a.T @ y
