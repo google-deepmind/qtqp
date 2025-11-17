@@ -292,7 +292,7 @@ class QTQP:
       # Compute predictor step size and resulting centering parameter (sigma)
       alpha_p = self._compute_step_size(y, s, d_y_p, d_s_p)
       sigma = self._compute_sigma(
-          x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
+          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
       )
 
       # --- Step 3: Corrector Step ---
@@ -419,19 +419,17 @@ class QTQP:
     min_step = np.min(-y[idx] / delta_y[idx])
     return min(1.0, min_step)
 
-  def _compute_sigma(self, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s) -> float:
+  def _compute_sigma(
+      self, mu_curr, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s
+  ) -> float:
     """Computes the centering parameter sigma using Mehrotra's heuristic."""
-    # Current complementarity
-    mu_curr = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
-
     # Projected complementarity after affine step
     x_aff = x + alpha * d_x
     y_aff = y + alpha * d_y
     tau_aff = tau + alpha * d_tau
     s_aff = s + alpha * d_s
-    mu_aff = (y_aff @ s_aff) / max(
-        _EPS, x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
-    )
+    _, y_aff, _, s_aff = self._normalize(x_aff, y_aff, tau_aff, s_aff)
+    mu_aff = (y_aff @ s_aff) / (self.m - self.z)
 
     # If affine step reduces mu significantly, use small sigma (aggressive)
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
@@ -509,7 +507,7 @@ class QTQP:
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
     sy = s * y
-    s_over_y = s / y
+    s_over_y = s / np.maximum(_EPS, y)
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
