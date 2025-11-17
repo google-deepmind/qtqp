@@ -599,12 +599,13 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
-	"max_sy" :np.max(sy[z:])
-	"min_sy" :np.min(sy[z:])
-	"std_sy" :np.std(sy[z:])
-	"max_s_over_y" :np.max(s_over_y[z:])
-	"min_s_over_y" :np.min(s_over_y[z:])
-	"std_s_over_y" :np.std(s_over_y[z:])
+        "max_sy": np.max(sy[self.z :]),
+        "min_sy": np.min(sy[self.z :]),
+        "std_sy": np.std(sy[self.z :]),
+        "max_s_over_y": np.max(s_over_y[self.z :]),
+        "min_s_over_y": np.min(s_over_y[self.z :]),
+        "mean_s_over_y": np.mean(s_over_y[self.z :]),
+        "std_s_over_y": np.std(s_over_y[self.z :]),
     })
     return status
 
