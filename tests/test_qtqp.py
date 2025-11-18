@@ -50,10 +50,20 @@ def _gen_feasible(m, n, z, random_state=None):
   s = y - w
 
   a = sparse.random(
-      m, n, density=0.1, format='csc', data_rvs=lambda x: rng.normal(size=x)
+      m,
+      n,
+      density=0.1,
+      format='csc',
+      rng=rng,
+      data_rvs=lambda x: rng.normal(size=x),
   )
   p = sparse.random(
-      n, n, density=0.01, format='csc', data_rvs=lambda x: rng.normal(size=x)
+      n,
+      n,
+      density=0.01,
+      format='csc',
+      rng=rng,
+      data_rvs=lambda x: rng.normal(size=x),
   )
 
   c = -a.T @ y
@@ -172,14 +182,19 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
 @pytest.mark.parametrize('seed', 42 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10), (10, 5, 3)))
-def test_solve(equilibrate, seed, linear_solver, mnz):
+def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver
   )
+
+  # Record stats
+  record_iterations(solution.stats[-1]['iter'])
+
   _assert_solution(solution, a, b, c, p, z)
 
 
@@ -187,14 +202,19 @@ def test_solve(equilibrate, seed, linear_solver, mnz):
 @pytest.mark.parametrize('seed', 142 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10),))
-def test_infeasible(equilibrate, seed, linear_solver, mnz):
+def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver with infeasible QP."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver
   )
+
+  # Record stats
+  record_iterations(solution.stats[-1]['iter'])
+
   _assert_infeasible(solution, a, b, z)
 
 
@@ -202,14 +222,19 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz):
 @pytest.mark.parametrize('seed', list(242 + np.arange(10)))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10),))
-def test_unbounded(equilibrate, seed, linear_solver, mnz):
+def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver with unbounded QP."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver
   )
+
+  # Record stats
+  record_iterations(solution.stats[-1]['iter'])
+
   _assert_unbounded(solution, a, c, p, z)
 
 
