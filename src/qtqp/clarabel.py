@@ -1,7 +1,7 @@
 import timeit
 
 import numpy as np
-from scipy.sparse import csc_matrix
+import scipy as sp
 
 from qtqp import QTQP, Solution, LinearSolver, SolutionStatus
 from qtqp.direct import DirectKktSolver
@@ -24,9 +24,7 @@ class Clarabel(QTQP):
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
         equilibrate: bool = True,
-        x: np.ndarray | None = None,
-        y: np.ndarray | None = None,
-        s: np.ndarray | None = None,
+        qtqp_init: bool = False,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
@@ -39,29 +37,55 @@ class Clarabel(QTQP):
         self.rtol_infeas = rtol_infeas
         self.equilibrate = equilibrate
 
-        if self.equilibrate:
-            a, p, b, c, self.d, self.e = self._equilibrate()
-        else:
-            a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+        # --- Initialization ---
+        if qtqp_init:
+            x = np.zeros(self.n)
+            y = np.zeros(self.m)
+            s = np.zeros(self.m)
 
-        linear_solver = DirectKktSolver(
-            a=a,
-            p=p,
-            z=self.z,
-            min_static_regularization=min_static_regularization,
-            max_iterative_refinement_steps=max_iterative_refinement_steps,
-            atol=linear_solver_atol,
-            rtol=linear_solver_rtol,
-            solver=linear_solver.value(),
-        )
+            y[self.z:] = 1.0
+            s[self.z:] = 1.0
+
+            if self.equilibrate:
+                a, p, b, c, self.d, self.e = self._equilibrate()
+                x, y, s = self._equilibrate_iterates(x, y, s)
+            else:
+                a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+
+            linear_solver = DirectKktSolver(
+                a=a,
+                p=p,
+                z=self.z,
+                min_static_regularization=min_static_regularization,
+                max_iterative_refinement_steps=max_iterative_refinement_steps,
+                atol=linear_solver_atol,
+                rtol=linear_solver_rtol,
+                solver=linear_solver.value(),
+            )
+
+        else:
+            if self.equilibrate:
+                a, p, b, c, self.d, self.e = self._equilibrate()
+            else:
+                a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+
+            linear_solver = DirectKktSolver(
+                a=a,
+                p=p,
+                z=self.z,
+                min_static_regularization=min_static_regularization,
+                max_iterative_refinement_steps=max_iterative_refinement_steps,
+                atol=linear_solver_atol,
+                rtol=linear_solver_rtol,
+                solver=linear_solver.value(),
+            )
+            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
+
+        τ = κ = 1.0
+
         # This is the second RHS in (12). When we call 'solve' the
         # b row will be negated (and hence positive, as in the paper)
         constant_rhs = np.concat([-c, -b])
-
-        # --- Initialization ---
-        if x is None and y is None and s is None:
-            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
-        τ = κ = 1.0
 
         # --- Verify strict interiority ---
         assert np.all(y[self.z :] > 0) and np.all(s[self.z :] > 0)
@@ -79,7 +103,7 @@ class Clarabel(QTQP):
             stats = {}
 
             # Eq. (9c)
-            μ = s @ y / self.m
+            μ = (s @ y) / (self.m - self.z)
 
             # Pass mu=0 and let 'min_static_regularization' handle the
             # regularization they discuss in Section 3.3
@@ -87,7 +111,6 @@ class Clarabel(QTQP):
 
             # --- Step 0: Solve K @ Δ2 = q for Δ2 ---
             #   This calculation is half of Eq. (12)
-            #   TODO: Should we use a different/better warm_start?
             Δ2, _ = linear_solver.solve(
                 rhs=constant_rhs, warm_start=np.zeros(self.m + self.n)
             )
@@ -103,6 +126,9 @@ class Clarabel(QTQP):
                 s=s,
                 τ=τ,
                 κ=κ,
+                p=p,
+                b=b,
+                c=c,
                 linear_solver=linear_solver,
                 Δx2=Δx2,
                 Δy2=Δy2,
@@ -130,6 +156,9 @@ class Clarabel(QTQP):
                 s=s,
                 τ=τ,
                 κ=κ,
+                p=p,
+                b=b,
+                c=c,
                 linear_solver=linear_solver,
                 Δx2=Δx2,
                 Δy2=Δy2,
@@ -205,8 +234,8 @@ class Clarabel(QTQP):
         s: np.ndarray,
         τ: float,
         κ: float,
-        a: csc_matrix,
-        p: csc_matrix,
+        a: sp.sparse.csc_matrix,
+        p: sp.sparse.csc_matrix,
         c: np.ndarray,
         b: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
@@ -221,8 +250,8 @@ class Clarabel(QTQP):
         s: np.ndarray,
         τ: float,
         κ: float,
-        a: csc_matrix,
-        p: csc_matrix,
+        a: sp.sparse.csc_matrix,
+        p: sp.sparse.csc_matrix,
         c: np.ndarray,
         b: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
@@ -240,6 +269,9 @@ class Clarabel(QTQP):
         s: np.ndarray,
         τ: float,
         κ: float,
+        p: sp.sparse.csr_matrix,
+        b: np.ndarray,
+        c: np.ndarray,
         linear_solver: DirectKktSolver,
         Δx2: np.ndarray,
         Δy2: np.ndarray,
@@ -256,11 +288,13 @@ class Clarabel(QTQP):
         )
         Δx1, Δy1 = np.split(Δ1, [self.n])
 
+        # Pre-compute for multiple use
         ξ = x / τ
-        Pξ = self.p @ ξ
+        Pξ = p @ ξ
+        θ = 2 * Pξ + c
 
-        Δτ_num = dτ - dκ / τ + (2 * Pξ + self.c) @ Δx1 + self.b @ Δy1
-        Δτ_den = κ / τ + ξ @ Pξ - (2 * Pξ + self.c) @ Δx2 - self.b @ Δy2
+        Δτ_num = dτ - dκ / τ + θ @ Δx1 + b @ Δy1
+        Δτ_den = κ / τ + ξ @ Pξ - θ @ Δx2 - b @ Δy2
         Δτ = Δτ_num / Δτ_den
         Δκ = -(dκ + κ * Δτ) / τ
 
@@ -289,7 +323,7 @@ class Clarabel(QTQP):
             x, y = np.split(xy, [self.n])
 
             s = np.zeros_like(y)
-            s[self.z :] = -y[self.z :].copy()
+            s[self.z :] = -y[self.z :]
             if s[self.z :].min() < ϵ:
                 s[self.z :] += ϵ - s[self.z :].min()
 
@@ -302,7 +336,7 @@ class Clarabel(QTQP):
             )
             x, s = np.split(xs, [self.n])
 
-            s = -s.copy()
+            s = -s
             if s[self.z :].min() < ϵ:
                 s[self.z :] += ϵ - s[self.z :].min()
 
