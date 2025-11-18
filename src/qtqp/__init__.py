@@ -158,9 +158,6 @@ class QTQP:
       linear_solver: LinearSolver = LinearSolver.SCIPY,
       verbose: bool = True,
       equilibrate: bool = True,
-      x: np.ndarray | None = None,
-      y: np.ndarray | None = None,
-      s: np.ndarray | None = None,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -193,9 +190,6 @@ class QTQP:
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
-      x: Initial primal solution vector.
-      y: Initial dual solution vector.
-      s: Initial slack vector.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -226,25 +220,13 @@ class QTQP:
       )
 
     # --- Initialization ---
-    # Use supplied warm-starts or default cold-starts.
-    x = np.zeros(self.n) if x is None else np.array(x, dtype=np.float64)
-    if y is None:
-      y = np.zeros(self.m)
-      # Initialize inequality duals to 1.0 for interiority
-      y[self.z :] = 1.0
-    else:
-      y = np.array(y, dtype=np.float64)
-      if y.shape != (self.m,):
-        raise ValueError(f"y must have shape ({self.m},), got {y.shape}")
+    x = np.zeros(self.n)
+    y = np.zeros(self.m)
+    s = np.zeros(self.m)
 
-    if s is None:
-      s = np.zeros(self.m)
-      # Initialize inequality slacks to 1.0 for interiority
-      s[self.z :] = 1.0
-    else:
-      s = np.array(s, dtype=np.float64)
-      if s.shape != (self.m,):
-        raise ValueError(f"s must have shape ({self.m},), got {s.shape}")
+    # Initialize inequality duals and slacksto 1.0 for interiority
+    y[self.z :] = 1.0
+    s[self.z :] = 1.0
 
     # tau is homogeneous embedding variable. Kept as 1-element array for
     # consistent vector operations (e.g., @ operator).
@@ -277,6 +259,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
+    status = SolutionStatus.UNFINISHED
     self._log_header()
 
     # --- Main Iteration Loop ---
@@ -286,7 +269,7 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
-      mu = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
+      mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Solve for KKT @ q ---
@@ -318,7 +301,7 @@ class QTQP:
       # Compute predictor step size and resulting centering parameter (sigma)
       alpha_p = self._compute_step_size(y, s, d_y_p, d_s_p)
       sigma = self._compute_sigma(
-          x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
+          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
       )
 
       # --- Step 3: Corrector Step with Multiple Centrality Corrections ---
@@ -393,27 +376,31 @@ class QTQP:
       self._log_iteration(stats_i)
       stats.append(stats_i)
       if status != SolutionStatus.UNFINISHED:
-        if self.equilibrate:
-          x, y, s = self._unequilibrate_iterates(x, y, s)
-        match status:
-          case SolutionStatus.SOLVED:
-            self._log_footer("Solved")
-            return Solution(x / tau, y / tau, s / tau, stats, status)
-          case SolutionStatus.INFEASIBLE:
-            self._log_footer("Primal infeasible / dual unbounded")
-            x.fill(np.nan)
-            s.fill(np.nan)
-            return Solution(x, y / abs(self.b @ y), s, stats, status)
-          case SolutionStatus.UNBOUNDED:
-            self._log_footer("Dual infeasible / primal unbounded")
-            y.fill(np.nan)
-            abs_ctx = abs(self.c @ x)
-            return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
-          case _:
-            raise ValueError(f"Unknown convergence status: {status}")
+        break
 
-    self._log_footer(f"Failed to converge in {max_iter} iterations")
-    return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+    # We have terminated for one reason or another.
+    self._linear_solver.free()
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+    match status:
+      case SolutionStatus.SOLVED:
+        self._log_footer("Solved")
+        return Solution(x / tau, y / tau, s / tau, stats, status)
+      case SolutionStatus.INFEASIBLE:
+        self._log_footer("Primal infeasible / dual unbounded")
+        x.fill(np.nan)
+        s.fill(np.nan)
+        return Solution(x, y / abs(self.b @ y), s, stats, status)
+      case SolutionStatus.UNBOUNDED:
+        self._log_footer("Dual infeasible / primal unbounded")
+        y.fill(np.nan)
+        abs_ctx = abs(self.c @ x)
+        return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+      case SolutionStatus.UNFINISHED:
+        self._log_footer(f"Failed to converge in {max_iter} iterations")
+        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+      case _:
+        raise ValueError(f"Unknown convergence status: {status}")
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Ruiz equilibration to improve numerical conditioning."""
@@ -424,15 +411,16 @@ class QTQP:
 
     for i in range(num_iters):
       # Row norms (infinity norm)
-      # Add small epsilon to avoid division by zero for zero rows
-      d_i = sp.linalg.norm(a, np.inf, axis=1) + _EPS
+      d_i = sp.linalg.norm(a, np.inf, axis=1)
+      d_i = np.where(d_i == 0.0, 1.0, d_i)  # If a row is zero, set d_i 1.0.
       d_i = 1.0 / np.sqrt(d_i)
       d_i = np.clip(d_i, min_scale, max_scale)
 
       # Column norms (max of A col norms and P col norms)
       e_i_a = sp.linalg.norm(a, np.inf, axis=0)
       e_i_p = sp.linalg.norm(p, np.inf, axis=0)
-      e_i = np.maximum(e_i_a, e_i_p) + _EPS
+      e_i = np.maximum(e_i_a, e_i_p)
+      e_i = np.where(e_i == 0.0, 1.0, e_i)  # If a col is zero, set e_i 1.0.
       e_i = 1.0 / np.sqrt(e_i)
       e_i = np.clip(e_i, min_scale, max_scale)
 
@@ -471,19 +459,17 @@ class QTQP:
     min_step = np.min(-y[idx] / delta_y[idx])
     return min(1.0, min_step)
 
-  def _compute_sigma(self, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s) -> float:
+  def _compute_sigma(
+      self, mu_curr, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s
+  ) -> float:
     """Computes the centering parameter sigma using Mehrotra's heuristic."""
-    # Current complementarity
-    mu_curr = (y @ s) / max(_EPS, x @ x + y @ y + tau @ tau)
-
     # Projected complementarity after affine step
     x_aff = x + alpha * d_x
     y_aff = y + alpha * d_y
     tau_aff = tau + alpha * d_tau
     s_aff = s + alpha * d_s
-    mu_aff = (y_aff @ s_aff) / max(
-        _EPS, x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
-    )
+    _, y_aff, _, s_aff = self._normalize(x_aff, y_aff, tau_aff, s_aff)
+    mu_aff = (y_aff @ s_aff) / (self.m - self.z)
 
     # If affine step reduces mu significantly, use small sigma (aggressive)
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
@@ -534,16 +520,6 @@ class QTQP:
     t_c = -kinv_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Theoretical guarantees state t_a > 0 and t_c <= 0.
-    # We allow small numerical violations but error on large ones.
-    if t_a < -1e-9:
-      raise ValueError(f"t_a should be positive, got {t_a}")
-    t_a = max(t_a, _EPS)  # Ensure strictly positive for division
-
-    if t_c > 1e-9:
-      raise ValueError(f"t_c should be non-positive, got {t_c}")
-    t_c = min(t_c, 0.0)
-
     # Standard quadratic formula for the positive root
     discriminant = t_b**2 - 4 * t_a * t_c
     if discriminant < -1e-9:
@@ -570,6 +546,8 @@ class QTQP:
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
+    sy = s * y
+    s_over_y = s / np.maximum(_EPS, y)
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -659,6 +637,13 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
+        "max_sy": np.max(sy[self.z :]),
+        "min_sy": np.min(sy[self.z :]),
+        "std_sy": np.std(sy[self.z :]),
+        "max_s_over_y": np.max(s_over_y[self.z :]),
+        "min_s_over_y": np.min(s_over_y[self.z :]),
+        "mean_s_over_y": np.mean(s_over_y[self.z :]),
+        "std_s_over_y": np.std(s_over_y[self.z :]),
     })
     return status
 
