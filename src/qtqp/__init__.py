@@ -207,6 +207,10 @@ class QTQP:
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
 
+    self.linf_neighborhood_scale = 0.1
+    self.backtrack_factor = 0.95
+    self.step_size_scale = step_size_scale
+
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
@@ -299,10 +303,11 @@ class QTQP:
       d_s_p[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
       # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s_p)
+      alpha_p, backtracks_p = self._compute_step_size(x, y, tau, s, d_x_p, d_y_p, d_tau_p, d_s_p)
       sigma = self._compute_sigma(
           mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
       )
+      print(f"backtracks_p: {backtracks_p}")
 
       # --- Step 3: Corrector Step with Multiple Centrality Corrections ---
       # Start with Mehrotra correction term.
@@ -340,7 +345,8 @@ class QTQP:
             - y_c[self.z :] * s[self.z :] / y[self.z :]
         )
 
-        alpha_try = self._compute_step_size(y, s, d_y_try, d_s_try)
+        alpha_try, backtracks_try = self._compute_step_size(x, y, tau, s, d_x_try, d_y_try, d_tau_try, d_s_try)
+        print(f"backtracks_try: {backtracks_try}")
 
         # MCC Decision: Accept if it's the first one (standard Mehrotra) OR
         # if it significantly improves the step size over the best found so far.
@@ -361,10 +367,10 @@ class QTQP:
       alpha = best_alpha
 
       # --- Step 4: Update Iterates ---
-      x += step_size_scale * alpha * d_x
-      y += step_size_scale * alpha * d_y
-      tau += step_size_scale * alpha * d_tau
-      s += step_size_scale * alpha * d_s
+      x += self.step_size_scale * alpha * d_x
+      y += self.step_size_scale * alpha * d_y
+      tau += self.step_size_scale * alpha * d_tau
+      s += self.step_size_scale * alpha * d_s
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
@@ -538,11 +544,36 @@ class QTQP:
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     return x * scale, y * scale, tau * scale, s * scale
 
-  def _compute_step_size(self, y, s, d_y, d_s) -> float:
+  def _compute_step_size(self, x, y, tau, s, d_x, d_y, d_tau, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
     alpha_s = self._max_step_size(s[self.z :], d_s[self.z :])
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
-    return min(alpha_s, alpha_y)
+    alpha = min(alpha_s, alpha_y)
+
+    # Stay within the neighborhood of the central path.
+    def in_neighborhood(alpha):
+      x_new = x + self.step_size_scale * alpha * d_x
+      y_new = y + self.step_size_scale * alpha * d_y
+      tau_new = tau + self.step_size_scale * alpha * d_tau
+      s_new = s + self.step_size_scale * alpha * d_s
+      x_new, y_new, tau_new, s_new = self._normalize(x_new, y_new, tau_new, s_new)
+
+      vec_norm_sq = x_new @ x_new + y_new @ y_new + tau_new @ tau_new
+      mu_new = (y_new @ s_new) / vec_norm_sq
+
+      return np.all(
+        y_new[self.z :] * s_new[self.z :]
+        > self.linf_neighborhood_scale * mu_new
+      )
+
+    backtracks = 0
+    # Backtrack until neighborhood condition is satisfied or alpha is small
+    while not in_neighborhood(alpha) and alpha > 1e-6:
+      alpha *= self.backtrack_factor
+      backtracks += 1
+
+    return alpha, backtracks
+
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""

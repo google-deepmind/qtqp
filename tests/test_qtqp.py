@@ -390,6 +390,9 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
       rtol=1e-12,
       solver=linear_solver.value(),
   )
+  solver.step_size_scale = 0.99
+  solver.backtrack_factor = 0.95
+  solver.linf_neighborhood_scale = 0.1
   for _ in range(20):  # 20 steps should be enough for convergence.
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
     solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
@@ -410,11 +413,11 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
     d_s = np.zeros(m)
     d_s[z:] = mu / y[z:] - y_t[z:] * s[z:] / y[z:]
 
-    step_size = 0.99 * solver._compute_step_size(y, s, d_y, d_s)  # pylint: disable=protected-access
-    x += step_size * d_x
-    y += step_size * d_y
-    tau += step_size * d_tau
-    s += step_size * d_s
+    step_size, _ = solver._compute_step_size(x, y, tau, s, d_x, d_y, d_tau, d_s)  # pylint: disable=protected-access
+    x += 0.99 * step_size * d_x
+    y += 0.99 * step_size * d_y
+    tau += 0.99 * step_size * d_tau
+    s += 0.99 * step_size * d_s
 
     # Ensure variables stay strictly in the cone to prevent numerical issues.
 
