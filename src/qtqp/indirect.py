@@ -51,7 +51,7 @@ class MinResSolver(LinearSolver):
 
   def format(self) -> str:
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
-    ...
+    return "csc"
 
 class IndirectKktSolver:
   """Indirect KKT linear system solver.
@@ -123,7 +123,6 @@ class IndirectKktSolver:
     # Calculate the dynamic diagonal block D = s / y for inequality rows.
     # For equality rows (first z), the diagonal is 0.
     h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
-
     # "True" diagonals for accurate residual calculation (no regularization).
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     true_diags = np.concatenate([self.p_diags, h]) + mu
@@ -132,6 +131,16 @@ class IndirectKktSolver:
     # Flip the sign of the cone variables.
     true_diags[self.n :] *= -1.0
     reg_diags[self.n :] *= -1.0
+    # 2. Restore true values for subsequent residual checks in `solve()`.
+    self.kkt.data[self.kkt_nan_idxs] = true_diags
+
+    def _check_preconditioner(self) -> None:
+      """Checks the preconditioner."""
+      M_dense = self.M.toarray()
+      lam = scipy.linalg.eigh(self.kkt.toarray(), M_dense, eigvals_only=True)
+      cond_number_K = np.linalg.cond(self.kkt.toarray())
+      cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
+      print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")
 
     def solve(self, rhs: np.ndarray) -> np.ndarray:
       """Solves the linear system with the given preconditioner and data"""

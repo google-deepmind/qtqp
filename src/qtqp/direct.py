@@ -340,14 +340,6 @@ class DirectKktSolver:
     self.kkt.data[self.kkt_nan_idxs] = reg_diags
     self.solver.update(self.kkt)
 
-    dense_kkt = self.kkt.toarray()
-    M = sp.block_diag([self.p + mu*sp.eye(self.p.shape[0]), -1.0*sp.diags(reg_diags[self.n :])])
-    M_dense = M.toarray()
-    lam = scipy.linalg.eigh(dense_kkt, M_dense, eigvals_only=True)
-    cond_number_K = np.linalg.cond(dense_kkt)
-    cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
-
-    print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")    
     # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
 
@@ -430,6 +422,3 @@ class DirectKktSolver:
         "final_residual_norm": residual_norm,
         "status": status,
     }
-
-def _get_preconditioner(mu: float, p: sp.spmatrix) -> float:
-  ...
