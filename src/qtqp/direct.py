@@ -19,6 +19,7 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 import scipy.sparse as sp
+import scipy
 
 
 class LinearSolver(Protocol):
@@ -290,6 +291,7 @@ class DirectKktSolver:
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
+    self.p = p
     self.p_diags = p.diagonal()
     self.min_static_regularization = min_static_regularization
     self.max_iterative_refinement_steps = max_iterative_refinement_steps
@@ -325,7 +327,6 @@ class DirectKktSolver:
     # Calculate the dynamic diagonal block D = s / y for inequality rows.
     # For equality rows (first z), the diagonal is 0.
     h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
-
     # "True" diagonals for accurate residual calculation (no regularization).
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     true_diags = np.concatenate([self.p_diags, h]) + mu
@@ -339,6 +340,14 @@ class DirectKktSolver:
     self.kkt.data[self.kkt_nan_idxs] = reg_diags
     self.solver.update(self.kkt)
 
+    dense_kkt = self.kkt.toarray()
+    M = sp.block_diag([self.p + mu*sp.eye(self.p.shape[0]), -1.0*sp.diags(reg_diags[self.n :])])
+    M_dense = M.toarray()
+    lam = scipy.linalg.eigh(dense_kkt, M_dense, eigvals_only=True)
+    cond_number_K = np.linalg.cond(dense_kkt)
+    cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
+
+    print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")    
     # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
 
@@ -421,3 +430,6 @@ class DirectKktSolver:
         "final_residual_norm": residual_norm,
         "status": status,
     }
+
+def _get_preconditioner(mu: float, p: sp.spmatrix) -> float:
+  ...

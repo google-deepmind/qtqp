@@ -115,7 +115,7 @@ class Clarabel(QTQP):
             if Δκ_aff < 0:
                 α_aff = min(α_aff, κ / -Δκ_aff)
             assert 0 <= α_aff <= 1
-            print(α_aff)
+            # print(α_aff)
             σ = (1 - α_aff) ** 3
 
             # --- Step 2: Corrector step ---
