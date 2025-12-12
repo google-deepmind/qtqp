@@ -291,7 +291,6 @@ class DirectKktSolver:
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
-    self.p = p
     self.p_diags = p.diagonal()
     self.min_static_regularization = min_static_regularization
     self.max_iterative_refinement_steps = max_iterative_refinement_steps

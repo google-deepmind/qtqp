@@ -42,7 +42,7 @@ class MinResSolver(LinearSolver):
     ...
 
   def update(self, kkt: sp.spmatrix) -> None:
-    """Factorizes or refactorizes the KKT matrix."""
+    """Updates the preconditioner."""
     ...
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
@@ -68,6 +68,7 @@ class IndirectKktSolver:
       p: sp.spmatrix,
       z: int,
       min_static_regularization: float,
+      max_iterative_refinement_steps: int,
       atol: float,
       rtol: float,
       solver: LinearSolver,
@@ -89,6 +90,7 @@ class IndirectKktSolver:
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
+    self.p = p
     self.p_diags = p.diagonal()
     self.min_static_regularization = min_static_regularization
     self.atol = atol
@@ -99,21 +101,24 @@ class IndirectKktSolver:
     n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
     m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
 
-    # Construct the sparse block matrix once.
+    # Construct the sparse block matrices once.
     self.kkt = sp.bmat(
         [[p + n_nans, a.T], [a, m_nans]],
         format=self.solver.format(),
         dtype=np.float64,
     )
+    self.M = sp.block_diag(
+        [p + n_nans, m_nans],
+        format=self.solver.format(),
+        dtype=np.float64,
+    )
+
     # Cache indices of the diagonal elements for fast updates.
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
+    self.M_nan_idxs = np.isnan(self.M.data)
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray) -> None:
     """Forms the KKT matrix diagonals and preconditioner.
-
-    This method employs an optimization to avoid copying the full sparse KKT
-    matrix. It temporarily injects the regularized diagonals for the solver,
-    then immediately restores the true diagonals for residual calculation.
 
     Args:
       mu: The barrier parameter.
@@ -126,23 +131,41 @@ class IndirectKktSolver:
     # "True" diagonals for accurate residual calculation (no regularization).
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     true_diags = np.concatenate([self.p_diags, h]) + mu
+    
+    # 1. Build PSD preconditioner.
     # "Regularized" diagonals for stable factorization.
     reg_diags = np.maximum(true_diags, self.min_static_regularization)
+    self.M.data[self.M_nan_idxs] = reg_diags
+  
+    # 2. Restore true values for subsequent residual checks in `solve()`.
     # Flip the sign of the cone variables.
     true_diags[self.n :] *= -1.0
-    reg_diags[self.n :] *= -1.0
-    # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
 
-    def _check_preconditioner(self) -> None:
-      """Checks the preconditioner."""
-      M_dense = self.M.toarray()
-      lam = scipy.linalg.eigh(self.kkt.toarray(), M_dense, eigvals_only=True)
-      cond_number_K = np.linalg.cond(self.kkt.toarray())
-      cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
-      print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")
-
-    def solve(self, rhs: np.ndarray) -> np.ndarray:
-      """Solves the linear system with the given preconditioner and data"""
-      ...
+  def solve(
+      self, rhs: np.ndarray, warm_start: np.ndarray
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+    """Solves the linear system with the given preconditioner and data"""
+    rhs = rhs.copy()
+    rhs[self.n :] *= -1.0
+    x, exitflag = sp.linalg.minres(
+        A=self.kkt, 
+        b=rhs, 
+        # M=self.M, 
+        x0=warm_start,
+        rtol=1e-8
+    )
+    res_norm = np.linalg.norm(rhs - self.kkt @ x, np.inf)
+    return x, {
+        "solves": 1,
+        "final_residual_norm": res_norm,
+        "status": "converged" if exitflag == 0 else "non-converged"
+    }
       
+  def _check_preconditioner(self) -> None:
+    """Checks the preconditioner."""
+    M_dense = M.toarray()
+    lam = scipy.linalg.eigh(self.kkt.toarray(), M_dense, eigvals_only=True)
+    cond_number_K = np.linalg.cond(self.kkt.toarray())
+    cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
+    print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")

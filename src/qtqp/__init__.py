@@ -24,7 +24,7 @@ from typing import Any, Dict, List
 import numpy as np
 import scipy.sparse as sp
 
-from . import direct
+from . import direct, indirect
 
 __version__ = "0.0.3"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -154,6 +154,7 @@ class QTQP:
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.SCIPY,
+      linear_solver_direct: bool = True,
       verbose: bool = True,
       equilibrate: bool = True,
       x: np.ndarray | None = None,
@@ -255,16 +256,20 @@ class QTQP:
 
     self.q = np.concatenate([c, b])
 
-    self._linear_solver = direct.DirectKktSolver(
-        a=a,
-        p=p,
-        z=self.z,
-        min_static_regularization=min_static_regularization,
-        max_iterative_refinement_steps=max_iterative_refinement_steps,
-        atol=linear_solver_atol,
-        rtol=linear_solver_rtol,
-        solver=linear_solver.value(),
-    )
+    linear_solver_args = {
+      "a" : a,
+      "p" : p,
+      "z" : self.z,
+      "min_static_regularization" : min_static_regularization,
+      "max_iterative_refinement_steps" : max_iterative_refinement_steps,
+      "atol" : linear_solver_atol,
+      "rtol" : linear_solver_rtol,
+      "solver" : linear_solver.value(),
+    }
+    if linear_solver_direct:
+      self._linear_solver = direct.DirectKktSolver(**linear_solver_args)
+    else:
+      self._linear_solver = indirect.IndirectKktSolver(**linear_solver_args)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
