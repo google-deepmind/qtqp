@@ -48,12 +48,13 @@ class PetscMinres(LinearSolver):
 
     # Configure as a direct solver (apply preconditioner only)
     self.ksp.setType("minres")
+    self.ksp.getPC().setType("none")
+
     # self.ksp.getPC().setType("fieldsplit")
     # self.ksp.getPC().setFieldSplitType(self.module.PC.CompositeType.SCHUR)
 
     # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
-    self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-12, atol=1e-12)
+    
 
     # Confgure kkt matrix and solutions
     self.kkt_wrapper : self.module.Mat | None = None
@@ -71,8 +72,9 @@ class PetscMinres(LinearSolver):
     self.kkt_wrapper.assemble()
 
     # update preconditioner
-    ...
     self.ksp.setOperators(self.kkt_wrapper)
+    self.ksp.setFromOptions()
+    self.ksp.setTolerances(rtol=1e-8, atol=1e-8, max_it=100000)
     # self.ksp.SetUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
@@ -80,13 +82,20 @@ class PetscMinres(LinearSolver):
     if self.rhs is None:
         self.rhs = self.module.Vec().createWithArray(rhs.ravel())
         self.sol = self.module.Vec().createSeq(rhs.size)
-    else:
-        self.rhs.setArray(rhs)
-    # if self.warm_start is not None:
-    #     self.sol.setArray(self.warm_start)
+    # else:
+    self.rhs.setArray(rhs)
+    if self.warm_start is None:
+        logging.warning("No warm start provided to indirect solver, using zero vector")
+        self.warm_start = np.zeros(rhs.size)
+
+    self.sol.setArray(self.warm_start)
     self.ksp.solve(self.rhs, self.sol)
-    x = self.sol.getArray().real.reshape(rhs.shape)
-    return x, 0, 0
+
+    iters = self.ksp.getIterationNumber()
+    # print(f"Iterations: {iters}")
+
+    x = self.sol.getArray().copy().real.reshape(rhs.shape)
+    return x, 0
 
   def format(self) -> Literal["csr"]:
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
@@ -115,8 +124,7 @@ class ScipyMinres(LinearSolver):
         x0=self.warm_start,
         rtol=1e-8
     )
-    res_norm = np.linalg.norm(rhs - self.kkt @ x, np.inf)
-    return x, res_norm, exitflag
+    return x, exitflag
 
   def format(self) -> str:
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
@@ -164,11 +172,11 @@ class IndirectKktSolver:
     self.min_static_regularization = min_static_regularization
     self.atol = atol
     self.rtol = rtol
-    self.solver = ScipyMinres()
+    self.solver = PetscMinres()
 
     # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
-    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
-    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
+    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format=self.solver.format())
+    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format=self.solver.format())
 
     # Construct the sparse block matrices once.
     self.kkt = sp.bmat(
@@ -214,9 +222,8 @@ class IndirectKktSolver:
     rhs = rhs.copy()
     rhs[self.n :] *= -1.0
     self.solver.warm_start = warm_start 
-    x, res_norm, exitflag = self.solver.solve(rhs)
-    res_norm = np.linalg.norm(self.kkt @ x - rhs)
-    print(res_norm)
+    x, exitflag = self.solver.solve(rhs)
+    res_norm = np.linalg.norm(self.kkt @ x - rhs, np.inf)
     return x, {
         "solves": 1,
         "final_residual_norm": res_norm,
