@@ -35,19 +35,88 @@ class LinearSolver(Protocol):
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
     ...
 
-class MinResSolver(LinearSolver):
-  """MinRes solver."""
-  def __init__(self, kkt: sp.spmatrix) -> None:
+class PetscMinres(LinearSolver):
+  """MinRes solver using PETSc."""
+  def __init__(self) -> None:
     """Initializes the MinRes solver."""
-    ...
+    import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
+
+    self.module = petsc4py.PETSc
+    self.ksp = self.module.KSP().create()
+
+    self.warm_start : np.ndarray | None = None
+
+    # Configure as a direct solver (apply preconditioner only)
+    self.ksp.setType("minres")
+    # self.ksp.getPC().setType("fieldsplit")
+    # self.ksp.getPC().setFieldSplitType(self.module.PC.CompositeType.SCHUR)
+
+    # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
+    self.ksp.setFromOptions()
+    self.ksp.setTolerances(rtol=1e-12, atol=1e-12)
+
+    # Confgure kkt matrix and solutions
+    self.kkt_wrapper : self.module.Mat | None = None
+    self.rhs : self.module.Vec | None = None
+    self.sol : self.module.Vec | None = None
 
   def update(self, kkt: sp.spmatrix) -> None:
     """Updates the preconditioner."""
+    # TODO: Need to use IS() for updating wrapper instead of creating a new one
+    self.kkt_wrapper = self.module.Mat().createAIJ(
+        size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
+    )
+    self.kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
+    self.kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
+    self.kkt_wrapper.assemble()
+
+    # update preconditioner
     ...
+    self.ksp.setOperators(self.kkt_wrapper)
+    # self.ksp.SetUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     """Solves the linear system."""
-    ...
+    if self.rhs is None:
+        self.rhs = self.module.Vec().createWithArray(rhs.ravel())
+        self.sol = self.module.Vec().createSeq(rhs.size)
+    else:
+        self.rhs.setArray(rhs)
+    # if self.warm_start is not None:
+    #     self.sol.setArray(self.warm_start)
+    self.ksp.solve(self.rhs, self.sol)
+    x = self.sol.getArray().real.reshape(rhs.shape)
+    return x, 0, 0
+
+  def format(self) -> Literal["csr"]:
+    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
+    return "csr"
+
+class ScipyMinres(LinearSolver):
+  """MinRes solver."""
+  def __init__(self) -> None:
+    """Initializes the MinRes solver."""
+    self.warm_start : np.ndarray | None = None
+    self.solver = sp.linalg.minres
+    self.kkt : sp.spmatrix | None = None
+
+  def update(self, kkt: sp.spmatrix) -> None:
+    """Updates the preconditioner."""
+    if self.kkt is None:
+      self.kkt = kkt
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the linear system."""
+    if self.warm_start is None:
+      self.warm_start = np.zeros(self.kkt.shape[1])
+    x, exitflag = self.solver(
+        A=self.kkt, 
+        b=rhs, 
+        x0=self.warm_start,
+        rtol=1e-8
+    )
+    res_norm = np.linalg.norm(rhs - self.kkt @ x, np.inf)
+    return x, res_norm, exitflag
 
   def format(self) -> str:
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
@@ -95,7 +164,7 @@ class IndirectKktSolver:
     self.min_static_regularization = min_static_regularization
     self.atol = atol
     self.rtol = rtol
-    self.solver = solver
+    self.solver = ScipyMinres()
 
     # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
     n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
@@ -107,15 +176,9 @@ class IndirectKktSolver:
         format=self.solver.format(),
         dtype=np.float64,
     )
-    self.M = sp.block_diag(
-        [p + n_nans, m_nans],
-        format=self.solver.format(),
-        dtype=np.float64,
-    )
 
     # Cache indices of the diagonal elements for fast updates.
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
-    self.M_nan_idxs = np.isnan(self.M.data)
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray) -> None:
     """Forms the KKT matrix diagonals and preconditioner.
@@ -131,15 +194,17 @@ class IndirectKktSolver:
     # "True" diagonals for accurate residual calculation (no regularization).
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     true_diags = np.concatenate([self.p_diags, h]) + mu
-    
-    # 1. Build PSD preconditioner.
     # "Regularized" diagonals for stable factorization.
     reg_diags = np.maximum(true_diags, self.min_static_regularization)
-    self.M.data[self.M_nan_idxs] = reg_diags
-  
-    # 2. Restore true values for subsequent residual checks in `solve()`.
     # Flip the sign of the cone variables.
     true_diags[self.n :] *= -1.0
+    reg_diags[self.n :] *= -1.0
+  
+    # 1. Inject regularized values for the linear solve.
+    self.kkt.data[self.kkt_nan_idxs] = reg_diags
+    self.solver.update(self.kkt)
+    
+    # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
 
   def solve(
@@ -148,24 +213,13 @@ class IndirectKktSolver:
     """Solves the linear system with the given preconditioner and data"""
     rhs = rhs.copy()
     rhs[self.n :] *= -1.0
-    x, exitflag = sp.linalg.minres(
-        A=self.kkt, 
-        b=rhs, 
-        # M=self.M, 
-        x0=warm_start,
-        rtol=1e-8
-    )
-    res_norm = np.linalg.norm(rhs - self.kkt @ x, np.inf)
+    self.solver.warm_start = warm_start 
+    x, res_norm, exitflag = self.solver.solve(rhs)
+    res_norm = np.linalg.norm(self.kkt @ x - rhs)
+    print(res_norm)
     return x, {
         "solves": 1,
         "final_residual_norm": res_norm,
         "status": "converged" if exitflag == 0 else "non-converged"
     }
       
-  def _check_preconditioner(self) -> None:
-    """Checks the preconditioner."""
-    M_dense = M.toarray()
-    lam = scipy.linalg.eigh(self.kkt.toarray(), M_dense, eigvals_only=True)
-    cond_number_K = np.linalg.cond(self.kkt.toarray())
-    cond_number_MK = np.max(np.abs(lam)) / np.min(np.abs(lam))
-    print(f"K: {cond_number_K:.2e}, MK: {cond_number_MK:.2e}")
