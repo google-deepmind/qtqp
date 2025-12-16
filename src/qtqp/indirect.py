@@ -15,6 +15,7 @@
 """Indirect KKT linear system solvers."""
 
 import logging
+from tkinter import N
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -23,7 +24,7 @@ import scipy.sparse as sp
 class LinearSolver(Protocol):
   """Protocol defining the interface for linear solvers."""
 
-  def update(self, kkt: sp.spmatrix) -> None:
+  def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
     """Factorizes or refactorizes the KKT matrix."""
     ...
 
@@ -41,28 +42,36 @@ class PetscMinres(LinearSolver):
     """Initializes the MinRes solver."""
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
+    self.n : int | None = None
+    self.m : int | None = None
+
     self.module = petsc4py.PETSc
     self.ksp = self.module.KSP().create()
 
     self.warm_start : np.ndarray | None = None
 
     # Configure as a direct solver (apply preconditioner only)
-    self.ksp.setType("minres")
-    self.ksp.getPC().setType("none")
-
-    # self.ksp.getPC().setType("fieldsplit")
-    # self.ksp.getPC().setFieldSplitType(self.module.PC.CompositeType.SCHUR)
+    self.ksp.setType("gmres")
+    # self.ksp.getPC().setType("none")
 
     # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
-    
 
     # Confgure kkt matrix and solutions
     self.kkt_wrapper : self.module.Mat | None = None
     self.rhs : self.module.Vec | None = None
     self.sol : self.module.Vec | None = None
+    self.is_x : self.module.IS | None = None
+    self.is_y : self.module.IS | None = None
 
-  def update(self, kkt: sp.spmatrix) -> None:
+  def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
     """Updates the preconditioner."""
+    if self.n is None or self.m is None:
+      self.m = s.shape[0]
+      self.n = kkt.shape[0] - self.m
+      print(f"n: {self.n}, m: {self.m}")
+      self.is_x = self.module.IS().createStride(self.n, first=0, step=1)
+      self.is_y = self.module.IS().createStride(self.m, first=self.n, step=1)
+    
     # TODO: Need to use IS() for updating wrapper instead of creating a new one
     self.kkt_wrapper = self.module.Mat().createAIJ(
         size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
@@ -70,19 +79,19 @@ class PetscMinres(LinearSolver):
     self.kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
     self.kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
     self.kkt_wrapper.assemble()
-
-    # update preconditioner
     self.ksp.setOperators(self.kkt_wrapper)
+    
+    self._custom_PC()
     self.ksp.setFromOptions()
     self.ksp.setTolerances(rtol=1e-8, atol=1e-8, max_it=100000)
-    # self.ksp.SetUp()
+    self.ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     """Solves the linear system."""
     if self.rhs is None:
         self.rhs = self.module.Vec().createWithArray(rhs.ravel())
         self.sol = self.module.Vec().createSeq(rhs.size)
-    # else:
+    
     self.rhs.setArray(rhs)
     if self.warm_start is None:
         logging.warning("No warm start provided to indirect solver, using zero vector")
@@ -92,7 +101,9 @@ class PetscMinres(LinearSolver):
     self.ksp.solve(self.rhs, self.sol)
 
     iters = self.ksp.getIterationNumber()
-    # print(f"Iterations: {iters}")
+    reason = self.ksp.getConvergedReason()
+    print(f"Iterations: {iters}")
+    # print(f"Reason: {reason}")
 
     x = self.sol.getArray().copy().real.reshape(rhs.shape)
     return x, 0
@@ -100,6 +111,22 @@ class PetscMinres(LinearSolver):
   def format(self) -> Literal["csr"]:
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
     return "csr"
+
+  def _schur_PC(self):
+    self.ksp.getPC().setType("fieldsplit")
+    self.ksp.getPC().setFieldSplitType(self.module.PC.CompositeType.SCHUR)
+    self.ksp.getPC().setFieldSplitIS(("x", self.is_x), ("y", self.is_y))
+    self.ksp.getPC().setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.DIAG)
+    self.ksp.getPC().setFactorSolverType("mumps")
+  
+  def _none_PC(self):
+    self.ksp.getPC().setType("none")
+
+  def _custom_PC(self):
+    """ILU preconditioner - works well for indefinite/quasi-definite systems with GMRES."""
+    pc = self.ksp.getPC()
+    pc.setType("ilu")
+    pc.setFactorLevels(1)  # ILU(1) - slightly more fill-in than ILU(0) for better convergence
 
 class ScipyMinres(LinearSolver):
   """MinRes solver."""
@@ -109,7 +136,7 @@ class ScipyMinres(LinearSolver):
     self.solver = sp.linalg.minres
     self.kkt : sp.spmatrix | None = None
 
-  def update(self, kkt: sp.spmatrix) -> None:
+  def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
     """Updates the preconditioner."""
     if self.kkt is None:
       self.kkt = kkt
@@ -210,7 +237,7 @@ class IndirectKktSolver:
   
     # 1. Inject regularized values for the linear solve.
     self.kkt.data[self.kkt_nan_idxs] = reg_diags
-    self.solver.update(self.kkt)
+    self.solver.update(self.kkt, s)
     
     # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
