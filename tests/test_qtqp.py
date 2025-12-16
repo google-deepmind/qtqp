@@ -24,7 +24,8 @@ from scipy import sparse
 from qtqp.clarabel import Clarabel
 
 _SOLVERS = [
-    qtqp.LinearSolver.SCIPY,
+    # qtqp.LinearSolver.SCIPY,
+    qtqp.LinearSolver.MUMPS,
     # qtqp.LinearSolver.QDLDL,
     # qtqp.LinearSolver.CHOLMOD,
     # qtqp.LinearSolver.EIGEN,
