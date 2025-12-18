@@ -21,12 +21,11 @@ import pytest
 import qtqp
 from scipy import sparse
 
-from qtqp.clarabel import Clarabel
 
 _SOLVERS = [
     # qtqp.LinearSolver.SCIPY,
-    qtqp.LinearSolver.MUMPS,
-    # qtqp.LinearSolver.QDLDL,
+    # qtqp.LinearSolver.MUMPS,
+    qtqp.LinearSolver.QDLDL,
     # qtqp.LinearSolver.CHOLMOD,
     # qtqp.LinearSolver.EIGEN,
     # Requires GPU:
@@ -168,7 +167,7 @@ def test_solve(equilibrate, seed, linear_solver):
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver
   )
   _assert_solution(solution, a, b, c, p, z)
@@ -182,8 +181,8 @@ def test_infeasible(equilibrate, seed, linear_solver):
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
-  solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, 
   )
   _assert_infeasible(solution, a, b, z)
 
@@ -196,7 +195,7 @@ def test_unbounded(equilibrate, seed, linear_solver):
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
-  solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver
   )
   _assert_unbounded(solution, a, c, p, z)

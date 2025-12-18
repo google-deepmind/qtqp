@@ -144,9 +144,9 @@ class QTQP:
       self,
       *,
       atol: float = 1e-7,
-      rtol: float = 1e-8,
-      atol_infeas: float = 1e-8,
-      rtol_infeas: float = 1e-9,
+      rtol: float = 1e-7,
+      atol_infeas: float = 1e-7,
+      rtol_infeas: float = 1e-7,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-7,
@@ -534,6 +534,111 @@ class QTQP:
     return min(alpha_s, alpha_y)
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
+    status = self._old_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
+    # status = self._clarabel_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
+    return status
+
+  def _clarabel_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
+    """Check termination criteria and compute iteration statistics."""
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+
+    inv_tau = 1.0 / max(tau_arr[0], _EPS)
+
+    # Precompute commonly used matrix-vector products
+    ax = self.a @ x
+    aty = self.a.T @ y
+    px = self.p @ x
+    xpx = x @ px
+    ctx = self.c @ x
+    bty = self.b @ y
+
+    # Costs
+    pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
+    dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
+
+    # Residuals
+    pres = _norm((ax + s) * inv_tau - self.b, 2)
+    dres = _norm((px + aty) * inv_tau + self.c, 2)
+    p_obj = 0.5 * xpx * inv_tau**2 + ctx * inv_tau
+    d_obj = -0.5 * xpx * inv_tau**2 - bty * inv_tau
+    gap = np.abs(p_obj - d_obj)
+    complementarity = np.abs((y @ s) * inv_tau * inv_tau)
+
+    # norms and max
+    normx = _norm(x, 2)
+    normx_tau = normx * inv_tau
+    normy = _norm(y, 2)
+    normy_tau = normy * inv_tau
+    norms = _norm(s, 2)
+    norms_tau = norms * inv_tau
+    b_inf = _norm(self.b, np.inf)
+    c_inf = _norm(self.c, np.inf)
+
+    max_x = max(1, normx)
+    max_xs = max(1, normx + norms)
+    max_y = max(1, normy)
+    rel_gap = max(1, min(abs(p_obj), abs(d_obj)))
+    p_gap = max(1, b_inf + normx_tau + norms_tau)
+    d_gap = max(1, c_inf + normy_tau + normx_tau)
+
+    # Residuals
+    rd_inf = max(
+      _norm(px, 2) / max(max_x, _EPS),
+      _norm(ax + s, 2) / max(max_xs, _EPS)
+    )
+    rp_inf = _norm(aty, 2) / max(max_y, _EPS)
+
+
+    # Termination Criteria
+    if (
+        gap < self.rtol * rel_gap
+        and pres < self.rtol * p_gap
+        and dres < self.rtol * d_gap
+    ):
+      status = SolutionStatus.SOLVED
+    elif ctx < -self.atol_infeas and (
+        rd_inf < -self.rtol_infeas * ctx
+    ):
+      status = SolutionStatus.UNBOUNDED
+    elif bty < -self.atol_infeas and (
+        rp_inf < -self.rtol_infeas * bty
+    ):
+      status = SolutionStatus.INFEASIBLE
+    else:
+      status = SolutionStatus.UNFINISHED
+
+    stats_i.update({
+        "iter": self.it,
+        "ctx": ctx,
+        "bty": bty,
+        "pcost": pcost,
+        "dcost": dcost,
+        "pres": pres,
+        "dres": dres,
+        "gap": gap,
+        "complementarity": complementarity,
+        "pinfeas": rp_inf,
+        "dinfeas": rd_inf,
+        "dinfeas_a": ctx,
+        "dinfeas_p": bty,
+        "mu": mu,
+        "sigma": sigma,
+        "alpha": alpha,
+        "tau": tau_arr[0],
+        "norm_x": normx,
+        "norm_y": normy,
+        "norm_s": norms,
+        "status": status,
+        "time": timeit.default_timer() - self.start_time,
+        "prelrhs": p_gap,
+        "drelrhs": d_gap,
+    })
+
+    return status
+
+  
+  def _old_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
     """Check termination criteria and compute iteration statistics."""
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)

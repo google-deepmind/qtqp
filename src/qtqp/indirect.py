@@ -36,125 +36,189 @@ class LinearSolver(Protocol):
     """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
     ...
 
-class PetscMinres(LinearSolver):
+class PetscGMRES(LinearSolver):
   """MinRes solver using PETSc."""
   def __init__(self) -> None:
-    """Initializes the MinRes solver."""
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
-
-    self.n : int | None = None
-    self.m : int | None = None
-
     self.module = petsc4py.PETSc
+
+    self.n: int | None = None
+    self.m: int | None = None
+
     self.ksp = self.module.KSP().create()
+    self.warm_start: np.ndarray | None = None
 
-    self.warm_start : np.ndarray | None = None
-
-    # Configure as a direct solver (apply preconditioner only)
+    # Use MINRES for symmetric indefinite systems
     self.ksp.setType("gmres")
-    # self.ksp.getPC().setType("none")
 
-    # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
+    # Mat/Vec handles
+    self.kkt_wrapper: self.module.Mat | None = None
+    self.rhs: self.module.Vec | None = None
+    self.sol: self.module.Vec | None = None
+    self.is_x: self.module.IS | None = None
+    self.is_y: self.module.IS | None = None
 
-    # Confgure kkt matrix and solutions
-    self.kkt_wrapper : self.module.Mat | None = None
-    self.rhs : self.module.Vec | None = None
-    self.sol : self.module.Vec | None = None
-    self.is_x : self.module.IS | None = None
-    self.is_y : self.module.IS | None = None
+    # Cached sub-blocks for preconditioner
+    self.Kxx: self.module.Mat | None = None       # = G
+    self.Kyy_pos: self.module.Mat | None = None   # = -Kyy = W (SPD)
 
   def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
     """Updates the preconditioner."""
     if self.n is None or self.m is None:
       self.m = s.shape[0]
       self.n = kkt.shape[0] - self.m
-      print(f"n: {self.n}, m: {self.m}")
       self.is_x = self.module.IS().createStride(self.n, first=0, step=1)
       self.is_y = self.module.IS().createStride(self.m, first=self.n, step=1)
-    
-    # TODO: Need to use IS() for updating wrapper instead of creating a new one
+
+    # Wrap global KKT
     self.kkt_wrapper = self.module.Mat().createAIJ(
-        size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
+      size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
     )
     self.kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
     self.kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
     self.kkt_wrapper.assemble()
     self.ksp.setOperators(self.kkt_wrapper)
-    
-    self._custom_PC()
+
+    # Choose your PC here
+    self._custom_PC()       # <- your ILU-on-full-K fallback
+    # self._none_PC()
+
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-8, atol=1e-8, max_it=100000)
+    self.ksp.setTolerances(rtol=1e-10, atol=1e-10, max_it=1000)
     self.ksp.setUp()
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system."""
-    if self.rhs is None:
-        self.rhs = self.module.Vec().createWithArray(rhs.ravel())
-        self.sol = self.module.Vec().createSeq(rhs.size)
+  def solve(self, rhs: np.ndarray) -> np.ndarray: 
+    """Solves the linear system.""" 
+    if self.rhs is None: 
+      self.rhs = self.module.Vec().createWithArray(rhs.ravel()) 
+      self.sol = self.module.Vec().createSeq(rhs.size) 
+    self.rhs.setArray(rhs) 
     
-    self.rhs.setArray(rhs)
-    if self.warm_start is None:
-        logging.warning("No warm start provided to indirect solver, using zero vector")
-        self.warm_start = np.zeros(rhs.size)
-
-    self.sol.setArray(self.warm_start)
-    self.ksp.solve(self.rhs, self.sol)
-
-    iters = self.ksp.getIterationNumber()
-    reason = self.ksp.getConvergedReason()
-    print(f"Iterations: {iters}")
-    # print(f"Reason: {reason}")
-
-    x = self.sol.getArray().copy().real.reshape(rhs.shape)
+    if self.warm_start is None: 
+      logging.warning("No warm start provided to indirect solver, using zero vector") 
+    self.warm_start = np.zeros(rhs.size) 
+    
+    self.sol.setArray(self.warm_start) 
+    self.ksp.solve(self.rhs, self.sol) 
+    
+    iters = self.ksp.getIterationNumber() 
+    reason = self.ksp.getConvergedReason() 
+    # print(f"Reason: {reason} with iters: {iters}") 
+    
+    x = self.sol.getArray().copy().real.reshape(rhs.shape) 
+    
     return x, 0
 
-  def format(self) -> Literal["csr"]:
-    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
-    return "csr"
-
-  def _schur_PC(self):
-    self.ksp.getPC().setType("fieldsplit")
-    self.ksp.getPC().setFieldSplitType(self.module.PC.CompositeType.SCHUR)
-    self.ksp.getPC().setFieldSplitIS(("x", self.is_x), ("y", self.is_y))
-    self.ksp.getPC().setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.DIAG)
-    self.ksp.getPC().setFactorSolverType("mumps")
-  
   def _none_PC(self):
     self.ksp.getPC().setType("none")
 
   def _custom_PC(self):
-    """ILU preconditioner - works well for indefinite/quasi-definite systems with GMRES."""
+    """ILU preconditioner on full K (often good for GMRES, not SPD)."""
     pc = self.ksp.getPC()
     pc.setType("ilu")
-    pc.setFactorLevels(1)  # ILU(1) - slightly more fill-in than ILU(0) for better convergence
+    pc.setFactorLevels(1)
+
+  def format(self) -> Literal["csr"]:
+    """Returns the expected sparse matrix format."""
+    return "csr"
+
 
 class ScipyMinres(LinearSolver):
   """MinRes solver."""
   def __init__(self) -> None:
-    """Initializes the MinRes solver."""
-    self.warm_start : np.ndarray | None = None
+    self.warm_start: np.ndarray | None = None
     self.solver = sp.linalg.minres
-    self.kkt : sp.spmatrix | None = None
+    self.kkt: sp.spmatrix | None = None
+
+    # cached blocks / sizes
+    self.p: sp.spmatrix | None = None   # will store G = K[:n,:n]
+    self.a: sp.spmatrix | None = None   # will store A = K[:n,n:]
+    self._n: int | None = None
+    self._m: int | None = None
+
+    # PRECONDITIONER (this will be M^{-1} as a LinearOperator)
+    self.M: sp.linalg.LinearOperator | None = None
 
   def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
-    """Updates the preconditioner."""
-    if self.kkt is None:
-      self.kkt = kkt
+    """Updates the preconditioner.
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    Assumes len(s) equals the size of the dual/constraint block (m),
+    so KKT dimension is (n+m) x (n+m) with n = N - m.
+    """
+    self.kkt = kkt
+
+    N = kkt.shape[0]
+    m = int(np.asarray(s).size)
+    n = N - m
+    if n <= 0:
+      raise ValueError(f"Bad partition inferred from s: N={N}, m={m} => n={n}")
+
+    self._n, self._m = n, m
+
+    # Extract blocks
+    G = kkt[:n, :n].tocsc()
+    A = kkt[:n, n:].tocsc()
+    K22 = kkt[n:, n:].tocsc()  # this is -(H+mu I) = -W
+
+    self.p = G
+    self.a = A
+
+    # Diagonals
+    diagG = np.asarray(G.diagonal()).ravel()
+    # W should be positive diagonal: W = -K22
+    diagW = -np.asarray(K22.diagonal()).ravel()
+
+    # Stabilize (avoid division by zero / negative due to numerical noise)
+    epsG = 1e-12 + 1e-9 * (np.mean(np.abs(diagG)) + 1.0)
+    epsS = 1e-12 + 1e-9 * (np.mean(np.abs(diagW)) + 1.0)
+
+    diagG_safe = np.where(diagG > epsG, diagG, epsG)
+    inv_diagG = 1.0 / diagG_safe
+
+    # diag(A^T diag(G)^{-1} A) = (A.^2)^T * inv_diagG
+    # (A.multiply(A)) squares entrywise but stays sparse
+    A2 = A.multiply(A)
+    diag_AtDinvA = np.asarray(A2.T @ inv_diagG).ravel()
+
+    diagS = diagW + diag_AtDinvA
+    diagS_safe = np.where(diagS > epsS, diagS, epsS)
+    inv_diagS = 1.0 / diagS_safe
+
+    # Build M^{-1} as an SPD LinearOperator
+    def matvec(z: np.ndarray) -> np.ndarray:
+      z1 = z[:n]
+      z2 = z[n:]
+      y1 = inv_diagG * z1
+      y2 = inv_diagS * z2
+      return np.concatenate([y1, y2])
+
+    self.M = sp.linalg.LinearOperator(shape=(N, N), matvec=matvec, dtype=kkt.dtype)
+
+    # keep warm-start length consistent
+    if self.warm_start is None or self.warm_start.size != N:
+      self.warm_start = np.zeros(N, dtype=float)
+
+  def solve(self, rhs: np.ndarray) -> tuple[np.ndarray, int]:
     """Solves the linear system."""
+    if self.kkt is None:
+      raise RuntimeError("Call update(kkt, s) before solve(rhs).")
+    if self.M is None:
+      raise RuntimeError("Preconditioner not built; call update(kkt, s) first.")
     if self.warm_start is None:
       self.warm_start = np.zeros(self.kkt.shape[1])
+
     x, exitflag = self.solver(
-        A=self.kkt, 
-        b=rhs, 
+        A=self.kkt,
+        b=rhs,
+        M=self.M,          # <-- preconditioner (approx inverse), SPD
         x0=self.warm_start,
-        rtol=1e-8
+        rtol=1e-10,
+        # show=True,
     )
+    self.warm_start = x
     return x, exitflag
 
-  def format(self) -> str:
-    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
+  def format(self) -> Literal["csc"]:
     return "csc"
 
 class IndirectKktSolver:
@@ -199,7 +263,11 @@ class IndirectKktSolver:
     self.min_static_regularization = min_static_regularization
     self.atol = atol
     self.rtol = rtol
-    self.solver = PetscMinres()
+    self.solver = PetscGMRES()
+    # self.solver = ScipyMinres()
+
+    self.solver.a = a
+    self.solver.p = p
 
     # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
     n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format=self.solver.format())
