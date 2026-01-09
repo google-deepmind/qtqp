@@ -20,23 +20,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import scipy.sparse as sp
 import scipy
-
-
-class LinearSolver(Protocol):
-  """Protocol defining the interface for linear solvers."""
-
-  def update(self, kkt: sp.spmatrix) -> None:
-    """Factorizes or refactorizes the KKT matrix."""
-    ...
-
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system."""
-    ...
-
-  def format(self) -> str:
-    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
-    ...
-
+from . import LinearSolver 
 
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pydiso.mkl_solver.MKLPardisoSolver."""
@@ -73,6 +57,10 @@ class MklPardisoSolver(LinearSolver):
   def format(self) -> Literal["csr"]:
     return "csr"
 
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
+
 
 class QdldlSolver(LinearSolver):
   """Wrapper around qdldl.Solver for quasi-definite LDL factorization."""
@@ -95,6 +83,10 @@ class QdldlSolver(LinearSolver):
   def format(self) -> Literal["csc"]:
     return "csc"
 
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
+
 
 class ScipySolver(LinearSolver):
   """Wrapper around scipy.linalg.factorized."""
@@ -111,6 +103,10 @@ class ScipySolver(LinearSolver):
 
   def format(self) -> Literal["csc"]:
     return "csc"
+
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
 
 
 class CholModSolver(LinearSolver):
@@ -133,6 +129,10 @@ class CholModSolver(LinearSolver):
 
   def format(self) -> Literal["csc"]:
     return "csc"
+
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
 
 
 class EigenSolver(LinearSolver):
@@ -157,6 +157,9 @@ class EigenSolver(LinearSolver):
   def format(self) -> Literal["csc"]:
     return "csc"
 
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
 
 class MumpsSolver(LinearSolver):
   """Wrapper for MUMPS solver (via petsc4py)."""
@@ -208,6 +211,9 @@ class MumpsSolver(LinearSolver):
   def format(self) -> Literal["csr"]:
     return "csr"
 
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
 
 class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
@@ -251,7 +257,10 @@ class CuDssSolver(LinearSolver):
     """Frees the solver resources."""
     if self.solver is not None:
       self.solver.free()
-
+  
+  def type(self) -> Literal["direct"]:
+    """Returns the type of the solver."""
+    return "direct"
 
 class DirectKktSolver:
   """Direct KKT linear system solver with iterative refinement.

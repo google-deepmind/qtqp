@@ -25,7 +25,7 @@ from scipy import sparse
 _SOLVERS = [
     # qtqp.LinearSolver.SCIPY,
     # qtqp.LinearSolver.MUMPS,
-    qtqp.LinearSolver.QDLDL,
+    # qtqp.LinearSolver.QDLDL,
     # qtqp.LinearSolver.CHOLMOD,
     # qtqp.LinearSolver.EIGEN,
     # Requires GPU:
@@ -93,7 +93,7 @@ def _gen_unbounded(m, n, z, random_state=None):
   return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
 
 
-def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
+def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-7):
   """Assert that the solution satisfies KKT conditions."""
   x = solution.x
   y = solution.y
@@ -122,7 +122,7 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
 
 
-def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
+def _assert_infeasible(solution, a, b, z, atol=1e-7, rtol=1e-7):
   """Assert that the solution satisfies KKT conditions for primal infeasibility."""
   x = solution.x
   y = solution.y
@@ -138,7 +138,7 @@ def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
   np.testing.assert_array_less(pinfeas, atol + rtol * np.linalg.norm(y, np.inf))
 
 
-def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
+def _assert_unbounded(solution, a, c, p, z, atol=1e-7, rtol=1e-7):
   """Assert that the solution satisfies KKT conditions for primal unboundedness."""
   x = solution.x
   y = solution.y

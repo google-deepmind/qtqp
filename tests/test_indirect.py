@@ -1,0 +1,180 @@
+"""Tests for QTQP solver."""
+
+import sys
+import numpy as np
+import pytest
+import qtqp
+from scipy import sparse
+
+
+_SOLVERS = [
+    # qtqp.LinearSolver.SCIPY,
+    # qtqp.LinearSolver.MUMPS,
+    # qtqp.LinearSolver.QDLDL,
+    # qtqp.LinearSolver.CHOLMOD,
+    # qtqp.LinearSolver.EIGEN,
+    # Requires GPU:
+    # qtqp.LinearSolver.CUDSS,
+]
+
+# Only run PARDISO on linux for now.
+if sys.platform.startswith('linux'):
+  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+
+# Petsc4py not available on windows
+if not sys.platform.startswith('win32'):
+  _SOLVERS.append(qtqp.LinearSolver.GMRES)
+
+def _gen_feasible(m, n, z, random_state=None):
+  """Generate a feasible QP."""
+  rng = np.random.default_rng(random_state)
+  w = rng.random(size=m)
+  a = rng.random(size=(m, n))
+  x = rng.random(size=n)
+  p = rng.random(size=(n, n))
+  y = w.copy()
+  y[z:] = 0.5 * (w[z:] + np.abs(w[z:]))  # y = s - z;
+  s = y - w
+  p = p.T @ p * 0.01
+  c = -a.T @ y
+  b = a @ x + s
+  return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
+
+
+def _gen_infeasible(m, n, z, random_state=None):
+  """Generate an infeasible QP."""
+  rng = np.random.default_rng(random_state)
+  w = rng.random(size=m)
+  a = rng.random(size=(m, n))
+  b = rng.random(size=m)
+  p = rng.random(size=(n, n))
+  y = w.copy()
+  y[z:] = 0.5 * (w[z:] + np.abs(w[z:]))  # y = s - z;
+  a = a - np.outer(y, np.transpose(a).dot(y)) / np.linalg.norm(y) ** 2
+  b = -b / np.dot(b, y)
+  p = p.T @ p * 0.01
+  c = -a.T @ y
+  return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
+
+def _gen_unbounded(m, n, z, random_state=None):
+  """Generate an unbounded QP."""
+  rng = np.random.default_rng(random_state)
+  w = rng.random(size=m)
+  a = rng.random(size=(m, n))
+  p = rng.random(size=(n, n))
+  c = rng.random(size=n)
+  s = np.zeros(m)
+  s[z:] = 0.5 * (w[z:] + np.abs(w[z:]))
+  p = p.T @ p * 0.01
+  e, v = np.linalg.eig(p)
+  e[-1] = 0
+  x = v[:, -1]
+  p = v @ np.diag(e) @ v.T
+  a = a - np.outer(s + a.dot(x), x) / np.linalg.norm(x) ** 2
+  c = -c / np.dot(c, x)
+  b = s + a.dot(x)
+  return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
+
+def _assert_unbounded(solution, a, c, p, z, atol=1e-7, rtol=1e-7):
+  """Assert that the solution satisfies KKT conditions for primal unboundedness."""
+  x = solution.x
+  y = solution.y
+  s = solution.s
+
+  dinfeas_a = np.linalg.norm(a @ x + s, np.inf)
+  dinfeas_p = np.linalg.norm(p @ x, np.inf)
+
+  assert solution.status == qtqp.SolutionStatus.UNBOUNDED
+  np.testing.assert_array_equal(np.isnan(y), True)
+#   np.testing.assert_allclose(c @ x, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
+#   np.testing.assert_array_less(
+#       dinfeas_a, atol + rtol * np.linalg.norm(x, np.inf)
+#   )
+#   np.testing.assert_array_less(
+#       dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf)
+#   )
+
+def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-7):
+  """Assert that the solution satisfies KKT conditions."""
+  x = solution.x
+  y = solution.y
+  s = solution.s
+
+  pcost = c @ x + 0.5 * x @ p @ x
+  dcost = -b @ y - 0.5 * x @ p @ x
+  pres = np.linalg.norm(a @ x + s - b, np.inf)
+  dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
+  gap = np.abs(c @ x + b @ y + x @ p @ x)
+  prelrhs = max(
+      np.linalg.norm(a @ x, np.inf),
+      np.linalg.norm(s, np.inf),
+      np.linalg.norm(b, np.inf),
+  )
+  drelrhs = max(
+      np.linalg.norm(p @ x, np.inf),
+      np.linalg.norm(a.T @ y, np.inf),
+      np.linalg.norm(c, np.inf),
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_array_less(gap, atol + rtol * min(abs(pcost), abs(dcost)))
+  np.testing.assert_array_less(pres, atol + rtol * prelrhs)
+  np.testing.assert_array_less(dres, atol + rtol * drelrhs)
+  np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
+  np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
+
+
+def _assert_infeasible(solution, a, b, z, atol=1e-7, rtol=1e-7):
+  """Assert that the solution satisfies KKT conditions for primal infeasibility."""
+  x = solution.x
+  y = solution.y
+  s = solution.s
+
+  pinfeas = np.linalg.norm(a.T @ y, np.inf)
+
+  assert solution.status == qtqp.SolutionStatus.INFEASIBLE
+  np.testing.assert_array_equal(np.isnan(x), True)
+  np.testing.assert_array_equal(np.isnan(s), True)
+  np.testing.assert_allclose(b @ y, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
+  np.testing.assert_array_less(pinfeas, atol + rtol * np.linalg.norm(y, np.inf))
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', list(242 + np.arange(10)))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_unbounded(equilibrate, seed, linear_solver):
+  """Test the QTQP solver with unbounded QP."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver,
+  )
+  _assert_unbounded(solution, a, c, p, z)
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 42 + np.arange(10))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_solve(equilibrate, seed, linear_solver):
+  """Test the QTQP solver."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 142 + np.arange(10))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_infeasible(equilibrate, seed, linear_solver):
+  """Test the QTQP solver with infeasible QP."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, 
+  )
+  _assert_infeasible(solution, a, b, z)

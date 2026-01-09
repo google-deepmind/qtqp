@@ -24,7 +24,8 @@ from typing import Any, Dict, List
 import numpy as np
 import scipy.sparse as sp
 
-from . import direct, indirect
+from qtqp.linear import direct, indirect
+from qtqp.kkt import KKTSolver
 
 __version__ = "0.0.3"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -43,6 +44,7 @@ class LinearSolver(enum.Enum):
   CUDSS = direct.CuDssSolver
   EIGEN = direct.EigenSolver
   MUMPS = direct.MumpsSolver
+  GMRES = indirect.PetscGMRES
 
 
 class SolutionStatus(enum.Enum):
@@ -154,12 +156,13 @@ class QTQP:
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.SCIPY,
-      linear_solver_direct: bool = True,
+      # linear_solver_direct: bool = False,
       verbose: bool = True,
       equilibrate: bool = True,
       x: np.ndarray | None = None,
       y: np.ndarray | None = None,
       s: np.ndarray | None = None,
+      c_termination: bool = False
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -204,6 +207,8 @@ class QTQP:
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
+
+    self.c_termination = c_termination
 
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
@@ -266,10 +271,11 @@ class QTQP:
       "rtol" : linear_solver_rtol,
       "solver" : linear_solver.value(),
     }
-    if linear_solver_direct:
-      self._linear_solver = direct.DirectKktSolver(**linear_solver_args)
-    else:
-      self._linear_solver = indirect.IndirectKktSolver(**linear_solver_args)
+    self._linear_solver = KKTSolver(**linear_solver_args)
+    # if linear_solver_direct:
+    #   self._linear_solver = direct.DirectKktSolver(**linear_solver_args)
+    # else:
+    #   self._linear_solver = indirect.IndirectKktSolver(**linear_solver_args)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
@@ -534,8 +540,10 @@ class QTQP:
     return min(alpha_s, alpha_y)
 
   def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
-    status = self._old_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
-    # status = self._clarabel_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
+    if not self.c_termination:
+      status = self._old_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
+    else:
+      status = self._clarabel_termination(x, y, tau_arr, s, alpha, mu, sigma, stats_i)
     return status
 
   def _clarabel_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):

@@ -15,26 +15,13 @@
 """Indirect KKT linear system solvers."""
 
 import logging
-from tkinter import N
 from typing import Any, Literal, Protocol
+
+from . import LinearSolver
 
 import numpy as np
 import scipy.sparse as sp
 
-class LinearSolver(Protocol):
-  """Protocol defining the interface for linear solvers."""
-
-  def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
-    """Factorizes or refactorizes the KKT matrix."""
-    ...
-
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system."""
-    ...
-
-  def format(self) -> str:
-    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
-    ...
 
 class PetscGMRES(LinearSolver):
   """MinRes solver using PETSc."""
@@ -62,13 +49,13 @@ class PetscGMRES(LinearSolver):
     self.Kxx: self.module.Mat | None = None       # = G
     self.Kyy_pos: self.module.Mat | None = None   # = -Kyy = W (SPD)
 
-  def update(self, kkt: sp.spmatrix, s: np.ndarray) -> None:
+  def update(self, kkt: sp.spmatrix) -> None:
     """Updates the preconditioner."""
-    if self.n is None or self.m is None:
-      self.m = s.shape[0]
-      self.n = kkt.shape[0] - self.m
-      self.is_x = self.module.IS().createStride(self.n, first=0, step=1)
-      self.is_y = self.module.IS().createStride(self.m, first=self.n, step=1)
+    # if self.n is None or self.m is None:
+    #   self.m = s.shape[0]
+    #   self.n = kkt.shape[0] - self.m
+    #   self.is_x = self.module.IS().createStride(self.n, first=0, step=1)
+    #   self.is_y = self.module.IS().createStride(self.m, first=self.n, step=1)
 
     # Wrap global KKT
     self.kkt_wrapper = self.module.Mat().createAIJ(
@@ -87,18 +74,18 @@ class PetscGMRES(LinearSolver):
     self.ksp.setTolerances(rtol=1e-10, atol=1e-10, max_it=1000)
     self.ksp.setUp()
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray: 
+  def solve(self, rhs: np.ndarray, warm_start: np.ndarray) -> np.ndarray: 
     """Solves the linear system.""" 
     if self.rhs is None: 
       self.rhs = self.module.Vec().createWithArray(rhs.ravel()) 
       self.sol = self.module.Vec().createSeq(rhs.size) 
     self.rhs.setArray(rhs) 
     
-    if self.warm_start is None: 
-      logging.warning("No warm start provided to indirect solver, using zero vector") 
-    self.warm_start = np.zeros(rhs.size) 
+    # if self.warm_start is None: 
+    #   logging.warning("No warm start provided to indirect solver, using zero vector") 
+    # self.warm_start = np.zeros(rhs.size) 
     
-    self.sol.setArray(self.warm_start) 
+    self.sol.setArray(warm_start) 
     self.ksp.solve(self.rhs, self.sol) 
     
     iters = self.ksp.getIterationNumber() 
@@ -121,6 +108,10 @@ class PetscGMRES(LinearSolver):
   def format(self) -> Literal["csr"]:
     """Returns the expected sparse matrix format."""
     return "csr"
+
+  def type(self) -> Literal["indirect"]:
+    """Returns the type of the solver."""
+    return "indirect"
 
 
 class ScipyMinres(LinearSolver):
@@ -221,6 +212,10 @@ class ScipyMinres(LinearSolver):
   def format(self) -> Literal["csc"]:
     return "csc"
 
+  def type(self) -> Literal["indirect"]:
+    """Returns the type of the solver."""
+    return "indirect"
+
 class IndirectKktSolver:
   """Indirect KKT linear system solver.
 
@@ -232,6 +227,7 @@ class IndirectKktSolver:
 
   def __init__(
       self,
+      *,
       a: sp.spmatrix,
       p: sp.spmatrix,
       z: int,
@@ -316,8 +312,8 @@ class IndirectKktSolver:
     """Solves the linear system with the given preconditioner and data"""
     rhs = rhs.copy()
     rhs[self.n :] *= -1.0
-    self.solver.warm_start = warm_start 
-    x, exitflag = self.solver.solve(rhs)
+    # self.solver.warm_start = warm_start 
+    x, exitflag = self.solver.solve(rhs, warm_start)
     res_norm = np.linalg.norm(self.kkt @ x - rhs, np.inf)
     return x, {
         "solves": 1,
