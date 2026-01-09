@@ -4,7 +4,7 @@ import numpy as np
 from scipy.sparse import csc_matrix
 
 from qtqp import QTQP, Solution, LinearSolver, SolutionStatus
-from qtqp.direct import DirectKktSolver
+from qtqp.kkt import KKTSolver
 
 
 class Clarabel(QTQP):
@@ -27,11 +27,14 @@ class Clarabel(QTQP):
         x: np.ndarray | None = None,
         y: np.ndarray | None = None,
         s: np.ndarray | None = None,
+        c_termination: bool = False,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
         The `y` variable in this code corresponds to `z` in the Clarabel paper.
         """
+        self.c_termination = c_termination
+        
         self.start_time = timeit.default_timer()
         self.atol = atol
         self.rtol = rtol
@@ -47,7 +50,7 @@ class Clarabel(QTQP):
         else:
             a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
-        linear_solver = DirectKktSolver(
+        linear_solver = KKTSolver(
             a=a,
             p=p,
             z=self.z,
@@ -238,7 +241,7 @@ class Clarabel(QTQP):
         s: np.ndarray,
         τ: float,
         κ: float,
-        linear_solver: DirectKktSolver,
+        linear_solver: KKTSolver,
         Δx2: np.ndarray,
         Δy2: np.ndarray,
         dx: np.ndarray,
@@ -272,7 +275,7 @@ class Clarabel(QTQP):
     def init_iterates(
         self,
         *,
-        linear_solver: DirectKktSolver,
+        linear_solver: KKTSolver,
         c: np.ndarray,
         b: np.ndarray,
         ϵ: float,
