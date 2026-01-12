@@ -71,7 +71,7 @@ class PetscGMRES(LinearSolver):
     # self._none_PC()
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-10, atol=1e-10, max_it=1000)
+    self.ksp.setTolerances(rtol=1e-8, atol=1e-8, max_it=kkt.shape[0])
     self.ksp.setUp()
 
   def solve(self, rhs: np.ndarray, warm_start: np.ndarray) -> np.ndarray: 
