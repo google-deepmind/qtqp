@@ -32,11 +32,11 @@ class PetscGMRES(LinearSolver):
     self.n: int | None = None
     self.m: int | None = None
 
-    self.ksp = self.module.KSP().create()
+    # self.ksp = self.module.KSP().create()
     self.warm_start: np.ndarray | None = None
 
     # Use MINRES for symmetric indefinite systems
-    self.ksp.setType("gmres")
+    # self.ksp.setType("gmres")
 
     # Mat/Vec handles
     self.kkt_wrapper: self.module.Mat | None = None
@@ -51,12 +51,8 @@ class PetscGMRES(LinearSolver):
 
   def update(self, kkt: sp.spmatrix) -> None:
     """Updates the preconditioner."""
-    # if self.n is None or self.m is None:
-    #   self.m = s.shape[0]
-    #   self.n = kkt.shape[0] - self.m
-    #   self.is_x = self.module.IS().createStride(self.n, first=0, step=1)
-    #   self.is_y = self.module.IS().createStride(self.m, first=self.n, step=1)
-
+    self.ksp = self.module.KSP().create()
+    self.ksp.setType("gmres")
     # Wrap global KKT
     self.kkt_wrapper = self.module.Mat().createAIJ(
       size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
@@ -67,12 +63,10 @@ class PetscGMRES(LinearSolver):
     self.ksp.setOperators(self.kkt_wrapper)
 
     # Choose your PC here
-    self._custom_PC()       # <- your ILU-on-full-K fallback
+    # self._custom_PC()       # <- your ILU-on-full-K fallback
+    self._block_preconditioner()
     # self._none_PC()
 
-    self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-8, atol=1e-8, max_it=kkt.shape[0])
-    self.ksp.setUp()
 
   def solve(self, rhs: np.ndarray, warm_start: np.ndarray) -> np.ndarray: 
     """Solves the linear system.""" 
@@ -81,29 +75,70 @@ class PetscGMRES(LinearSolver):
       self.sol = self.module.Vec().createSeq(rhs.size) 
     self.rhs.setArray(rhs) 
     
-    # if self.warm_start is None: 
-    #   logging.warning("No warm start provided to indirect solver, using zero vector") 
-    # self.warm_start = np.zeros(rhs.size) 
-    
     self.sol.setArray(warm_start) 
+    
     self.ksp.solve(self.rhs, self.sol) 
     
+    # eig = self.ksp.computeEigenvalues()
+    # logging.warning(f"min: {np.min(eig)}, max: {np.max(eig)}")
     iters = self.ksp.getIterationNumber() 
     reason = self.ksp.getConvergedReason() 
+    if reason == 4:
+      logging.warning("Indirect solver hit max iterations")
+    elif reason < 0:
+      logging.warning(f"Indirect solver diverged, reason: {reason}")
     # print(f"Reason: {reason} with iters: {iters}") 
     
     x = self.sol.getArray().copy().real.reshape(rhs.shape) 
-    
+    # self.ksp.getPC().destroy()
+    # self.ksp.destroy()
     return x, 0
 
   def _none_PC(self):
     self.ksp.getPC().setType("none")
 
+  def _block_preconditioner(self):
+    pc = self.ksp.getPC() 
+
+    # Define the two fields by index sets: [0..1] and [2..6]
+    is_u = self.module.IS().createStride(self.n, first=0, step=1)
+    is_l = self.module.IS().createStride(self.m, first=self.n, step=1)
+
+    pc.setType("fieldsplit")
+    # IMPORTANT: lambda first -> makes A00 = H
+    pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
+
+    pc.setFieldSplitType(self.module.PC.CompositeType.SCHUR)
+    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.LOWER)
+
+    # Since A00 is diagonal H, SELFP becomes very strong (often exact Schur)
+    pc.setFieldSplitSchurPreType(self.module.PC.FieldSplitSchurPreType.SELFP)
+
+    self.ksp.setFromOptions()
+    self.ksp.setTolerances(rtol=1e-12, atol=1e-12, max_it=10000)
+    # self.ksp.setComputeEigenvalues(True)
+    self.ksp.setUp()
+
+    ksp_l, ksp_s = pc.getFieldSplitSubKSP()   # ksp_l for H-block, ksp_s for Schur on u
+    ksp_l.setType("preonly")
+    ksp_l.getPC().setType("jacobi")   # exact for diagonal H
+
+    ksp_s.setType("cg")                       # Schur is SPD
+    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
+    ksp_s.setTolerances(rtol=1e-12, max_it=1000)
+    ksp_s.getPC().setFactorLevels(3)
+
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""
-    pc = self.ksp.getPC()
-    pc.setType("ilu")
-    pc.setFactorLevels(1)
+    pc_ilu = self.ksp.getPC()
+    pc_ilu.setType("ilu")
+    pc_ilu.setFactorPivot(1e-8, True)  # enable pivoting
+    pc_ilu.setFactorLevels(5)
+
+    self.ksp.setFromOptions()
+    self.ksp.setTolerances(rtol=1e-12, atol=1e-12, max_it=10000)
+    # self.ksp.setComputeEigenvalues(True)
+    self.ksp.setUp()
 
   def format(self) -> Literal["csr"]:
     """Returns the expected sparse matrix format."""

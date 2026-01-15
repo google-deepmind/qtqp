@@ -146,9 +146,9 @@ class QTQP:
       self,
       *,
       atol: float = 1e-7,
-      rtol: float = 1e-7,
-      atol_infeas: float = 1e-7,
-      rtol_infeas: float = 1e-7,
+      rtol: float = 1e-8,
+      atol_infeas: float = 1e-8,
+      rtol_infeas: float = 1e-9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
@@ -162,7 +162,7 @@ class QTQP:
       x: np.ndarray | None = None,
       y: np.ndarray | None = None,
       s: np.ndarray | None = None,
-      c_termination: bool = False
+      c_termination: bool = True
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -272,10 +272,6 @@ class QTQP:
       "solver" : linear_solver.value(),
     }
     self._linear_solver = KKTSolver(**linear_solver_args)
-    # if linear_solver_direct:
-    #   self._linear_solver = direct.DirectKktSolver(**linear_solver_args)
-    # else:
-    #   self._linear_solver = indirect.IndirectKktSolver(**linear_solver_args)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.

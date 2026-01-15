@@ -95,7 +95,7 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-7, rtol=1e-7):
 #       dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf)
 #   )
 
-def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-7):
+def _assert_solution(solution, a, b, c, p, z, atol=1e-8, rtol=1e-8):
   """Assert that the solution satisfies KKT conditions."""
   x = solution.x
   y = solution.y
@@ -124,7 +124,7 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-7):
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
 
 
-def _assert_infeasible(solution, a, b, z, atol=1e-7, rtol=1e-7):
+def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-8):
   """Assert that the solution satisfies KKT conditions for primal infeasibility."""
   x = solution.x
   y = solution.y
@@ -148,7 +148,12 @@ def test_unbounded(equilibrate, seed, linear_solver):
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver,
+      equilibrate=equilibrate, linear_solver=linear_solver, c_termination=False,
+      # TODO: Firgure out why not handelling tighter accuracy
+      atol=1e-7,
+      rtol=1e-7,
+      atol_infeas=1e-7,
+      rtol_infeas=1e-7,
   )
   _assert_unbounded(solution, a, c, p, z)
 

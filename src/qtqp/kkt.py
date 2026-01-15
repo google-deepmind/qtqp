@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from qtqp.linear import LinearSolver
 
 
@@ -109,7 +110,27 @@ class KKTSolver:
 
     # 1. Inject regularized values for the solver update.
     self.kkt.data[self.kkt_nan_idxs] = reg_diags
+
+    if self.solver.type() == 'indirect' and self.solver.n is None:
+      self.solver.n = self.n
+      self.solver.m = self.m
     self.solver.update(self.kkt)
+
+    # Estimate spectral norm for GMRES monitoring.
+    # σ_min estimation via ARPACK fails on quasi-definite matrices, so we
+    # report σ_max and the diagonal condition (max/min abs diagonal) as a proxy.
+    try:
+      sigma_max = spla.svds(
+          self.kkt, k=1, which="LM", return_singular_vectors=False
+      )[0]
+      diag_abs = np.abs(reg_diags)
+      diag_cond = diag_abs.max() / diag_abs.min() if diag_abs.min() > 0 else np.inf
+      logging.warning(
+          "KKT σ_max=%.2e, diag_cond=%.2e (diag_max=%.2e, diag_min=%.2e)",
+          sigma_max, diag_cond, diag_abs.max(), diag_abs.min(),
+      )
+    except Exception as e:
+      logging.warning("Failed to estimate KKT spectral norm: %s", e)
 
     # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags
