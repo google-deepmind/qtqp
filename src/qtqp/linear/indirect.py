@@ -37,6 +37,8 @@ class PetscGMRES(LinearSolver):
 
     # Use MINRES for symmetric indefinite systems
     # self.ksp.setType("gmres")
+    self.ksp = self.module.KSP().create()
+    self.ksp.setType("fgmres")
 
     # Mat/Vec handles
     self.kkt_wrapper: self.module.Mat | None = None
@@ -49,26 +51,36 @@ class PetscGMRES(LinearSolver):
     self.Kxx: self.module.Mat | None = None       # = G
     self.Kyy_pos: self.module.Mat | None = None   # = -Kyy = W (SPD)
 
-  def update(self, kkt: sp.spmatrix) -> None:
-    """Updates the preconditioner."""
-    # TODO: Very inefficient, should create ksp once and update values
-    self.ksp = self.module.KSP().create()
-    self.ksp.setType("fgmres")
-    # Wrap global KKT
-    self.kkt_wrapper = self.module.Mat().createAIJ(
-      size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
-    )
-    self.kkt_wrapper.setOption(self.module.Mat.Option.SYMMETRIC, True)
-    self.kkt_wrapper.setOption(self.module.Mat.Option.SPD, False)
-    self.kkt_wrapper.assemble()
-    self.ksp.setOperators(self.kkt_wrapper)
+    self._setup_done = False
 
-    # Choose your PC here
-    # self._custom_PC()       # <- your ILU-on-full-K fallback
-    # self._block_jacobi_preconditioner()
+  def _setup(self, kkt: sp.spmatrix) -> None:
+
+    N = int(self.n + self.m)
+    self.kkt = self.module.Mat().createAIJ(size=(N, N), comm=self.module.COMM_SELF)
+    self.kkt.setPreallocationCSR((kkt.indptr, kkt.indices))  # pattern only
+    # forbid pattern changes (debug/safety); you can turn this off later
+    self.kkt.setOption(self.module.Mat.Option.NEW_NONZERO_LOCATION_ERR, True)
+    self.kkt.setOption(self.module.Mat.Option.SYMMETRIC, True)
+    self.kkt.setOption(self.module.Mat.Option.SPD, False)
+    self.kkt.setUp()
+    self.kkt.assemble()
+    self.ksp.setOperators(self.kkt) 
+
     self._block_schur_preconditioner()
-    # self._none_PC()
 
+    self._setup_done = True
+
+  def update(self, kkt: sp.spmatrix) -> None:
+    if not self._setup_done:
+      self._setup(kkt)
+    
+    # overwrite values (fast)
+    self.kkt.setValuesCSR(
+      kkt.indptr, kkt.indices, kkt.data, 
+      addv=self.module.InsertMode.INSERT_VALUES
+    ) 
+    self.kkt.assemblyBegin()
+    self.kkt.assemblyEnd()
 
   def solve(self, rhs: np.ndarray, warm_start: np.ndarray) -> np.ndarray: 
     """Solves the linear system.""" 
@@ -114,7 +126,7 @@ class PetscGMRES(LinearSolver):
     pc.setFieldSplitType(self.module.PC.CompositeType.SYMMETRIC_MULTIPLICATIVE)
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-10, atol=1e-12, max_it=100)
+    self.ksp.setTolerances(rtol=1e-8, atol=0, max_it=100)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
@@ -122,10 +134,10 @@ class PetscGMRES(LinearSolver):
     ksp_l.setType("preonly")
     ksp_l.getPC().setType("jacobi")   # exact for diagonal H
 
-    ksp_s.setType("minres")                       # Schur is SPD
-    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
-    ksp_s.setTolerances(rtol=1e-6, atol=0, max_it=1000)
-    ksp_s.getPC().setFactorLevels(2)
+    ksp_s.setType("preonly")                       # Schur is SPD
+    ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
+    # ksp_s.setTolerances(rtol=1e-6, atol=0, max_it=1000)
+    # ksp_s.getPC().setFactorLevels(2)
 
   def _block_schur_preconditioner(self):
     pc = self.ksp.getPC() 
@@ -139,13 +151,13 @@ class PetscGMRES(LinearSolver):
     pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
 
     pc.setFieldSplitType(self.module.PC.CompositeType.SCHUR)
-    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.DIAG)
+    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.LOWER)
 
     # Since A00 is diagonal H, SELFP becomes very strong (often exact Schur)
     pc.setFieldSplitSchurPreType(self.module.PC.FieldSplitSchurPreType.SELFP)
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-12, atol=1e-12, max_it=100)
+    self.ksp.setTolerances(rtol=1e-10, atol=0, max_it=100)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
@@ -155,8 +167,7 @@ class PetscGMRES(LinearSolver):
 
     ksp_s.setType("preonly")                       # Schur is SPD
     ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
-    # ksp_s.setTolerances(rtol=1e-2, atol=0, max_it=100)
-    # ksp_s.getPC().setFactorLevels(2)
+    ksp_s.getPC().setFactorPivot(1e-8)
 
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""
