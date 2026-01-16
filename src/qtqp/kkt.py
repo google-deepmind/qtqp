@@ -125,12 +125,13 @@ class KKTSolver:
       )[0]
       diag_abs = np.abs(reg_diags)
       diag_cond = diag_abs.max() / diag_abs.min() if diag_abs.min() > 0 else np.inf
-      logging.warning(
-          "KKT σ_max=%.2e, diag_cond=%.2e (diag_max=%.2e, diag_min=%.2e)",
-          sigma_max, diag_cond, diag_abs.max(), diag_abs.min(),
-      )
+      # logging.warning(
+      #     "KKT σ_max=%.2e, diag_cond=%.2e (diag_max=%.2e, diag_min=%.2e)",
+      #     sigma_max, diag_cond, diag_abs.max(), diag_abs.min(),
+      # )
     except Exception as e:
-      logging.warning("Failed to estimate KKT spectral norm: %s", e)
+      # logging.warning("Failed to estimate KKT spectral norm: %s", e)
+      pass
 
     # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = true_diags

@@ -87,6 +87,8 @@ class PetscGMRES(LinearSolver):
       logging.warning("Indirect solver hit max iterations")
     elif reason < 0:
       logging.warning(f"Indirect solver diverged, reason: {reason}")
+    else:
+      logging.warning(f"Indirect solver converged in {iters}/10000 iterations, reason: {reason}")
     # print(f"Reason: {reason} with iters: {iters}") 
     
     x = self.sol.getArray().copy().real.reshape(rhs.shape) 
@@ -115,7 +117,7 @@ class PetscGMRES(LinearSolver):
     pc.setFieldSplitSchurPreType(self.module.PC.FieldSplitSchurPreType.SELFP)
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-12, atol=1e-12, max_it=10000)
+    self.ksp.setTolerances(rtol=1e-12, atol=0, max_it=10000)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
@@ -123,10 +125,10 @@ class PetscGMRES(LinearSolver):
     ksp_l.setType("preonly")
     ksp_l.getPC().setType("jacobi")   # exact for diagonal H
 
-    ksp_s.setType("cg")                       # Schur is SPD
+    ksp_s.setType("minres")                       # Schur is SPD
     ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
-    ksp_s.setTolerances(rtol=1e-12, max_it=1000)
-    ksp_s.getPC().setFactorLevels(3)
+    ksp_s.setTolerances(rtol=1e-4, atol=0, max_it=10000)
+    ksp_s.getPC().setFactorLevels(1)
 
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""
