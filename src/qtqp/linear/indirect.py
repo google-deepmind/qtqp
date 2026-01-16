@@ -137,7 +137,7 @@ class PetscGMRES(LinearSolver):
     ksp_s.setType("preonly")                       # Schur is SPD
     ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
     # ksp_s.setTolerances(rtol=1e-6, atol=0, max_it=1000)
-    # ksp_s.getPC().setFactorLevels(2)
+    # ksp_s.getPC().setFactorLevels(5)
 
   def _block_schur_preconditioner(self):
     pc = self.ksp.getPC() 
@@ -165,9 +165,11 @@ class PetscGMRES(LinearSolver):
     ksp_l.setType("preonly")
     ksp_l.getPC().setType("jacobi")   # exact for diagonal H
 
-    ksp_s.setType("preonly")                       # Schur is SPD
-    ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
+    ksp_s.setType("cg")                       # Schur is SPD
+    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
     ksp_s.getPC().setFactorPivot(1e-8)
+    ksp_s.getPC().setFactorLevels(0)
+    ksp_s.setTolerances(rtol=1e-3, atol=0, max_it=1000)
 
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""
