@@ -51,8 +51,9 @@ class PetscGMRES(LinearSolver):
 
   def update(self, kkt: sp.spmatrix) -> None:
     """Updates the preconditioner."""
+    # TODO: Very inefficient, should create ksp once and update values
     self.ksp = self.module.KSP().create()
-    self.ksp.setType("gmres")
+    self.ksp.setType("fgmres")
     # Wrap global KKT
     self.kkt_wrapper = self.module.Mat().createAIJ(
       size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
@@ -64,7 +65,8 @@ class PetscGMRES(LinearSolver):
 
     # Choose your PC here
     # self._custom_PC()       # <- your ILU-on-full-K fallback
-    self._block_preconditioner()
+    # self._block_jacobi_preconditioner()
+    self._block_schur_preconditioner()
     # self._none_PC()
 
 
@@ -87,8 +89,8 @@ class PetscGMRES(LinearSolver):
       logging.warning("Indirect solver hit max iterations")
     elif reason < 0:
       logging.warning(f"Indirect solver diverged, reason: {reason}")
-    else:
-      logging.warning(f"Indirect solver converged in {iters}/10000 iterations, reason: {reason}")
+    # else:
+      # logging.warning(f"Indirect solver converged in {iters}/10000 iterations, reason: {reason}")
     # print(f"Reason: {reason} with iters: {iters}") 
     
     x = self.sol.getArray().copy().real.reshape(rhs.shape) 
@@ -99,7 +101,33 @@ class PetscGMRES(LinearSolver):
   def _none_PC(self):
     self.ksp.getPC().setType("none")
 
-  def _block_preconditioner(self):
+  def _block_jacobi_preconditioner(self):
+    pc = self.ksp.getPC() 
+
+    # Define the two fields by index sets: [0..1] and [2..6]
+    is_u = self.module.IS().createStride(self.n, first=0, step=1)
+    is_l = self.module.IS().createStride(self.m, first=self.n, step=1)
+
+    pc.setType("fieldsplit")
+    # IMPORTANT: lambda first -> makes A00 = H
+    pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
+    pc.setFieldSplitType(self.module.PC.CompositeType.SYMMETRIC_MULTIPLICATIVE)
+
+    self.ksp.setFromOptions()
+    self.ksp.setTolerances(rtol=1e-10, atol=1e-12, max_it=100)
+    # self.ksp.setComputeEigenvalues(True)
+    self.ksp.setUp()
+
+    ksp_l, ksp_s = pc.getFieldSplitSubKSP()   # ksp_l for H-block, ksp_s for Schur on u
+    ksp_l.setType("preonly")
+    ksp_l.getPC().setType("jacobi")   # exact for diagonal H
+
+    ksp_s.setType("minres")                       # Schur is SPD
+    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
+    ksp_s.setTolerances(rtol=1e-6, atol=0, max_it=1000)
+    ksp_s.getPC().setFactorLevels(2)
+
+  def _block_schur_preconditioner(self):
     pc = self.ksp.getPC() 
 
     # Define the two fields by index sets: [0..1] and [2..6]
@@ -111,13 +139,13 @@ class PetscGMRES(LinearSolver):
     pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
 
     pc.setFieldSplitType(self.module.PC.CompositeType.SCHUR)
-    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.LOWER)
+    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.DIAG)
 
     # Since A00 is diagonal H, SELFP becomes very strong (often exact Schur)
     pc.setFieldSplitSchurPreType(self.module.PC.FieldSplitSchurPreType.SELFP)
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-12, atol=0, max_it=10000)
+    self.ksp.setTolerances(rtol=1e-12, atol=1e-12, max_it=100)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
@@ -125,10 +153,10 @@ class PetscGMRES(LinearSolver):
     ksp_l.setType("preonly")
     ksp_l.getPC().setType("jacobi")   # exact for diagonal H
 
-    ksp_s.setType("minres")                       # Schur is SPD
-    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
-    ksp_s.setTolerances(rtol=1e-4, atol=0, max_it=10000)
-    ksp_s.getPC().setFactorLevels(1)
+    ksp_s.setType("preonly")                       # Schur is SPD
+    ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
+    # ksp_s.setTolerances(rtol=1e-2, atol=0, max_it=100)
+    # ksp_s.getPC().setFactorLevels(2)
 
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""

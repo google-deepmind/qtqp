@@ -162,7 +162,8 @@ class QTQP:
       x: np.ndarray | None = None,
       y: np.ndarray | None = None,
       s: np.ndarray | None = None,
-      c_termination: bool = True
+      c_termination: bool = True,
+      timeout: float = 60.0
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -359,6 +360,11 @@ class QTQP:
       status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i)
       self._log_iteration(stats_i)
       stats.append(stats_i)
+      
+      if stats_i["time"] > timeout:
+        self._log_footer(f"Timeout after {stats_i['time']:.2f}s (limit: {timeout}s)")
+        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+
       if status != SolutionStatus.UNFINISHED:
         if self.equilibrate:
           x, y, s = self._unequilibrate_iterates(x, y, s)
