@@ -90,17 +90,23 @@ class PetscGMRES(LinearSolver):
     self.rhs.setArray(rhs) 
     
     self.sol.setArray(warm_start) 
-    
+    self.ksp.setInitialGuessNonzero(True)
+    # self.ksp.setInitialGuessKnoll(True)
     self.ksp.solve(self.rhs, self.sol) 
     
     # eig = self.ksp.computeEigenvalues()
     # logging.warning(f"min: {np.min(eig)}, max: {np.max(eig)}")
     iters = self.ksp.getIterationNumber() 
     reason = self.ksp.getConvergedReason() 
+    _, sub_ksp = self.ksp.getPC().getFieldSplitSubKSP()
+    sub_reason = sub_ksp.getConvergedReason()
+
     if reason == 4:
       logging.warning("Indirect solver hit max iterations")
     elif reason < 0:
       logging.warning(f"Indirect solver diverged, reason: {reason}")
+    elif sub_reason < 0:
+      logging.warning(f"Subsolver diverged, reason: {sub_reason}")
     # else:
       # logging.warning(f"Indirect solver converged in {iters}/10000 iterations, reason: {reason}")
     # print(f"Reason: {reason} with iters: {iters}") 
@@ -123,24 +129,29 @@ class PetscGMRES(LinearSolver):
     pc.setType("fieldsplit")
     # IMPORTANT: lambda first -> makes A00 = H
     pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
-    pc.setFieldSplitType(self.module.PC.CompositeType.SYMMETRIC_MULTIPLICATIVE)
+    pc.setFieldSplitType(self.module.PC.CompositeType.ADDITIVE)
 
     self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-8, atol=0, max_it=100)
+    self.ksp.setTolerances(rtol=1e-10, atol=0, max_it=100)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
     ksp_l, ksp_s = pc.getFieldSplitSubKSP()   # ksp_l for H-block, ksp_s for Schur on u
     ksp_l.setType("preonly")
-    ksp_l.getPC().setType("jacobi")   # exact for diagonal H
+    ksp_l.getPC().setType("cholesky")   # exact for diagonal H
 
     ksp_s.setType("preonly")                       # Schur is SPD
-    ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
+    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
     # ksp_s.setTolerances(rtol=1e-6, atol=0, max_it=1000)
-    # ksp_s.getPC().setFactorLevels(5)
+    ksp_s.getPC().setFactorLevels(0)
+    ksp_s.setReusePreconditioner(False)
+    ksp_s.setInitialGuessKnoll(True)
+    # ksp_s.getPC().setFactorPivot(1e-10)
 
   def _block_schur_preconditioner(self):
+    self.ksp.setPCSide(self.module.PC.Side.RIGHT)
     pc = self.ksp.getPC() 
+    pc.setReusePreconditioner(False)
 
     # Define the two fields by index sets: [0..1] and [2..6]
     is_u = self.module.IS().createStride(self.n, first=0, step=1)
@@ -151,13 +162,15 @@ class PetscGMRES(LinearSolver):
     pc.setFieldSplitIS(("lambda", is_l), ("u", is_u))
 
     pc.setFieldSplitType(self.module.PC.CompositeType.SCHUR)
-    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.LOWER)
+    pc.setFieldSplitSchurFactType(self.module.PC.FieldSplitSchurFactType.DIAG)
 
     # Since A00 is diagonal H, SELFP becomes very strong (often exact Schur)
     pc.setFieldSplitSchurPreType(self.module.PC.FieldSplitSchurPreType.SELFP)
 
-    self.ksp.setFromOptions()
-    self.ksp.setTolerances(rtol=1e-10, atol=0, max_it=100)
+    self.ksp.setOptionsPrefix(
+      'ksp_gmres_cgs_refinement_type refine_ifneeded -ksp_gmres_classicalgramschmidt'
+    )
+    self.ksp.setTolerances(rtol=1e-10, atol=0, divtol=1e7, max_it=100)
     # self.ksp.setComputeEigenvalues(True)
     self.ksp.setUp()
 
@@ -165,11 +178,18 @@ class PetscGMRES(LinearSolver):
     ksp_l.setType("preonly")
     ksp_l.getPC().setType("jacobi")   # exact for diagonal H
 
-    ksp_s.setType("cg")                       # Schur is SPD
-    ksp_s.getPC().setType("icc")              # approximate inverse of SPD Schur
-    ksp_s.getPC().setFactorPivot(1e-8)
-    ksp_s.getPC().setFactorLevels(0)
-    ksp_s.setTolerances(rtol=1e-3, atol=0, max_it=1000)
+    ksp_s.setType("preonly")                       # Schur is SPD
+    ksp_s.getPC().setType("cholesky")              # approximate inverse of SPD Schur
+    # ksp_s.getPC().setFactorPivot(1e-8)
+    # ksp_s.getPC().setFactorLevels(0)
+    # ksp_s.setNormType(self.module.KSP.NormType.NATURAL)
+    if ksp_s.getType() != self.module.KSP.Type.PREONLY:
+      ksp_s.setInitialGuessKnoll(True)
+      ksp_s.setInitialGuessNonzero(True)
+      ksp_s.getPC().setReusePreconditioner(False)
+      ksp_s.setTolerances(rtol=1e-6, atol=0, divtol=1e5, max_it=100)
+      ksp_s.setPCSide(self.module.PC.Side.LEFT)
+      ksp_s.setNormType(self.module.KSP.NormType.PRECONDITIONED)
 
   def _custom_PC(self):
     """ILU preconditioner on full K (often good for GMRES, not SPD)."""
@@ -293,109 +313,4 @@ class ScipyMinres(LinearSolver):
   def type(self) -> Literal["indirect"]:
     """Returns the type of the solver."""
     return "indirect"
-
-class IndirectKktSolver:
-  """Indirect KKT linear system solver.
-
-  Solves a quasidefinite KKT system:
-      [ P + mu * I       A.T     ] [ x ]   [ rhs_x ]
-      [     A      -(D + mu * I) ] [ y ] = [ -rhs_y ]
-  where D is a diagonal matrix derived from slacks and duals.
-  """
-
-  def __init__(
-      self,
-      *,
-      a: sp.spmatrix,
-      p: sp.spmatrix,
-      z: int,
-      min_static_regularization: float,
-      max_iterative_refinement_steps: int,
-      atol: float,
-      rtol: float,
-      solver: LinearSolver,
-  ):
-    """Initializes the DirectKktSolver.
-
-    Args:
-      a: The constraint matrix from the QP.
-      p: The quadratic cost matrix from the QP.
-      z: The number of zero elements in the diagonal of the barrier term.
-      min_static_regularization: Minimum static regularization to add to the
-        diagonal of the KKT matrix.
-      max_iterative_refinement_steps: Maximum number of iterative refinement
-        steps to perform.
-      atol: Absolute tolerance for iterative refinement.
-      rtol: Relative tolerance for iterative refinement.
-      solver: An instance of a direct solver class (e.g., MklPardisoSolver).
-    """
-    # Create KKT scaffold with NaNs where we will update values each iteration.
-    self.m, self.n = a.shape
-    self.z = z
-    self.p = p
-    self.p_diags = p.diagonal()
-    self.min_static_regularization = min_static_regularization
-    self.atol = atol
-    self.rtol = rtol
-    self.solver = PetscGMRES()
-    # self.solver = ScipyMinres()
-
-    self.solver.a = a
-    self.solver.p = p
-
-    # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
-    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format=self.solver.format())
-    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format=self.solver.format())
-
-    # Construct the sparse block matrices once.
-    self.kkt = sp.bmat(
-        [[p + n_nans, a.T], [a, m_nans]],
-        format=self.solver.format(),
-        dtype=np.float64,
-    )
-
-    # Cache indices of the diagonal elements for fast updates.
-    self.kkt_nan_idxs = np.isnan(self.kkt.data)
-
-  def update(self, mu: float, s: np.ndarray, y: np.ndarray) -> None:
-    """Forms the KKT matrix diagonals and preconditioner.
-
-    Args:
-      mu: The barrier parameter.
-      s: The slack variables.
-      y: The dual variables for the conic constraints.
-    """
-    # Calculate the dynamic diagonal block D = s / y for inequality rows.
-    # For equality rows (first z), the diagonal is 0.
-    h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
-    # "True" diagonals for accurate residual calculation (no regularization).
-    # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    true_diags = np.concatenate([self.p_diags, h]) + mu
-    # "Regularized" diagonals for stable factorization.
-    reg_diags = np.maximum(true_diags, self.min_static_regularization)
-    # Flip the sign of the cone variables.
-    true_diags[self.n :] *= -1.0
-    reg_diags[self.n :] *= -1.0
-  
-    # 1. Inject regularized values for the linear solve.
-    self.kkt.data[self.kkt_nan_idxs] = reg_diags
-    self.solver.update(self.kkt, s)
-    
-    # 2. Restore true values for subsequent residual checks in `solve()`.
-    self.kkt.data[self.kkt_nan_idxs] = true_diags
-
-  def solve(
-      self, rhs: np.ndarray, warm_start: np.ndarray
-    ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Solves the linear system with the given preconditioner and data"""
-    rhs = rhs.copy()
-    rhs[self.n :] *= -1.0
-    # self.solver.warm_start = warm_start 
-    x, exitflag = self.solver.solve(rhs, warm_start)
-    res_norm = np.linalg.norm(self.kkt @ x - rhs, np.inf)
-    return x, {
-        "solves": 1,
-        "final_residual_norm": res_norm,
-        "status": "converged" if exitflag == 0 else "non-converged"
-    }
       
