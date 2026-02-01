@@ -325,7 +325,7 @@ class DirectKktSolver:
     # Cache indices of the diagonal elements for fast updates.
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
 
-  def update(self, mu: float, s: np.ndarray, y: np.ndarray) -> None:
+  def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
 
     This method employs an optimization to avoid copying the full sparse KKT

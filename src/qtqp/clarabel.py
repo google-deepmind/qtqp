@@ -48,7 +48,6 @@ class Clarabel(QTQP):
 
             if self.equilibrate:
                 a, p, b, c, self.d, self.e = self._equilibrate()
-                x, y, s = self._equilibrate_iterates(x, y, s)
             else:
                 a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
@@ -93,13 +92,8 @@ class Clarabel(QTQP):
 
         stats_list = []
 
-        self.it = 0
-        stats_i = {}
-        self._check_termination(x, y, [τ], s, None, None, None, stats_i)
-        stats_list.append(stats_i)
-
         # --- Main iteration loop ---
-        for self.it in range(1, max_iter + 1):
+        for self.it in range(max_iter):
             stats = {}
 
             # Eq. (9c)

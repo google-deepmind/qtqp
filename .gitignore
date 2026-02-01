@@ -3,7 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Editor
+.DS_Store
+notebooks
+uv.lock
 .idea
 
 # Distribution / packaging
