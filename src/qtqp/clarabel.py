@@ -1,13 +1,34 @@
 import timeit
+from typing import Any, Dict
 
 import numpy as np
 import scipy as sp
 
-from qtqp import QTQP, Solution, LinearSolver, SolutionStatus
+from qtqp import QTQP, LinearSolver, Solution, SolutionStatus
 from qtqp.direct import DirectKktSolver
 
 
 class Clarabel(QTQP):
+    def solve(
+        self,
+        *,
+        atol: float = 1e-7,
+        rtol: float = 1e-8,
+        atol_infeas: float = 1e-8,
+        rtol_infeas: float = 1e-9,
+        max_iter: int = 100,
+        step_size_scale: float = 0.99,
+        min_static_regularization: float = 1e-8,
+        max_iterative_refinement_steps: int = 50,
+        linear_solver_atol: float = 1e-12,
+        linear_solver_rtol: float = 1e-12,
+        linear_solver: LinearSolver = LinearSolver.SCIPY,
+        verbose: bool = True,
+        equilibrate: bool = True,
+        revert: bool = True,
+    ) -> Solution:
+        raise NotImplementedError
+
     def solve_clarabel(
         self,
         *,
@@ -17,14 +38,15 @@ class Clarabel(QTQP):
         rtol_infeas: float = 1e-9,
         max_iter: int = 100,
         step_size_scale: float = 0.99,
-        min_static_regularization: float = 1e-7,
+        min_static_regularization: float = 1e-8,
         max_iterative_refinement_steps: int = 50,
         linear_solver_atol: float = 1e-12,
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
         equilibrate: bool = True,
-        qtqp_init: bool = False,
+        revert: bool = True,
+        qtqp_init: bool = True,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
@@ -43,8 +65,8 @@ class Clarabel(QTQP):
             y = np.zeros(self.m)
             s = np.zeros(self.m)
 
-            y[self.z:] = 1.0
-            s[self.z:] = 1.0
+            y[self.z :] = 1.0
+            s[self.z :] = 1.0
 
             if self.equilibrate:
                 a, p, b, c, self.d, self.e = self._equilibrate()
@@ -60,6 +82,7 @@ class Clarabel(QTQP):
                 atol=linear_solver_atol,
                 rtol=linear_solver_rtol,
                 solver=linear_solver.value(),
+                revert=revert,
             )
 
         else:
@@ -77,10 +100,14 @@ class Clarabel(QTQP):
                 atol=linear_solver_atol,
                 rtol=linear_solver_rtol,
                 solver=linear_solver.value(),
+                revert=revert,
             )
-            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1e-8)
+            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1.0)
 
         τ = κ = 1.0
+
+        if verbose:
+            self.log(i=0, x=x, y=y, s=s, tau=τ, kappa=κ)
 
         # This is the second RHS in (12). When we call 'solve' the
         # b row will be negated (and hence positive, as in the paper)
@@ -88,7 +115,7 @@ class Clarabel(QTQP):
 
         # --- Verify strict interiority ---
         assert np.all(y[self.z :] > 0) and np.all(s[self.z :] > 0)
-        assert np.all(s[: self.z] == 0.0)
+        assert np.all(s[: self.z] == 0.0), s[: self.z]
 
         stats_list = []
 
@@ -142,8 +169,8 @@ class Clarabel(QTQP):
 
             # --- Step 2: Corrector step ---
             η = Δs_aff * Δy_aff
-            ds_cor = np.zeros(self.m, dtype="float")
-            ds_cor[self.z:] = s[self.z:] + (η[self.z:] - σ * μ) / y[self.z:]
+            ds_cor = np.zeros(self.m, dtype="d")
+            ds_cor[self.z :] = s[self.z :] + (η[self.z :] - σ * μ) / y[self.z :]
             Δx_cor, Δy_cor, Δs_cor, Δτ_cor, Δκ_cor = self.clarabel_newton_step(
                 x=x,
                 y=y,
@@ -188,6 +215,8 @@ class Clarabel(QTQP):
                 x=x, y=y, tau_arr=[τ], s=s, alpha=α_cor, mu=μ, sigma=σ, stats_i=stats
             )
             stats_list.append(stats)
+            if verbose:
+                self.log(i=self.it + 1, x=x, y=y, s=s, tau=τ, kappa=κ)
             match status:
                 case SolutionStatus.SOLVED:
                     if self.equilibrate:
@@ -294,7 +323,7 @@ class Clarabel(QTQP):
 
         Δx = Δx1 + Δτ * Δx2
         Δy = Δy1 + Δτ * Δy2
-        Δs = np.zeros(self.m, dtype="float")
+        Δs = np.zeros(self.m, dtype="d")
         Δs[self.z :] = -ds[self.z :] - s[self.z :] / y[self.z :] * Δy[self.z :]
 
         return Δx, Δy, Δs, Δτ, Δκ
@@ -330,6 +359,7 @@ class Clarabel(QTQP):
             )
             x, s = np.split(xs, [self.n])
 
+            s[: self.z] = 0.0
             s = -s
             if s[self.z :].min() < ϵ:
                 s[self.z :] += ϵ - s[self.z :].min()
@@ -344,3 +374,41 @@ class Clarabel(QTQP):
                 y[self.z :] += ϵ - y[self.z :].min()
 
         return x, y, s
+
+    def log(
+        self,
+        *,
+        i: int,
+        x: np.ndarray,
+        y: np.ndarray,
+        s: np.ndarray,
+        tau: float,
+        kappa: float,
+    ) -> None:
+        if self.equilibrate:
+            x, y, s = self._unequilibrate_iterates(x, y, s)
+
+        inv_tau = 1.0 / max(tau, 1e-15)
+
+        # Precompute commonly used matrix-vector products
+        ax = self.a @ x
+        aty = self.a.T @ y
+        px = self.p @ x
+        xpx = x @ px
+        ctx = self.c @ x
+        bty = self.b @ y
+
+        # Costs
+        pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
+        dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
+
+        # Residuals
+        pres = np.linalg.norm((ax + s) * inv_tau - self.b, np.inf)
+        dres = np.linalg.norm((px + aty) * inv_tau + self.c, np.inf)
+        gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
+
+        mu = (s @ y) / (self.m - self.z)
+
+        print(
+            f"{i} {pcost:+.4e} {dcost:+.4e} {gap:+.4e} {pres:+.4e} {dres:+.4e} {kappa / tau:+.4e} {mu:+.4e}"
+        )
