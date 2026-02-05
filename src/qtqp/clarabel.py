@@ -24,8 +24,8 @@ class Clarabel(QTQP):
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: bool = True,
-        revert: bool = True,
+        equilibrate: bool = 10,
+        smart_init: bool = False,
     ) -> Solution:
         raise NotImplementedError
 
@@ -44,9 +44,8 @@ class Clarabel(QTQP):
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: bool = True,
-        revert: bool = True,
-        qtqp_init: bool = True,
+        equilibrate: int = 10,
+        smart_init: bool = False,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
@@ -59,50 +58,33 @@ class Clarabel(QTQP):
         self.rtol_infeas = rtol_infeas
         self.equilibrate = equilibrate
 
+        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=equilibrate)
+
+        self._linear_solver = DirectKktSolver(
+            a=a,
+            p=p,
+            z=self.z,
+            min_static_regularization=min_static_regularization,
+            max_iterative_refinement_steps=max_iterative_refinement_steps,
+            atol=linear_solver_atol,
+            rtol=linear_solver_rtol,
+            solver=linear_solver.value(),
+        )
+
         # --- Initialization ---
-        if qtqp_init:
+        if smart_init:
+            x, y, s = self.init_iterates(c=c, b=b, ϵ=1.0)
+        else:
+            # --- Initialization ---
             x = np.zeros(self.n)
             y = np.zeros(self.m)
             s = np.zeros(self.m)
 
+            # Initialize inequality duals and slacksto 1.0 for interiority
             y[self.z :] = 1.0
             s[self.z :] = 1.0
 
-            if self.equilibrate:
-                a, p, b, c, self.d, self.e = self._equilibrate()
-            else:
-                a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
-
-            linear_solver = DirectKktSolver(
-                a=a,
-                p=p,
-                z=self.z,
-                min_static_regularization=min_static_regularization,
-                max_iterative_refinement_steps=max_iterative_refinement_steps,
-                atol=linear_solver_atol,
-                rtol=linear_solver_rtol,
-                solver=linear_solver.value(),
-                revert=revert,
-            )
-
-        else:
-            if self.equilibrate:
-                a, p, b, c, self.d, self.e = self._equilibrate()
-            else:
-                a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
-
-            linear_solver = DirectKktSolver(
-                a=a,
-                p=p,
-                z=self.z,
-                min_static_regularization=min_static_regularization,
-                max_iterative_refinement_steps=max_iterative_refinement_steps,
-                atol=linear_solver_atol,
-                rtol=linear_solver_rtol,
-                solver=linear_solver.value(),
-                revert=revert,
-            )
-            x, y, s = self.init_iterates(linear_solver=linear_solver, c=c, b=b, ϵ=1.0)
+            self._equilibrate_iterates(x=x, y=y, s=s)
 
         τ = κ = 1.0
 
@@ -128,11 +110,11 @@ class Clarabel(QTQP):
 
             # Pass mu=0 and let 'min_static_regularization' handle the
             # regularization they discuss in Section 3.3
-            linear_solver.update(mu=0, s=s, y=y)
+            self._linear_solver.update(mu=0, s=s, y=y)
 
             # --- Step 0: Solve K @ Δ2 = q for Δ2 ---
             #   This calculation is half of Eq. (12)
-            Δ2, _ = linear_solver.solve(
+            Δ2, _ = self._linear_solver.solve(
                 rhs=constant_rhs, warm_start=np.zeros(self.m + self.n)
             )
             Δx2, Δy2 = np.split(Δ2, [self.n])
@@ -150,7 +132,6 @@ class Clarabel(QTQP):
                 p=p,
                 b=b,
                 c=c,
-                linear_solver=linear_solver,
                 Δx2=Δx2,
                 Δy2=Δy2,
                 dx=rx,
@@ -180,7 +161,6 @@ class Clarabel(QTQP):
                 p=p,
                 b=b,
                 c=c,
-                linear_solver=linear_solver,
                 Δx2=Δx2,
                 Δy2=Δy2,
                 dx=(1 - σ) * rx,
@@ -295,7 +275,6 @@ class Clarabel(QTQP):
         p: sp.sparse.csr_matrix,
         b: np.ndarray,
         c: np.ndarray,
-        linear_solver: DirectKktSolver,
         Δx2: np.ndarray,
         Δy2: np.ndarray,
         dx: np.ndarray,
@@ -305,7 +284,7 @@ class Clarabel(QTQP):
         dκ: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
         """Equation (12)."""
-        Δ1, _ = linear_solver.solve(
+        Δ1, _ = self._linear_solver.solve(
             rhs=np.concat([dx, dy - ds]),
             warm_start=np.zeros(self.n + self.m),  # TODO: Better warm-start?
         )
@@ -327,53 +306,6 @@ class Clarabel(QTQP):
         Δs[self.z :] = -ds[self.z :] - s[self.z :] / y[self.z :] * Δy[self.z :]
 
         return Δx, Δy, Δs, Δτ, Δκ
-
-    def init_iterates(
-        self,
-        *,
-        linear_solver: DirectKktSolver,
-        c: np.ndarray,
-        b: np.ndarray,
-        ϵ: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute v0 as described in Section 2.4.1."""
-        linear_solver.update(mu=0, s=np.ones(self.m), y=np.ones(self.m))
-        if self.p.count_nonzero() > 0:
-            xy, _ = linear_solver.solve(
-                rhs=np.concat([-c, -b]),
-                warm_start=np.zeros(self.m + self.n),
-            )
-            x, y = np.split(xy, [self.n])
-
-            s = np.zeros_like(y)
-            s[self.z :] = -y[self.z :]
-            if s[self.z :].min() < ϵ:
-                s[self.z :] += ϵ - s[self.z :].min()
-
-            if y[self.z :].min() < ϵ:
-                y[self.z :] += ϵ - y[self.z :].min()
-        else:
-            xs, _ = linear_solver.solve(
-                rhs=np.concat([np.zeros_like(c), -b]),
-                warm_start=np.zeros(self.m + self.n),
-            )
-            x, s = np.split(xs, [self.n])
-
-            s[: self.z] = 0.0
-            s = -s
-            if s[self.z :].min() < ϵ:
-                s[self.z :] += ϵ - s[self.z :].min()
-
-            xy, _ = linear_solver.solve(
-                rhs=np.concat([-c, np.zeros_like(b)]),
-                warm_start=np.zeros(self.m + self.n),
-            )
-            _, y = np.split(xy, [self.n])
-
-            if y[self.z :].min() < ϵ:
-                y[self.z :] += ϵ - y[self.z :].min()
-
-        return x, y, s
 
     def log(
         self,

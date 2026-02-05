@@ -288,7 +288,6 @@ class DirectKktSolver:
         atol: float,
         rtol: float,
         solver: LinearSolver,
-        revert: bool,
     ):
         """Initializes the DirectKktSolver.
 
@@ -313,7 +312,6 @@ class DirectKktSolver:
         self.atol = atol
         self.rtol = rtol
         self.solver = solver
-        self.revert = revert
 
         # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
         n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
@@ -418,9 +416,6 @@ class DirectKktSolver:
                     residual_norm,
                 )
                 status = "stalled"
-                if self.revert:
-                    self.min_static_regularization *= 10
-                    # sol -= delta
                 break
         else:
             logging.debug(

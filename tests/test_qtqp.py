@@ -177,18 +177,21 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
     np.testing.assert_array_less(dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf))
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", 42 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
-def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
+@pytest.mark.parametrize("smart_init", [True, False])
+def test_solve(equilibrate, seed, linear_solver, mnz, smart_init, record_iterations):
     """Test the QTQP solver."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
     )
 
     # Record stats
@@ -197,18 +200,21 @@ def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
     _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", 142 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
-def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
+@pytest.mark.parametrize("smart_init", [True, False])
+def test_infeasible(
+    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+):
     """Test the QTQP solver with infeasible QP."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
     )
 
     # Record stats
@@ -217,18 +223,23 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
     _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", list(242 + np.arange(10)))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
-def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
+@pytest.mark.parametrize("smart_init", [True, False])
+def test_unbounded(
+    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+):
     """Test the QTQP solver with unbounded QP."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
     )
 
     # Record stats
@@ -237,13 +248,13 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
     _assert_unbounded(solution, a, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", 42 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
-@pytest.mark.parametrize("qtqp_init", [True, False])
+@pytest.mark.parametrize("smart_init", [True, False])
 def test_solve_clarabel(
-    equilibrate, seed, linear_solver, mnz, qtqp_init, record_iterations
+    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
 ):
     """Test the QTQP solver."""
     rng = np.random.default_rng(seed)
@@ -251,7 +262,7 @@ def test_solve_clarabel(
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
     )
 
     # Record stats
@@ -260,13 +271,13 @@ def test_solve_clarabel(
     _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", 142 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
-@pytest.mark.parametrize("qtqp_init", [True, False])
+@pytest.mark.parametrize("smart_init", [True, False])
 def test_infeasible_clarabel(
-    equilibrate, seed, linear_solver, mnz, qtqp_init, record_iterations
+    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
 ):
     """Test the QTQP solver with infeasible QP."""
     rng = np.random.default_rng(seed)
@@ -274,7 +285,7 @@ def test_infeasible_clarabel(
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
     )
 
     # Record stats
@@ -283,13 +294,13 @@ def test_infeasible_clarabel(
     _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize("equilibrate", [True, False])
+@pytest.mark.parametrize("equilibrate", [0, 10])
 @pytest.mark.parametrize("seed", list(242 + np.arange(10)))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
-@pytest.mark.parametrize("qtqp_init", [True, False])
+@pytest.mark.parametrize("smart_init", [True, False])
 def test_unbounded_clarabel(
-    equilibrate, seed, linear_solver, mnz, qtqp_init, record_iterations
+    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
 ):
     """Test the QTQP solver with unbounded QP."""
     rng = np.random.default_rng(seed)
@@ -297,7 +308,7 @@ def test_unbounded_clarabel(
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver
+        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
     )
 
     # Record stats

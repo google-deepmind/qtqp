@@ -155,8 +155,8 @@ class QTQP:
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: bool = True,
-        revert: bool = True,
+        equilibrate: int = 10,
+        smart_init: bool = False,
     ) -> Solution:
         """Solves the QP using a primal-dual interior-point method.
 
@@ -211,30 +211,7 @@ class QTQP:
                 f" nnz(P)={self.p.nnz}, linear_solver={linear_solver.name}"
             )
 
-        # --- Initialization ---
-        x = np.zeros(self.n)
-        y = np.zeros(self.m)
-        s = np.zeros(self.m)
-
-        # Initialize inequality duals and slacksto 1.0 for interiority
-        y[self.z :] = 1.0
-        s[self.z :] = 1.0
-
-        # tau is homogeneous embedding variable. Kept as 1-element array for
-        # consistent vector operations (e.g., @ operator).
-        tau = np.array([1.0])
-
-        # Check for valid initial interior point if supplied
-        if np.any(y[self.z :] < 0) or np.any(s[self.z :] < 0):
-            raise ValueError("Initial y or s has negative values in the pos cone.")
-        if np.any(s[: self.z] != 0):
-            raise ValueError("Initial s has nonzero values in the zero cone.")
-
-        if self.equilibrate:
-            a, p, b, c, self.d, self.e = self._equilibrate()
-            x, y, s = self._equilibrate_iterates(x, y, s)
-        else:
-            a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=equilibrate)
 
         self.q = np.concatenate([c, b])
 
@@ -247,8 +224,31 @@ class QTQP:
             atol=linear_solver_atol,
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
-            revert=revert,
         )
+
+        if smart_init:
+            x, y, s = self.init_iterates(c=c, b=b, ϵ=1.0)
+        else:
+            # --- Initialization ---
+            x = np.zeros(self.n)
+            y = np.zeros(self.m)
+            s = np.zeros(self.m)
+
+            # Initialize inequality duals and slacksto 1.0 for interiority
+            y[self.z :] = 1.0
+            s[self.z :] = 1.0
+
+            self._equilibrate_iterates(x=x, y=y, s=s)
+
+        # tau is homogeneous embedding variable. Kept as 1-element array for
+        # consistent vector operations (e.g., @ operator).
+        tau = np.array([1.0])
+
+        # Check for valid initial interior point if supplied
+        if np.any(y[self.z :] < 0) or np.any(s[self.z :] < 0):
+            raise ValueError("Initial y or s has negative values in the pos cone.")
+        if np.any(s[: self.z] != 0):
+            raise ValueError("Initial s has nonzero values in the zero cone.")
 
         stats = []
         self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
@@ -342,8 +342,7 @@ class QTQP:
 
         # We have terminated for one reason or another.
         self._linear_solver.free()
-        if self.equilibrate:
-            x, y, s = self._unequilibrate_iterates(x, y, s)
+        x, y, s = self._unequilibrate_iterates(x, y, s)
         match status:
             case SolutionStatus.SOLVED:
                 self._log_footer("Solved")
@@ -364,7 +363,9 @@ class QTQP:
             case _:
                 raise ValueError(f"Unknown convergence status: {status}")
 
-    def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
+    def _equilibrate(
+        self, num_iters: int, min_scale: float = 1e-3, max_scale: float = 1e3
+    ):
         """Ruiz equilibration to improve numerical conditioning."""
         # Initialize the equilibrated matrices.
         a, p, b, c = (self.a, self.p, self.b, self.c)
@@ -510,8 +511,7 @@ class QTQP:
         """Check termination criteria and compute iteration statistics."""
         sy = s * y
         s_over_y = s / np.maximum(_EPS, y)
-        if self.equilibrate:
-            x, y, s = self._unequilibrate_iterates(x, y, s)
+        x, y, s = self._unequilibrate_iterates(x, y, s)
 
         inv_tau = 1.0 / max(tau_arr[0], _EPS)
 
@@ -641,3 +641,50 @@ class QTQP:
     def _log_footer(self, message: str):
         if self.verbose:
             print(f"{_SEPARA}\n| {message}")
+
+    def init_iterates(
+        self,
+        *,
+        c: np.ndarray,
+        b: np.ndarray,
+        ϵ: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute v0 as described in Section 2.4.1."""
+        self._linear_solver.update(mu=0, s=np.ones(self.m), y=np.ones(self.m))
+
+        if self.p.count_nonzero() > 0:
+            xy, _ = self._linear_solver.solve(
+                rhs=np.concat([-c, -b]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            x, y = np.split(xy, [self.n])
+
+            s = np.zeros_like(y)
+            s[self.z :] = -y[self.z :]
+            if s[self.z :].min() < ϵ:
+                s[self.z :] += ϵ - s[self.z :].min()
+
+            if y[self.z :].min() < ϵ:
+                y[self.z :] += ϵ - y[self.z :].min()
+        else:
+            xs, _ = self._linear_solver.solve(
+                rhs=np.concat([np.zeros_like(c), -b]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            x, s = np.split(xs, [self.n])
+
+            s[: self.z] = 0.0
+            s = -s
+            if s[self.z :].min() < ϵ:
+                s[self.z :] += ϵ - s[self.z :].min()
+
+            xy, _ = self._linear_solver.solve(
+                rhs=np.concat([-c, np.zeros_like(b)]),
+                warm_start=np.zeros(self.m + self.n),
+            )
+            _, y = np.split(xy, [self.n])
+
+            if y[self.z :].min() < ϵ:
+                y[self.z :] += ϵ - y[self.z :].min()
+
+        return x, y, s
