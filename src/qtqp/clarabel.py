@@ -26,6 +26,7 @@ class Clarabel(QTQP):
         verbose: bool = True,
         equilibrate: bool = 10,
         smart_init: bool = False,
+        gmres_cleanup: bool = False,
     ) -> Solution:
         raise NotImplementedError
 
@@ -46,6 +47,7 @@ class Clarabel(QTQP):
         verbose: bool = True,
         equilibrate: int = 10,
         smart_init: bool = False,
+        gmres_cleanup: bool = False,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
@@ -69,6 +71,7 @@ class Clarabel(QTQP):
             atol=linear_solver_atol,
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
+            gmres_cleanup=gmres_cleanup,
         )
 
         # --- Initialization ---

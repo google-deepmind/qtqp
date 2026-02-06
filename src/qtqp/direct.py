@@ -288,6 +288,7 @@ class DirectKktSolver:
         atol: float,
         rtol: float,
         solver: LinearSolver,
+        gmres_cleanup: bool,
     ):
         """Initializes the DirectKktSolver.
 
@@ -312,6 +313,7 @@ class DirectKktSolver:
         self.atol = atol
         self.rtol = rtol
         self.solver = solver
+        self.gmres_cleanup = gmres_cleanup
 
         # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
         n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
@@ -397,8 +399,7 @@ class DirectKktSolver:
         for solves in range(1, self.max_iterative_refinement_steps + 1):
             # Perform correction step using the linear system solver.
             old_residual_norm = residual_norm
-            delta = self.solver.solve(residual)
-            sol += delta
+            sol += self.solver.solve(residual)
             residual = rhs - self.kkt @ sol
             residual_norm = np.linalg.norm(residual, np.inf)
 
@@ -415,6 +416,23 @@ class DirectKktSolver:
                     old_residual_norm,
                     residual_norm,
                 )
+                if self.gmres_cleanup:
+                    old_residual_norm = residual_norm
+                    x, info = sp.linalg.gmres(
+                        self.kkt,
+                        residual,
+                        M=sp.linalg.LinearOperator(
+                            shape=[self.m + self.n, self.m + self.n],
+                            matvec=self.solver.solve,
+                            dtype="d",
+                        ),
+                        maxiter=50,
+                    )
+                    sol += x
+                    residual = rhs - self.kkt @ sol
+                    residual_norm = np.linalg.norm(residual, np.inf)
+                    if residual_norm < old_residual_norm:
+                        continue
                 status = "stalled"
                 break
         else:
