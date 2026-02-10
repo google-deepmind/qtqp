@@ -362,6 +362,7 @@ def test_direct_linear_solver(seed, linear_solver):
         atol=1e-12,
         rtol=1e-12,
         solver=linear_solver.value(),
+        gmres_cleanup=False,
     )
     q = np.concatenate([c, b])
     linear_solver.update(mu=mu, s=s, y=y)
@@ -400,6 +401,7 @@ def test_resolvent_operator(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
+            gmres_cleanup=False,
         )
     )
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
@@ -471,6 +473,7 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
+            gmres_cleanup=False,
         )
     )
     for _ in range(20):  # 20 steps should be enough for convergence.
@@ -580,6 +583,7 @@ def test_equivalent_tau_solution(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
+            gmres_cleanup=False,
         )
     )
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access

@@ -158,6 +158,7 @@ class QTQP:
         equilibrate: int = 10,
         smart_init: bool = False,
         gmres_cleanup: bool = False,
+        extended_precision: bool = False,
     ) -> Solution:
         """Solves the QP using a primal-dual interior-point method.
 
@@ -226,6 +227,7 @@ class QTQP:
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
             gmres_cleanup=gmres_cleanup,
+            extended_precision=extended_precision,
         )
 
         if smart_init:

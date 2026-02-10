@@ -289,6 +289,7 @@ class DirectKktSolver:
         rtol: float,
         solver: LinearSolver,
         gmres_cleanup: bool,
+        extended_precision: bool,
     ):
         """Initializes the DirectKktSolver.
 
@@ -313,7 +314,9 @@ class DirectKktSolver:
         self.atol = atol
         self.rtol = rtol
         self.solver = solver
+
         self.gmres_cleanup = gmres_cleanup
+        self.extended_precision = extended_precision
 
         # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
         n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
@@ -360,6 +363,8 @@ class DirectKktSolver:
         # 2. Restore true values for subsequent residual checks in `solve()`.
         self.kkt.data[self.kkt_nan_idxs] = true_diags
 
+        print("cond(KKT)=", estimate_cond_sparse(self.kkt))
+
     def solve(
         self, rhs: np.ndarray, warm_start: np.ndarray
     ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -390,7 +395,10 @@ class DirectKktSolver:
 
         # Initial sol and residual.
         sol = warm_start.copy()
-        residual = rhs - self.kkt @ sol
+        if self.extended_precision:
+            residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
+        else:
+            residual = rhs - self.kkt @ sol
         residual_norm = np.linalg.norm(residual, np.inf)
 
         # Iterative refinement loop.
@@ -400,7 +408,10 @@ class DirectKktSolver:
             # Perform correction step using the linear system solver.
             old_residual_norm = residual_norm
             sol += self.solver.solve(residual)
-            residual = rhs - self.kkt @ sol
+            if self.extended_precision:
+                residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
+            else:
+                residual = rhs - self.kkt @ sol
             residual_norm = np.linalg.norm(residual, np.inf)
 
             # Check for convergence.
@@ -429,7 +440,10 @@ class DirectKktSolver:
                         maxiter=50,
                     )
                     sol += x
-                    residual = rhs - self.kkt @ sol
+                    if self.extended_precision:
+                        residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
+                    else:
+                        residual = rhs - self.kkt @ sol
                     residual_norm = np.linalg.norm(residual, np.inf)
                     if residual_norm < old_residual_norm:
                         continue
@@ -460,3 +474,96 @@ class DirectKktSolver:
     def free(self):
         """Frees the solver resources."""
         self.solver.free()
+
+
+def high_prec_residual(A, x, b):
+    """
+    Computes r = b - Ax with 'simulated' extended precision
+    using Kahan Summation and Dekker's Product.
+    """
+    # Initialize the residual and an error compensation vector
+    # r + c represents the high-precision result
+    r = np.copy(b).astype(np.float64)
+    c = np.zeros_like(r)
+
+    # Veltkamp Splitting Constant (for float64)
+    # 2^27 + 1
+    SPLIT = 134217729.0
+
+    def two_product(a, b):
+        """Returns (product, error) such that a*b = p + e exactly."""
+        p = a * b
+        # Split a into high and low parts
+        temp = a * SPLIT
+        a_hi = temp - (temp - a)
+        a_lo = a - a_hi
+        # Split b into high and low parts
+        temp = b * SPLIT
+        b_hi = temp - (temp - b)
+        b_lo = b - b_hi
+        # Compute error
+        e = (a_lo * b_lo) - (((p - a_hi * b_hi) - a_lo * b_hi) - a_hi * b_lo)
+        return p, e
+
+    # CSC storage: data, indices, indptr
+    data = A.data
+    indices = A.indices
+    indptr = A.indptr
+
+    # Iterate through columns of A
+    for j in range(len(x)):
+        xj = x[j]
+        if xj == 0:
+            continue
+
+        # Process non-zeros in column j
+        for idx in range(indptr[j], indptr[j + 1]):
+            val = data[idx]
+            row = indices[idx]
+
+            # 1. Exact multiplication: A_ij * x_j = p + e
+            p, e = two_product(val, xj)
+
+            # 2. Compensated subtraction from residual[row]
+            # We want: r[row] = r[row] - (p + e)
+            # We use Kahan-style logic to subtract both p and e
+            for term in [p, e]:
+                y = term - c[row]
+                t = r[row] - y
+                c[row] = (t - r[row]) + y
+                r[row] = t
+
+    return r
+
+
+def estimate_cond_sparse(A):
+    # 1. Get the 1-norm of A
+    norm_A = sp.linalg.norm(A, ord=1)
+
+    # 2. Factorize A to solve Ax = b efficiently
+    # Using splu (SuperLU) for the inverse operator
+    A_lu = sp.linalg.splu(A.tocsc())
+
+    # 3. Define a LinearOperator for A^-1
+    # onenormest needs to perform matvecs with both A^-1 and (A^-1)^T
+    def matvec(v):
+        return A_lu.solve(v)
+
+    def rmatvec(v):
+        return A_lu.solve(v, trans='H')  # Hermitian transpose for complex, 'T' for real
+
+    inv_op = sp.linalg.LinearOperator(A.shape, matvec=matvec, rmatvec=rmatvec)
+
+    # 4. Estimate ||A^-1||_1
+    norm_inv_A = sp.linalg.onenormest(inv_op)
+
+    return norm_A * norm_inv_A
+
+
+def estimate_cond_2norm(A):
+    # Get the largest singular value
+    s_max = sp.linalg.svds(A, k=1, which="LM", return_singular_vectors=False)[0]
+    # Get the smallest singular value
+    s_min = sp.linalg.svds(A, k=1, which="SM", return_singular_vectors=False)[0]
+
+    return s_max / s_min
