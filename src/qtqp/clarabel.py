@@ -24,30 +24,10 @@ class Clarabel(QTQP):
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: bool = 10,
-        smart_init: bool = False,
-        gmres_cleanup: bool = False,
-    ) -> Solution:
-        raise NotImplementedError
-
-    def solve_clarabel(
-        self,
-        *,
-        atol: float = 1e-7,
-        rtol: float = 1e-8,
-        atol_infeas: float = 1e-8,
-        rtol_infeas: float = 1e-9,
-        max_iter: int = 100,
-        step_size_scale: float = 0.99,
-        min_static_regularization: float = 1e-8,
-        max_iterative_refinement_steps: int = 50,
-        linear_solver_atol: float = 1e-12,
-        linear_solver_rtol: float = 1e-12,
-        linear_solver: LinearSolver = LinearSolver.SCIPY,
-        verbose: bool = True,
         equilibrate: int = 10,
         smart_init: bool = False,
-        gmres_cleanup: bool = False,
+        extended_precision: bool = False,
+        aa_dim: int = 1,
     ) -> Solution:
         """Implement basic Clarabel routine.
 
@@ -71,7 +51,8 @@ class Clarabel(QTQP):
             atol=linear_solver_atol,
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
-            gmres_cleanup=gmres_cleanup,
+            extended_precision=extended_precision,
+            aa_dim=aa_dim,
         )
 
         # --- Initialization ---
@@ -200,26 +181,21 @@ class Clarabel(QTQP):
             stats_list.append(stats)
             if verbose:
                 self.log(i=self.it + 1, x=x, y=y, s=s, tau=τ, kappa=κ)
+
+            if status != SolutionStatus.UNFINISHED:
+                x, y, s = self._unequilibrate_iterates(x, y, s)
             match status:
                 case SolutionStatus.SOLVED:
-                    if self.equilibrate:
-                        x, y, s = self._unequilibrate_iterates(x, y, s)
                     return Solution(x / τ, y / τ, s / τ, stats_list, status)
                 case SolutionStatus.INFEASIBLE:
-                    if self.equilibrate:
-                        x, y, s = self._unequilibrate_iterates(x, y, s)
                     x.fill(np.nan)
                     s.fill(np.nan)
                     return Solution(x, y / abs(self.b @ y), s, stats_list, status)
                 case SolutionStatus.UNBOUNDED:
-                    if self.equilibrate:
-                        x, y, s = self._unequilibrate_iterates(x, y, s)
                     y.fill(np.nan)
                     abs_ctx = abs(self.c @ x)
                     return Solution(x / abs_ctx, y, s / abs_ctx, stats_list, status)
                 case SolutionStatus.FAILED:
-                    if self.equilibrate:
-                        x, y, s = self._unequilibrate_iterates(x, y, s)
                     return Solution(
                         x / τ, y / τ, s / τ, stats_list, SolutionStatus.FAILED
                     )

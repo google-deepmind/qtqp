@@ -157,39 +157,43 @@ class QTQP:
         verbose: bool = True,
         equilibrate: int = 10,
         smart_init: bool = False,
-        gmres_cleanup: bool = False,
         extended_precision: bool = False,
         aa_dim: int = 1,
     ) -> Solution:
         """Solves the QP using a primal-dual interior-point method.
 
         Args:
-          atol (float): Absolute tolerance for convergence criteria.
-          rtol (float): Relative tolerance for convergence criteria, scaled by
-            problem data norms.
-          atol_infeas (float): Absolute tolerance for detecting primal or dual
-            infeasibility.
-          rtol_infeas (float): Relative tolerance for detecting primal or dual
-            infeasibility.
-          max_iter (int): Maximum number of iterations before stopping.
-          step_size_scale (float): A factor in (0, 1) to scale the step size,
-            ensuring iterates remain strictly interior.
-          min_static_regularization (float): Minimum regularization value used in
-            the KKT matrix diagonal for numerical stability.
-          max_iterative_refinement_steps (int): Maximum iterative refinement steps
-            for the linear solves (includes the initial solve, so must be >= 1).
-          linear_solver_atol (float): Absolute tolerance for the iterative
-            refinement process within the linear solver.
-          linear_solver_rtol (float): Relative tolerance for the iterative
-            refinement process within the linear solver.
-          linear_solver (LinearSolver): The linear solver to use when solving the
-            KKT system.
-          verbose (bool): If True, prints a summary of each iteration.
-          equilibrate (bool): If True, equilibrate the data for better numerical
-            stability.
+            tol (float): Absolute tolerance for convergence criteria.
+            rtol (float): Relative tolerance for convergence criteria, scaled by
+                problem data norms.
+            atol_infeas (float): Absolute tolerance for detecting primal or dual
+                infeasibility.
+            rtol_infeas (float): Relative tolerance for detecting primal or dual
+                infeasibility.
+            max_iter (int): Maximum number of iterations before stopping.
+            step_size_scale (float): A factor in (0, 1) to scale the step size,
+                ensuring iterates remain strictly interior.
+            min_static_regularization (float): Minimum regularization value used in
+                the KKT matrix diagonal for numerical stability.
+            max_iterative_refinement_steps (int): Maximum iterative refinement steps
+                for the linear solves (includes the initial solve, so must be >= 1).
+            linear_solver_atol (float): Absolute tolerance for the iterative
+                refinement process within the linear solver.
+            linear_solver_rtol (float): Relative tolerance for the iterative
+                refinement process within the linear solver.
+            linear_solver (LinearSolver): The linear solver to use when solving the
+                KKT system.
+            verbose (bool): If True, prints a summary of each iteration.
+            equilibrate (bool): If True, equilibrate the data for better numerical
+                stability.
+            smart_init (bool): Use the initialization strategy described in section
+                2.4 of the Clarabel paper.
+            extended_precision (bool): Computes residual with 'simulated' extended
+                precision during iterative refinement. Very slow.
+            aa_dim (bool): Size of the Anderson Acceleration lookback window.
 
         Returns:
-          A Solution object containing the solution and solve stats.
+            A Solution object containing the solution and solve stats.
         """
         assert atol >= 0
         assert rtol >= 0
@@ -227,7 +231,6 @@ class QTQP:
             atol=linear_solver_atol,
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
-            gmres_cleanup=gmres_cleanup,
             extended_precision=extended_precision,
             aa_dim=aa_dim,
         )

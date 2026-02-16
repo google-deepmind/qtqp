@@ -288,7 +288,6 @@ class DirectKktSolver:
         atol: float,
         rtol: float,
         solver: LinearSolver,
-        gmres_cleanup: bool = False,
         extended_precision: bool = False,
         aa_dim: int = 1,
     ):
@@ -316,7 +315,6 @@ class DirectKktSolver:
         self.rtol = rtol
         self.solver = solver
 
-        self.gmres_cleanup = gmres_cleanup
         self.extended_precision = extended_precision
         self.aa_dim = aa_dim
 
@@ -365,19 +363,19 @@ class DirectKktSolver:
         # 2. Restore true values for subsequent residual checks in `solve()`.
         self.kkt.data[self.kkt_nan_idxs] = true_diags
 
-        # print("cond(KKT)=", estimate_cond_sparse(self.kkt))
-
     def solve(
         self, rhs: np.ndarray, warm_start: np.ndarray
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        # ... [Keep your existing RHS adjustment and setup] ...
         rhs = rhs.copy()
-        rhs[self.n:] *= -1.0
+        rhs[self.n :] *= -1.0
         tolerance = self.atol + self.rtol * np.linalg.norm(rhs, np.inf)
 
         # Initial sol and residual
         sol = warm_start.copy()
-        residual = rhs - self.kkt @ sol
+        if self.extended_precision:
+            residual = high_prec_residual(self.kkt, sol, rhs)
+        else:
+            residual = rhs - self.kkt @ sol
         residual_norm = np.linalg.norm(residual, np.inf)
 
         # Anderson Acceleration Parameters
@@ -426,7 +424,10 @@ class DirectKktSolver:
                 sol = old_sol + delta
 
             # 4. Update residual for the NEW accelerated solution
-            residual = rhs - self.kkt @ sol
+            if self.extended_precision:
+                residual = high_prec_residual(self.kkt, sol, rhs)
+            else:
+                residual = rhs - self.kkt @ sol
             residual_norm = np.linalg.norm(residual, np.inf)
 
             if residual_norm < tolerance:
@@ -441,7 +442,6 @@ class DirectKktSolver:
                 sol = old_sol  # Revert
                 break
 
-        # ... [Keep your existing NaN checks and returns] ...
         if np.any(np.isnan(sol)):
             raise ValueError("Linear solver returned NaNs.")
 
@@ -530,7 +530,7 @@ def estimate_cond_sparse(A):
         return A_lu.solve(v)
 
     def rmatvec(v):
-        return A_lu.solve(v, trans='H')  # Hermitian transpose for complex, 'T' for real
+        return A_lu.solve(v, trans="H")  # Hermitian transpose for complex, 'T' for real
 
     inv_op = sp.linalg.LinearOperator(A.shape, matvec=matvec, rmatvec=rmatvec)
 

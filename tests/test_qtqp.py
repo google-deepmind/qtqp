@@ -182,7 +182,18 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
 @pytest.mark.parametrize("smart_init", [True, False])
-def test_solve(equilibrate, seed, linear_solver, mnz, smart_init, record_iterations):
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
+def test_solve(
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
+):
     """Test the QTQP solver."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
@@ -192,6 +203,8 @@ def test_solve(equilibrate, seed, linear_solver, mnz, smart_init, record_iterati
         equilibrate=equilibrate,
         linear_solver=linear_solver,
         smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -205,8 +218,17 @@ def test_solve(equilibrate, seed, linear_solver, mnz, smart_init, record_iterati
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
 @pytest.mark.parametrize("smart_init", [True, False])
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_infeasible(
-    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
 ):
     """Test the QTQP solver with infeasible QP."""
     rng = np.random.default_rng(seed)
@@ -214,7 +236,11 @@ def test_infeasible(
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -228,8 +254,17 @@ def test_infeasible(
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
 @pytest.mark.parametrize("smart_init", [True, False])
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_unbounded(
-    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
 ):
     """Test the QTQP solver with unbounded QP."""
     rng = np.random.default_rng(seed)
@@ -240,6 +275,8 @@ def test_unbounded(
         equilibrate=equilibrate,
         linear_solver=linear_solver,
         smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -253,16 +290,29 @@ def test_unbounded(
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
 @pytest.mark.parametrize("smart_init", [True, False])
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_solve_clarabel(
-    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
 ):
     """Test the QTQP solver."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
+    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -276,16 +326,29 @@ def test_solve_clarabel(
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
 @pytest.mark.parametrize("smart_init", [True, False])
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_infeasible_clarabel(
-    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
 ):
     """Test the QTQP solver with infeasible QP."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
-    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
+    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -299,16 +362,29 @@ def test_infeasible_clarabel(
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
 @pytest.mark.parametrize("smart_init", [True, False])
+@pytest.mark.parametrize("extended_precision", [False])
+@pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_unbounded_clarabel(
-    equilibrate, seed, linear_solver, mnz, smart_init, record_iterations
+    equilibrate,
+    seed,
+    linear_solver,
+    mnz,
+    smart_init,
+    extended_precision,
+    aa_dim,
+    record_iterations,
 ):
     """Test the QTQP solver with unbounded QP."""
     rng = np.random.default_rng(seed)
     m, n, z = mnz
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
-    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve_clarabel(
-        equilibrate=equilibrate, linear_solver=linear_solver, smart_init=smart_init
+    solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibrate=equilibrate,
+        linear_solver=linear_solver,
+        smart_init=smart_init,
+        extended_precision=extended_precision,
+        aa_dim=aa_dim,
     )
 
     # Record stats
@@ -362,7 +438,6 @@ def test_direct_linear_solver(seed, linear_solver):
         atol=1e-12,
         rtol=1e-12,
         solver=linear_solver.value(),
-        gmres_cleanup=False,
     )
     q = np.concatenate([c, b])
     linear_solver.update(mu=mu, s=s, y=y)
@@ -401,7 +476,6 @@ def test_resolvent_operator(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
-            gmres_cleanup=False,
         )
     )
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
@@ -473,7 +547,6 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
-            gmres_cleanup=False,
         )
     )
     for _ in range(20):  # 20 steps should be enough for convergence.
@@ -583,7 +656,6 @@ def test_equivalent_tau_solution(seed, linear_solver):
             atol=1e-12,
             rtol=1e-12,
             solver=linear_solver.value(),
-            gmres_cleanup=False,
         )
     )
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
