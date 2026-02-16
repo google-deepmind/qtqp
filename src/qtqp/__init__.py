@@ -159,6 +159,7 @@ class QTQP:
         smart_init: bool = False,
         gmres_cleanup: bool = False,
         extended_precision: bool = False,
+        aa_dim: int = 1,
     ) -> Solution:
         """Solves the QP using a primal-dual interior-point method.
 
@@ -228,6 +229,7 @@ class QTQP:
             solver=linear_solver.value(),
             gmres_cleanup=gmres_cleanup,
             extended_precision=extended_precision,
+            aa_dim=aa_dim,
         )
 
         if smart_init:

@@ -288,8 +288,9 @@ class DirectKktSolver:
         atol: float,
         rtol: float,
         solver: LinearSolver,
-        gmres_cleanup: bool,
-        extended_precision: bool,
+        gmres_cleanup: bool = False,
+        extended_precision: bool = False,
+        aa_dim: int = 1,
     ):
         """Initializes the DirectKktSolver.
 
@@ -317,6 +318,7 @@ class DirectKktSolver:
 
         self.gmres_cleanup = gmres_cleanup
         self.extended_precision = extended_precision
+        self.aa_dim = aa_dim
 
         # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
         n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
@@ -363,107 +365,85 @@ class DirectKktSolver:
         # 2. Restore true values for subsequent residual checks in `solve()`.
         self.kkt.data[self.kkt_nan_idxs] = true_diags
 
-        print("cond(KKT)=", estimate_cond_sparse(self.kkt))
+        # print("cond(KKT)=", estimate_cond_sparse(self.kkt))
 
     def solve(
         self, rhs: np.ndarray, warm_start: np.ndarray
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        """Solves the linear system with the given factorization.
-
-        Performs iterative refinement to improve the solution accuracy.
-
-        Args:
-          rhs: The right-hand side of the linear system.
-          warm_start: A warm-start for the solution.
-
-        Returns:
-          A tuple containing:
-            - sol: The solution vector.
-            - A dictionary with solve statistics including:
-              - "solves": The number of linear solves performed.
-              - "final_residual_norm": The final infinity norm of the residual.
-              - "status": The status of the iterative refinement ("converged",
-                "non-converged", or "stalled").
-
-        Raises:
-          ValueError: If the solution contains NaN values.
-        """
-        # Adjust RHS to match the quasidefinite KKT form (second block negated).
+        # ... [Keep your existing RHS adjustment and setup] ...
         rhs = rhs.copy()
-        rhs[self.n :] *= -1.0
+        rhs[self.n:] *= -1.0
         tolerance = self.atol + self.rtol * np.linalg.norm(rhs, np.inf)
 
-        # Initial sol and residual.
+        # Initial sol and residual
         sol = warm_start.copy()
-        if self.extended_precision:
-            residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
-        else:
-            residual = rhs - self.kkt @ sol
+        residual = rhs - self.kkt @ sol
         residual_norm = np.linalg.norm(residual, np.inf)
 
-        # Iterative refinement loop.
+        # Anderson Acceleration Parameters
+        X = []  # History of iterates (sol)
+        F = []  # History of g(x) - x (the correction/delta)
+
         status, solves = "non-converged", 0
-        # max_iterative_refinement_steps >= 1 so we always do at least one solve.
+
         for solves in range(1, self.max_iterative_refinement_steps + 1):
-            # Perform correction step using the linear system solver.
+            old_sol = sol.copy()
             old_residual_norm = residual_norm
-            sol += self.solver.solve(residual)
-            if self.extended_precision:
-                residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
+
+            # 1. Compute the standard "Fixed Point" correction (the delta)
+            delta = self.solver.solve(residual)
+
+            # In Anderson terms: f_k = g(x_k) - x_k.
+            # Here, g(x_k) is (sol + delta), so f_k is just 'delta'.
+            X.append(old_sol)
+            F.append(delta)
+
+            # 2. Limit history depth
+            if len(X) > self.aa_dim:
+                X.pop(0)
+                F.pop(0)
+
+            # 3. Apply Anderson Mixing
+            # We find weights to minimize the norm of the residual in the subspace
+            k = len(X)
+            if k > 1:
+                # Construct matrices of differences
+                # dF[:, i] = F_{i+1} - F_i
+                dF = np.array([F[i + 1] - F[i] for i in range(k - 1)]).T
+                dX = np.array([X[i + 1] - X[i] for i in range(k - 1)]).T
+
+                # Solve least squares for coefficients gamma: min ||F_k - dF * gamma||
+                # F[-1] is the most recent delta
+                try:
+                    gamma, _, _, _ = np.linalg.lstsq(dF, F[-1], rcond=None)
+                    # Accelerated solution: x_next = (old_sol + delta) - (dX + dF) * gamma
+                    sol = (old_sol + delta) - (dX + dF) @ gamma
+                except np.linalg.LinAlgError:
+                    # Fallback to standard refinement if LS fails
+                    sol = old_sol + delta
             else:
-                residual = rhs - self.kkt @ sol
+                # First step or k=1: standard update
+                sol = old_sol + delta
+
+            # 4. Update residual for the NEW accelerated solution
+            residual = rhs - self.kkt @ sol
             residual_norm = np.linalg.norm(residual, np.inf)
 
-            # Check for convergence.
             if residual_norm < tolerance:
                 status = "converged"
                 break
 
-            # Check for stalling (residual not improving).
-            if residual_norm >= old_residual_norm:
-                logging.debug(
-                    "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
-                    solves,
-                    old_residual_norm,
-                    residual_norm,
-                )
-                if self.gmres_cleanup:
-                    old_residual_norm = residual_norm
-                    x, info = sp.linalg.gmres(
-                        self.kkt,
-                        residual,
-                        M=sp.linalg.LinearOperator(
-                            shape=[self.m + self.n, self.m + self.n],
-                            matvec=self.solver.solve,
-                            dtype="d",
-                        ),
-                        maxiter=50,
-                    )
-                    sol += x
-                    if self.extended_precision:
-                        residual = high_prec_residual(A=self.kkt, x=sol, b=rhs)
-                    else:
-                        residual = rhs - self.kkt @ sol
-                    residual_norm = np.linalg.norm(residual, np.inf)
-                    if residual_norm < old_residual_norm:
-                        continue
+            # Stalling check (Note: Anderson can occasionally fluctuate,
+            # but a massive jump is a bad sign)
+            if residual_norm > old_residual_norm * 100:
+                logging.debug("Anderson acceleration diverged at step %d.", solves)
                 status = "stalled"
+                sol = old_sol  # Revert
                 break
-        else:
-            logging.debug(
-                "Iterative refinement did not converge after %d solves."
-                " Final residual: %e > tolerance: %e",
-                solves,
-                residual_norm,
-                tolerance,
-            )
 
+        # ... [Keep your existing NaN checks and returns] ...
         if np.any(np.isnan(sol)):
             raise ValueError("Linear solver returned NaNs.")
-
-        logging.debug(
-            "KKT solve: status=%s, solves=%d, res=%e", status, solves, residual_norm
-        )
 
         return sol, {
             "solves": solves,
