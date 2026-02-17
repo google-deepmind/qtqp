@@ -177,7 +177,7 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
     np.testing.assert_array_less(dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf))
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", 42 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
@@ -185,7 +185,7 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_solve(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -200,7 +200,7 @@ def test_solve(
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,
@@ -213,7 +213,7 @@ def test_solve(
     _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", 142 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
@@ -221,7 +221,7 @@ def test_solve(
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_infeasible(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -236,7 +236,7 @@ def test_infeasible(
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,
@@ -249,7 +249,7 @@ def test_infeasible(
     _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", list(242 + np.arange(10)))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
@@ -257,7 +257,7 @@ def test_infeasible(
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_unbounded(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -272,7 +272,7 @@ def test_unbounded(
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
     solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,
@@ -285,7 +285,7 @@ def test_unbounded(
     _assert_unbounded(solution, a, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", 42 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10), (10, 5, 3)))
@@ -293,7 +293,7 @@ def test_unbounded(
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_solve_clarabel(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -308,7 +308,7 @@ def test_solve_clarabel(
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,
@@ -321,7 +321,7 @@ def test_solve_clarabel(
     _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", 142 + np.arange(10))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
@@ -329,7 +329,7 @@ def test_solve_clarabel(
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_infeasible_clarabel(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -344,7 +344,7 @@ def test_infeasible_clarabel(
     a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,
@@ -357,7 +357,7 @@ def test_infeasible_clarabel(
     _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize("equilibrate", [0, 10])
+@pytest.mark.parametrize("ruiz_iters", [(0, 10), (0, 10), (5, 5)])
 @pytest.mark.parametrize("seed", list(242 + np.arange(10)))
 @pytest.mark.parametrize("linear_solver", _SOLVERS)
 @pytest.mark.parametrize("mnz", ((150, 100, 10),))
@@ -365,7 +365,7 @@ def test_infeasible_clarabel(
 @pytest.mark.parametrize("extended_precision", [False])
 @pytest.mark.parametrize("aa_dim", [1, 3, 5])
 def test_unbounded_clarabel(
-    equilibrate,
+    ruiz_iters,
     seed,
     linear_solver,
     mnz,
@@ -380,7 +380,7 @@ def test_unbounded_clarabel(
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
     solution = Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
-        equilibrate=equilibrate,
+        ruiz_iters=ruiz_iters,
         linear_solver=linear_solver,
         smart_init=smart_init,
         extended_precision=extended_precision,

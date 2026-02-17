@@ -155,7 +155,7 @@ class QTQP:
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: int = 10,
+        ruiz_iters: tuple[int, int] = (10, 0),
         smart_init: bool = False,
         extended_precision: bool = False,
         aa_dim: int = 1,
@@ -184,8 +184,9 @@ class QTQP:
             linear_solver (LinearSolver): The linear solver to use when solving the
                 KKT system.
             verbose (bool): If True, prints a summary of each iteration.
-            equilibrate (bool): If True, equilibrate the data for better numerical
-                stability.
+            ruiz_iters (int, int): The first value is the number of equilibration
+                steps to perform in preprocessing, and the second value is the number
+                of equilibration steps to use in each iteration.
             smart_init (bool): Use the initialization strategy described in section
                 2.4 of the Clarabel paper.
             extended_precision (bool): Computes residual with 'simulated' extended
@@ -210,7 +211,6 @@ class QTQP:
         self.atol, self.rtol = atol, rtol
         self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
         self.verbose = verbose
-        self.equilibrate = equilibrate
         if verbose:
             print(
                 f"| QTQP v{__version__}:"
@@ -218,7 +218,7 @@ class QTQP:
                 f" nnz(P)={self.p.nnz}, linear_solver={linear_solver.name}"
             )
 
-        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=equilibrate)
+        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=ruiz_iters[0])
 
         self.q = np.concatenate([c, b])
 
@@ -232,6 +232,7 @@ class QTQP:
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
             extended_precision=extended_precision,
+            ruiz_iters=ruiz_iters[1],
             aa_dim=aa_dim,
         )
 

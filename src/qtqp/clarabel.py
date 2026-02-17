@@ -24,7 +24,7 @@ class Clarabel(QTQP):
         linear_solver_rtol: float = 1e-12,
         linear_solver: LinearSolver = LinearSolver.SCIPY,
         verbose: bool = True,
-        equilibrate: int = 10,
+        ruiz_iters: tuple[int, int] = (10, 0),
         smart_init: bool = False,
         extended_precision: bool = False,
         aa_dim: int = 1,
@@ -38,9 +38,8 @@ class Clarabel(QTQP):
         self.rtol = rtol
         self.atol_infeas = atol_infeas
         self.rtol_infeas = rtol_infeas
-        self.equilibrate = equilibrate
 
-        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=equilibrate)
+        a, p, b, c, self.d, self.e = self._equilibrate(num_iters=ruiz_iters[0])
 
         self._linear_solver = DirectKktSolver(
             a=a,
@@ -52,6 +51,7 @@ class Clarabel(QTQP):
             rtol=linear_solver_rtol,
             solver=linear_solver.value(),
             extended_precision=extended_precision,
+            ruiz_iters=ruiz_iters[1],
             aa_dim=aa_dim,
         )
 
@@ -204,8 +204,7 @@ class Clarabel(QTQP):
                 case _:
                     raise ValueError(f"Unknown convergence status: {status}")
 
-        if self.equilibrate:
-            x, y, s = self._unequilibrate_iterates(x, y, s)
+        x, y, s = self._unequilibrate_iterates(x, y, s)
         return Solution(x / τ, y / τ, s / τ, stats_list, SolutionStatus.FAILED)
 
     @staticmethod
@@ -296,8 +295,7 @@ class Clarabel(QTQP):
         tau: float,
         kappa: float,
     ) -> None:
-        if self.equilibrate:
-            x, y, s = self._unequilibrate_iterates(x, y, s)
+        x, y, s = self._unequilibrate_iterates(x, y, s)
 
         inv_tau = 1.0 / max(tau, 1e-15)
 

@@ -289,8 +289,9 @@ class DirectKktSolver:
         rtol: float,
         solver: LinearSolver,
         extended_precision: bool = False,
+        ruiz_iters: int = 0,
         aa_dim: int = 1,
-    ):
+    ) -> None:
         """Initializes the DirectKktSolver.
 
         Args:
@@ -315,12 +316,15 @@ class DirectKktSolver:
         self.rtol = rtol
         self.solver = solver
 
-        self.extended_precision = extended_precision
-        self.aa_dim = aa_dim
-
         # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
         n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
         m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
+
+        self.ruiz_iters = ruiz_iters
+        self.D = np.ones(self.m + self.n, dtype="d")
+
+        self.extended_precision = extended_precision
+        self.aa_dim = aa_dim
 
         # Construct the sparse block matrix once.
         self.kkt = sp.bmat(
@@ -343,35 +347,49 @@ class DirectKktSolver:
           s: The slack variables.
           y: The dual variables for the conic constraints.
         """
-        # Calculate the dynamic diagonal block D = s / y for inequality rows.
-        # For equality rows (first z), the diagonal is 0.
-        h = np.concatenate([np.zeros(self.z), s[self.z :] / y[self.z :]])
+        self.reset()
 
-        # "True" diagonals for accurate residual calculation (no regularization).
-        # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-        true_diags = np.concatenate([self.p_diags, h]) + mu
-        # "Regularized" diagonals for stable factorization.
+        h = np.concatenate([np.zeros(self.z), -s[self.z :] / y[self.z :]])
+
+        self.kkt.data[self.kkt_nan_idxs] = np.concatenate([self.p_diags, h])
+        self.equilibrate_inplace(min_scale=1e-3, max_scale=1e3)
+
+        true_diags = np.abs(self.kkt.diagonal()) + mu * (self.D**2)
         reg_diags = np.maximum(true_diags, self.min_static_regularization)
-        # Flip the sign of the cone variables.
+
         true_diags[self.n :] *= -1.0
         reg_diags[self.n :] *= -1.0
 
-        # 1. Inject regularized values for the factorization step.
         self.kkt.data[self.kkt_nan_idxs] = reg_diags
         self.solver.update(self.kkt)
-
-        # 2. Restore true values for subsequent residual checks in `solve()`.
         self.kkt.data[self.kkt_nan_idxs] = true_diags
+
+    def reset(self) -> None:
+        scale_symmetric_inplace(self.kkt, 1.0 / self.D)
+
+    def equilibrate_inplace(self, min_scale: float, max_scale) -> None:
+        self.D = np.ones(self.m + self.n, dtype="d")
+
+        for i in range(self.ruiz_iters):
+            row_norms = sp.linalg.norm(self.kkt, axis=1, ord=np.inf)
+            row_norms = np.where(row_norms == 0.0, 1.0, row_norms)
+            d = 1.0 / np.sqrt(row_norms)
+            d = np.clip(d, min_scale, max_scale)
+
+            scale_symmetric_inplace(self.kkt, d)
+
+            self.D *= d
 
     def solve(
         self, rhs: np.ndarray, warm_start: np.ndarray
     ) -> tuple[np.ndarray, dict[str, Any]]:
         rhs = rhs.copy()
         rhs[self.n :] *= -1.0
+        rhs *= self.D
         tolerance = self.atol + self.rtol * np.linalg.norm(rhs, np.inf)
 
         # Initial sol and residual
-        sol = warm_start.copy()
+        sol = warm_start / self.D
         if self.extended_precision:
             residual = high_prec_residual(self.kkt, sol, rhs)
         else:
@@ -442,10 +460,11 @@ class DirectKktSolver:
                 sol = old_sol  # Revert
                 break
 
+        # ... [Keep your existing NaN checks and returns] ...
         if np.any(np.isnan(sol)):
             raise ValueError("Linear solver returned NaNs.")
 
-        return sol, {
+        return sol * self.D, {
             "solves": solves,
             "final_residual_norm": residual_norm,
             "status": status,
@@ -454,6 +473,27 @@ class DirectKktSolver:
     def free(self):
         """Frees the solver resources."""
         self.solver.free()
+
+
+def scale_symmetric_inplace(K: sp.csc_matrix, d: np.ndarray) -> None:
+    """
+    Performs the in-place operation K = D @ K @ D for a symmetric
+    CSC matrix K and diagonal scaling vector d.
+
+    Args:
+        K: Symmetric scipy.sparse.csc_matrix to be scaled.
+        d: 1D NumPy array representing the diagonal of D.
+    """
+    # 1. Multiply by the row scaling (D @ K)
+    # K.indices contains the row index 'i' for every non-zero entry
+    K.data *= d[K.indices]
+
+    # 2. Multiply by the column scaling (K @ D)
+    # Since it's CSC, we iterate through column pointers to get 'j'
+    n = K.shape[1]
+    for j in range(n):
+        start, end = K.indptr[j], K.indptr[j + 1]
+        K.data[start:end] *= d[j]
 
 
 def high_prec_residual(A, x, b):
