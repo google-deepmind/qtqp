@@ -223,12 +223,6 @@ class QTQP:
     # consistent vector operations (e.g., @ operator).
     tau = np.array([1.0])
 
-    # Check for valid initial interior point if supplied
-    if np.any(y[self.z :] < 0) or np.any(s[self.z :] < 0):
-      raise ValueError("Initial y or s has negative values in the pos cone.")
-    if np.any(s[: self.z] != 0):
-      raise ValueError("Initial s has nonzero values in the zero cone.")
-
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
       x, y, s = self._equilibrate_iterates(x, y, s)
@@ -253,6 +247,11 @@ class QTQP:
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
+    # Pre-allocate combined [x; y] buffer to avoid np.concatenate each iteration.
+    _xy_buf = np.empty(self.n + self.m)
+    # Pre-allocate slack step buffer; [:z] is always 0 (equality constraints).
+    _ds_buf = np.zeros(self.m)
+
     # --- Main Iteration Loop ---
     for self.it in range(max_iter):
       stats_i = {}
@@ -272,11 +271,13 @@ class QTQP:
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
+      _xy_buf[: self.n] = x
+      _xy_buf[self.n :] = y
       x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=0.0,
-          r_anchor=np.concatenate([x, y]),
+          r_anchor=_xy_buf,
           tau_anchor=tau,
           y=y,
           s=s,
@@ -286,23 +287,24 @@ class QTQP:
       stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-      d_s_p = np.zeros(self.m)
-      d_s_p[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+      _ds_buf[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
       # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s_p)
+      alpha_p = self._compute_step_size(y, s, d_y_p, _ds_buf)
       sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
+          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, _ds_buf
       )
 
       # --- Step 3: Corrector Step ---
       # Mehrotra correction term handles extra nonlinearity in complementarity.
-      correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
+      correction = -_ds_buf[self.z :] * d_y_p[self.z :] / y[self.z :]
+      _xy_buf[: self.n] = x_p
+      _xy_buf[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=sigma * mu,
-          r_anchor=np.concatenate([x_p, y_p]),
+          r_anchor=_xy_buf,
           tau_anchor=tau_p,
           y=y,
           s=s,
@@ -313,18 +315,17 @@ class QTQP:
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      d_s = np.zeros(self.m)
-      d_s[self.z :] = (
+      _ds_buf[self.z :] = (
           sigma * mu / y[self.z :]
           + correction
           - y_c[self.z :] * s[self.z :] / y[self.z :]
       )
 
-      alpha = self._compute_step_size(y, s, d_y, d_s)
+      alpha = self._compute_step_size(y, s, d_y, _ds_buf)
       x += step_size_scale * alpha * d_x
       y += step_size_scale * alpha * d_y
       tau += step_size_scale * alpha * d_tau
-      s += step_size_scale * alpha * d_s
+      s += step_size_scale * alpha * _ds_buf
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
@@ -384,11 +385,16 @@ class QTQP:
       e_i = 1.0 / np.sqrt(e_i)
       e_i = np.clip(e_i, min_scale, max_scale)
 
-      # Apply scaling
-      d_mat = sp.diags(d_i)
-      e_mat = sp.diags(e_i)
-      a = d_mat @ a @ e_mat
-      p = e_mat @ p @ e_mat
+      # Apply scaling directly to CSC data arrays, avoiding temporary sparse matrices.
+      # D @ A @ E: scale non-zero at row r, col c by d_i[r] * e_i[c].
+      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      a = a.copy()
+      a.data *= d_i[a.indices] * col_scale_a
+      # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
+      if p.nnz > 0:
+        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+        p = p.copy()
+        p.data *= e_i[p.indices] * col_scale_p
 
       # Accumulate scaling factors
       d *= d_i
@@ -428,8 +434,14 @@ class QTQP:
     y_aff = y + alpha * d_y
     tau_aff = tau + alpha * d_tau
     s_aff = s + alpha * d_s
-    _, y_aff, _, s_aff = self._normalize(x_aff, y_aff, tau_aff, s_aff)
-    mu_aff = (y_aff @ s_aff) / (self.m - self.z)
+
+    # Compute mu_aff directly without calling _normalize to avoid 4 extra
+    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
+    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
+    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
+    scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
+    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # If affine step reduces mu significantly, use small sigma (aggressive)
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
@@ -440,12 +452,13 @@ class QTQP:
   ):
     """Computes a search direction by solving the augmented KKT system."""
 
-    # Prepare RHS for the linear system.
+    # Prepare RHS for the linear system (in-place to avoid r_cone allocation).
     r = (mu - mu_target) * r_anchor
-    r_cone = mu_target / y[self.z :] + s[self.z :]
+    if mu_target != 0.0:
+      r[self.n + self.z :] += mu_target / y[self.z :]
+    r[self.n + self.z :] += s[self.z :]
     if correction is not None:
-      r_cone += correction
-    r[self.n + self.z :] += r_cone
+      r[self.n + self.z :] += correction
 
     kinv_r, lin_sys_stats = self._linear_solver.solve(
         rhs=r,
@@ -472,23 +485,31 @@ class QTQP:
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
-    p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
-
-    t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
-    t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-    t_c = -kinv_r[:n] @ p_kinv_r - mu_target
+    if p.nnz == 0:
+      # LP case: all P terms drop out of the quadratic coefficients.
+      t_a = mu + kinv_q @ q
+      t_b = -r_tau[0] - kinv_r @ q
+      t_c = float(-mu_target)
+    else:
+      v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
+      p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
+      t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
+      t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
+      t_c = -kinv_r[:n] @ p_kinv_r - mu_target
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     # Standard quadratic formula for the positive root
+    if abs(t_a) < _EPS:
+      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
+
     discriminant = t_b**2 - 4 * t_a * t_c
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
 
     tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
 
-    if tau_sol < -1e-10:
-      raise ValueError(f"Negative tau solution found: {tau_sol}")
+    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
+      raise ValueError(f"Invalid tau solution found: {tau_sol}")
 
     return np.array([max(0.0, tau_sol)])
 
@@ -516,8 +537,12 @@ class QTQP:
     # Precompute commonly used matrix-vector products
     ax = self.a @ x
     aty = self.a.T @ y
-    px = self.p @ x
-    xpx = x @ px
+    if self.p.nnz == 0:
+      px = np.zeros(self.n)
+      xpx = 0.0
+    else:
+      px = self.p @ x
+      xpx = x @ px
     ctx = self.c @ x
     bty = self.b @ y
 
