@@ -326,10 +326,10 @@ class DirectKktSolver:
     self.kkt_nan_idxs = np.isnan(self.kkt.data)
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
-    self._diags_buf = np.empty(self.n + self.m, dtype=np.float64)
+    self.kkt_diags = np.empty(self.n + self.m, dtype=np.float64)  # [p_diags+mu, s/y+mu]
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)
     self._reg_diags = np.empty(self.n + self.m, dtype=np.float64)
-    self._rhs_buf = np.empty(self.n + self.m, dtype=np.float64)
+    self.kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
@@ -343,16 +343,16 @@ class DirectKktSolver:
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
-    # Fill pre-allocated buffer: [p_diags + mu, h + mu] where h = [0]*z ++ s/y.
+    # Fill KKT diagonals: [p_diags + mu, h + mu] where h = [0]*z ++ s/y.
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    buf = self._diags_buf
-    buf[: self.n] = self.p_diags
-    buf[self.n : self.n + self.z] = 0.0
-    buf[self.n + self.z :] = s[self.z :] / y[self.z :]
-    buf += mu
+    kkt_diags = self.kkt_diags
+    kkt_diags[: self.n] = self.p_diags
+    kkt_diags[self.n : self.n + self.z] = 0.0
+    kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :]
+    kkt_diags += mu
 
     # "True" diagonals for accurate residual calculation (no regularization).
-    np.copyto(self._true_diags, buf)
+    np.copyto(self._true_diags, kkt_diags)
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
     # Flip the sign of the cone variables.
@@ -391,13 +391,13 @@ class DirectKktSolver:
     """
     # Adjust RHS to match the quasidefinite KKT form (second block negated).
     # Use pre-allocated buffer to avoid a copy allocation on every call.
-    np.copyto(self._rhs_buf, rhs)
-    self._rhs_buf[self.n :] *= -1.0
-    tolerance = self.atol + self.rtol * np.linalg.norm(self._rhs_buf, np.inf)
+    np.copyto(self.kkt_rhs, rhs)
+    self.kkt_rhs[self.n :] *= -1.0
+    tolerance = self.atol + self.rtol * np.linalg.norm(self.kkt_rhs, np.inf)
 
     # Initial sol and residual.
     sol = warm_start.copy()
-    residual = self._rhs_buf - self.kkt @ sol
+    residual = self.kkt_rhs - self.kkt @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -407,7 +407,7 @@ class DirectKktSolver:
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
       sol += self.solver.solve(residual)
-      residual = self._rhs_buf - self.kkt @ sol
+      residual = self.kkt_rhs - self.kkt @ sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.

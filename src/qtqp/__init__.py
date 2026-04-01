@@ -247,10 +247,9 @@ class QTQP:
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
-    # Pre-allocate combined [x; y] buffer to avoid np.concatenate each iteration.
-    _xy_buf = np.empty(self.n + self.m)
-    # Pre-allocate slack step buffer; [:z] is always 0 (equality constraints).
-    _ds_buf = np.zeros(self.m)
+    # Pre-allocate [x; y] and ds to avoid repeated allocation each iteration.
+    xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
+    ds = np.zeros(self.m)            # Slack step direction; ds[:z] is always 0
 
     # --- Main Iteration Loop ---
     for self.it in range(max_iter):
@@ -271,13 +270,13 @@ class QTQP:
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
-      _xy_buf[: self.n] = x
-      _xy_buf[self.n :] = y
+      xy[: self.n] = x
+      xy[self.n :] = y
       x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=0.0,
-          r_anchor=_xy_buf,
+          r_anchor=xy,
           tau_anchor=tau,
           y=y,
           s=s,
@@ -287,24 +286,24 @@ class QTQP:
       stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-      _ds_buf[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+      ds[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
       # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, _ds_buf)
+      alpha_p = self._compute_step_size(y, s, d_y_p, ds)
       sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, _ds_buf
+          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, ds
       )
 
       # --- Step 3: Corrector Step ---
       # Mehrotra correction term handles extra nonlinearity in complementarity.
-      correction = -_ds_buf[self.z :] * d_y_p[self.z :] / y[self.z :]
-      _xy_buf[: self.n] = x_p
-      _xy_buf[self.n :] = y_p
+      correction = -ds[self.z :] * d_y_p[self.z :] / y[self.z :]
+      xy[: self.n] = x_p
+      xy[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=sigma * mu,
-          r_anchor=_xy_buf,
+          r_anchor=xy,
           tau_anchor=tau_p,
           y=y,
           s=s,
@@ -315,17 +314,17 @@ class QTQP:
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      _ds_buf[self.z :] = (
+      ds[self.z :] = (
           sigma * mu / y[self.z :]
           + correction
           - y_c[self.z :] * s[self.z :] / y[self.z :]
       )
 
-      alpha = self._compute_step_size(y, s, d_y, _ds_buf)
+      alpha = self._compute_step_size(y, s, d_y, ds)
       x += step_size_scale * alpha * d_x
       y += step_size_scale * alpha * d_y
       tau += step_size_scale * alpha * d_tau
-      s += step_size_scale * alpha * _ds_buf
+      s += step_size_scale * alpha * ds
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
