@@ -359,11 +359,14 @@ class DirectKktSolver:
     self._true_diags[self.n :] *= -1.0
     self._reg_diags[self.n :] *= -1.0
 
-    # 1. Inject regularized values for the factorization step.
+    # Inject regularized diagonals so the factorization is numerically stable,
+    # then immediately restore the true (unregularized) diagonals. This means
+    # the stored kkt matrix reflects the exact problem, so residuals computed
+    # during iterative refinement (kkt_rhs - kkt @ sol) measure the true error.
+    # Refinement then implicitly corrects for the regularization bias introduced
+    # by the factorization, converging to the unregularized solution.
     self.kkt.data[self.kkt_nan_idxs] = self._reg_diags
     self.solver.update(self.kkt)
-
-    # 2. Restore true values for subsequent residual checks in `solve()`.
     self.kkt.data[self.kkt_nan_idxs] = self._true_diags
 
   def solve(
