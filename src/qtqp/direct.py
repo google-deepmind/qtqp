@@ -305,6 +305,10 @@ class DirectKktSolver:
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
+    # Store only the diagonal of P. The off-diagonal elements of P are constant
+    # and are baked into the KKT scaffold permanently (see kkt construction
+    # below). Only the diagonal changes each iteration (to add mu * I), so we
+    # cache it here for fast in-place updates without touching the full matrix.
     self.p_diags = p.diagonal()
     self.min_static_regularization = min_static_regularization
     self.max_iterative_refinement_steps = max_iterative_refinement_steps
@@ -312,18 +316,21 @@ class DirectKktSolver:
     self.rtol = rtol
     self.solver = solver
 
-    # Pre-allocate KKT scaffold. We use NaNs to mark mutable diagonals.
+    # Build the KKT scaffold once. NaN is used as a sentinel to mark the
+    # diagonal positions that must be overwritten each iteration (because they
+    # depend on mu, s, y). All off-diagonal and constant entries are fixed here.
+    # After construction, kkt_nan_idxs caches exactly which entries in the
+    # sparse data array are NaN, giving O(nnz_diag) updates instead of a full
+    # matrix rebuild.
     n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
     m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
 
-    # Construct the sparse block matrix once.
     self.kkt = sp.bmat(
         [[p + n_nans, a.T], [a, m_nans]],
         format=self.solver.format(),
         dtype=np.float64,
     )
-    # Cache indices of the diagonal elements for fast updates.
-    self.kkt_nan_idxs = np.isnan(self.kkt.data)
+    self.kkt_nan_idxs = np.isnan(self.kkt.data)  # Sentinel positions to update.
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
     self.kkt_diags = np.empty(self.n + self.m, dtype=np.float64)  # [p_diags+mu, s/y+mu]

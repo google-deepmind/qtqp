@@ -198,6 +198,17 @@ class QTQP:
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
 
+    # Algorithm: Mehrotra predictor-corrector interior point method with a
+    # homogeneous self-dual embedding (HSDE). Each iteration does:
+    #   1. Normalize (x, y, tau, s) onto the HSDE central path.
+    #   2. Pre-solve K^{-1}q (shared between predictor and corrector steps).
+    #   3. Predictor step: Newton direction with mu_target=0 (no centering).
+    #   4. Compute sigma (centering parameter) from predictor step quality.
+    #   5. Corrector step: Newton direction with mu_target=sigma*mu and
+    #      Mehrotra's second-order correction to improve complementarity.
+    #   6. Update iterates and check termination.
+    # The HSDE augments the problem with a homogeneous variable tau so the
+    # algorithm can detect primal/dual infeasibility without a separate Phase I.
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
@@ -215,7 +226,9 @@ class QTQP:
     y = np.zeros(self.m)
     s = np.zeros(self.m)
 
-    # Initialize inequality duals and slacksto 1.0 for interiority
+    # Initialize inequality duals and slacks to 1.0. This places the starting
+    # point strictly inside the cone (required for the IPM) and sets the
+    # initial barrier parameter mu = (y @ s) / (m - z) = 1.0.
     y[self.z :] = 1.0
     s[self.z :] = 1.0
 
@@ -626,10 +639,16 @@ class QTQP:
     gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
     complementarity = np.abs((y @ s) * inv_tau * inv_tau)
 
-    # Infeasibility certificates
+    # Infeasibility certificates (Farkas-type, from the HSDE structure).
+    # If the primal is unbounded, the HSDE produces a ray x with c'x < 0 that
+    # satisfies the homogeneous primal conditions Ax + s ≈ 0 and Px ≈ 0.
+    # dinfeas measures how well x/|c'x| certifies dual infeasibility.
     dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
     dinfeas_p = _norm(px, np.inf) / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
+    # If the dual is infeasible (primal infeasible), the HSDE produces a ray y
+    # with b'y < 0 that satisfies the homogeneous dual condition A'y ≈ 0.
+    # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = _norm(aty, np.inf) / (abs(bty) + _EPS)
 
     # Primal residual tolearance relative scale.
@@ -650,16 +669,19 @@ class QTQP:
     norm_y = _norm(y, np.inf)
     norm_s = _norm(s, np.inf)
 
+    # Solved: duality gap and both residuals are within tolerance.
     if (
         gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
       status = SolutionStatus.SOLVED
+    # Unbounded: x is a dual infeasibility certificate (primal unbounded ray).
     elif ctx < -_EPS and (
         dinfeas < self.atol_infeas + self.rtol_infeas * norm_x / abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
+    # Infeasible: y is a primal infeasibility certificate (dual unbounded ray).
     elif bty < -_EPS and (
         pinfeas < self.atol_infeas + self.rtol_infeas * norm_y / abs(bty)
     ):
