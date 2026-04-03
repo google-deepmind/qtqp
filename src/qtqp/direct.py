@@ -350,13 +350,12 @@ class DirectKktSolver:
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
-    # Fill KKT diagonals: [p_diags + mu, h + mu] where h = [0]*z ++ s/y.
+    # Fill KKT diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     kkt_diags = self.kkt_diags
-    kkt_diags[: self.n] = self.p_diags
-    kkt_diags[self.n : self.n + self.z] = 0.0
-    kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :]
-    kkt_diags += mu
+    kkt_diags[: self.n] = self.p_diags + mu
+    kkt_diags[self.n : self.n + self.z] = mu
+    kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
     # "True" diagonals for accurate residual calculation (no regularization).
     np.copyto(self._true_diags, kkt_diags)
