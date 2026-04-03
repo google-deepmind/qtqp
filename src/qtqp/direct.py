@@ -144,17 +144,17 @@ class EigenSolver(LinearSolver):
     import nanoeigenpy  # pylint: disable=g-import-not-at-top
 
     self.nanoeigenpy = nanoeigenpy
-    self.solver: nanoeigenpy.SimplicialLDLT | None = None
+    self._solver: nanoeigenpy.SimplicialLDLT | None = None
 
   def update(self, kkt: sp.spmatrix):
-    if self.solver is None:
-      self.solver = self.nanoeigenpy.SimplicialLDLT()
-      self.solver.analyzePattern(kkt)
+    if self._solver is None:
+      self._solver = self.nanoeigenpy.SimplicialLDLT()
+      self._solver.analyzePattern(kkt)
 
-    self.solver.factorize(kkt)
+    self._solver.factorize(kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.solver.solve(rhs)
+    return self._solver.solve(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
@@ -224,10 +224,10 @@ class CuDssSolver(LinearSolver):
     import nvmath  # pylint: disable=g-import-not-at-top
 
     self.nvmath = nvmath
-    self.solver: nvmath.sparse.advanced.DirectSolver | None = None
+    self._solver: nvmath.sparse.advanced.DirectSolver | None = None
 
   def update(self, kkt: sp.spmatrix):
-    if self.solver is None:
+    if self._solver is None:
       sparse_system_type = (
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
       )
@@ -239,29 +239,29 @@ class CuDssSolver(LinearSolver):
       )
       # RHS must be in column major order (Fortran) for cuDSS.
       dummy_rhs = np.empty(kkt.shape[1], order="F", dtype=np.float64)
-      self.solver = self.nvmath.sparse.advanced.DirectSolver(
+      self._solver = self.nvmath.sparse.advanced.DirectSolver(
           kkt, dummy_rhs, options=options
       )
-      self.solver.plan()
+      self._solver.plan()
     else:
-      self.solver.reset_operands(a=kkt)
+      self._solver.reset_operands(a=kkt)
 
-    self.solver.factorize()
+    self._solver.factorize()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     # Ensure RHS is Fortran contiguous for cuDSS expected input format
     rhs_fortran = np.asfortranarray(rhs, dtype=np.float64)
-    self.solver.reset_operands(b=rhs_fortran)
-    return self.solver.solve()
+    self._solver.reset_operands(b=rhs_fortran)
+    return self._solver.solve()
 
   def format(self) -> Literal["csr"]:
     return "csr"
 
   def free(self):
     """Frees the solver resources."""
-    if self.solver is not None:
-      self.solver.free()
-      self.solver = None
+    if self._solver is not None:
+      self._solver.free()
+      self._solver = None
       # Force clean up any 'zombie' references, in order to avoid cuda errors.
       import gc  # pylint: disable=g-import-not-at-top
       gc.collect(0)  # Run GC only on the youngest generation.
@@ -309,12 +309,12 @@ class DirectKktSolver:
     # and are baked into the KKT scaffold permanently (see kkt construction
     # below). Only the diagonal changes each iteration (to add mu * I), so we
     # cache it here for fast in-place updates without touching the full matrix.
-    self.p_diags = p.diagonal()
+    self._p_diags = p.diagonal()
     self.min_static_regularization = min_static_regularization
     self.max_iterative_refinement_steps = max_iterative_refinement_steps
-    self.atol = atol
-    self.rtol = rtol
-    self.solver = solver
+    self._atol = atol
+    self._rtol = rtol
+    self._solver = solver
 
     # Build the KKT scaffold once. NaN is used as a sentinel to mark the
     # diagonal positions that must be overwritten each iteration (because they
@@ -325,18 +325,18 @@ class DirectKktSolver:
     n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
     m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
 
-    self.kkt = sp.bmat(
+    self._kkt = sp.bmat(
         [[p + n_nans, a.T], [a, m_nans]],
-        format=self.solver.format(),
+        format=self._solver.format(),
         dtype=np.float64,
     )
-    self.kkt_nan_idxs = np.isnan(self.kkt.data)  # Sentinel positions to update.
+    self._kkt_nan_idxs = np.isnan(self._kkt.data)  # Sentinel positions to update.
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
-    self.kkt_diags = np.empty(self.n + self.m, dtype=np.float64)  # [p_diags+mu, s/y+mu]
+    self._kkt_diags = np.empty(self.n + self.m, dtype=np.float64)  # [p_diags+mu, s/y+mu]
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)
     self._reg_diags = np.empty(self.n + self.m, dtype=np.float64)
-    self.kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
+    self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
@@ -352,13 +352,12 @@ class DirectKktSolver:
     """
     # Fill KKT diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    kkt_diags = self.kkt_diags
-    kkt_diags[: self.n] = self.p_diags + mu
-    kkt_diags[self.n : self.n + self.z] = mu
-    kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
+    self._kkt_diags[: self.n] = self._p_diags + mu
+    self._kkt_diags[self.n : self.n + self.z] = mu
+    self._kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
     # "True" diagonals for accurate residual calculation (no regularization).
-    np.copyto(self._true_diags, kkt_diags)
+    np.copyto(self._true_diags, self._kkt_diags)
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
     # Flip the sign of the cone variables.
@@ -371,9 +370,9 @@ class DirectKktSolver:
     # during iterative refinement (kkt_rhs - kkt @ sol) measure the true error.
     # Refinement then implicitly corrects for the regularization bias introduced
     # by the factorization, converging to the unregularized solution.
-    self.kkt.data[self.kkt_nan_idxs] = self._reg_diags
-    self.solver.update(self.kkt)
-    self.kkt.data[self.kkt_nan_idxs] = self._true_diags
+    self._kkt.data[self._kkt_nan_idxs] = self._reg_diags
+    self._solver.update(self._kkt)
+    self._kkt.data[self._kkt_nan_idxs] = self._true_diags
 
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
@@ -400,13 +399,13 @@ class DirectKktSolver:
     """
     # Adjust RHS to match the quasidefinite KKT form (second block negated).
     # Use pre-allocated buffer to avoid a copy allocation on every call.
-    np.copyto(self.kkt_rhs, rhs)
-    self.kkt_rhs[self.n :] *= -1.0
-    tolerance = self.atol + self.rtol * np.linalg.norm(self.kkt_rhs, np.inf)
+    np.copyto(self._kkt_rhs, rhs)
+    self._kkt_rhs[self.n :] *= -1.0
+    tolerance = self._atol + self._rtol * np.linalg.norm(self._kkt_rhs, np.inf)
 
     # Initial sol and residual.
     sol = warm_start.copy()
-    residual = self.kkt_rhs - self.kkt @ sol
+    residual = self._kkt_rhs - self._kkt @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -415,8 +414,8 @@ class DirectKktSolver:
     for solves in range(1, self.max_iterative_refinement_steps + 1):
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
-      sol += self.solver.solve(residual)
-      residual = self.kkt_rhs - self.kkt @ sol
+      sol += self._solver.solve(residual)
+      residual = self._kkt_rhs - self._kkt @ sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.
@@ -458,4 +457,4 @@ class DirectKktSolver:
 
   def free(self):
     """Frees the solver resources."""
-    self.solver.free()
+    self._solver.free()
