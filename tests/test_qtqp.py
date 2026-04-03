@@ -517,3 +517,82 @@ def test_equivalent_tau_solution(seed, linear_solver):
   np.testing.assert_allclose(tau_qtqp, tau_1, atol=1e-11, rtol=1e-11)
   np.testing.assert_allclose(tau_qtqp, tau_2, atol=1e-11, rtol=1e-11)
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
+
+
+def _equilibrate_reference(a, p, num_iters=10, min_scale=1e-3, max_scale=1e3):
+  """Reference Ruiz equilibration using sparse diagonal matrix products."""
+  a, p = a.copy(), p.copy()
+  d, e = np.ones(a.shape[0]), np.ones(a.shape[1])
+  for _ in range(num_iters):
+    d_i = sparse.linalg.norm(a, np.inf, axis=1)
+    d_i = np.where(d_i == 0.0, 1.0, d_i)
+    d_i = np.clip(1.0 / np.sqrt(d_i), min_scale, max_scale)
+    e_i = np.maximum(sparse.linalg.norm(a, np.inf, axis=0),
+                     sparse.linalg.norm(p, np.inf, axis=0))
+    e_i = np.where(e_i == 0.0, 1.0, e_i)
+    e_i = np.clip(1.0 / np.sqrt(e_i), min_scale, max_scale)
+    d_mat, e_mat = sparse.diags(d_i), sparse.diags(e_i)
+    a = d_mat @ a @ e_mat
+    p = e_mat @ p @ e_mat
+    d *= d_i
+    e *= e_i
+  return a, p, d, e
+
+
+@pytest.mark.parametrize('seed', 2142 + np.arange(10))
+def test_equivalent_equilibration(seed):
+  """Test that in-place equilibration matches the reference sparse matmul."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  a_eq, p_eq, _, _, d, e = solver._equilibrate()  # pylint: disable=protected-access
+
+  a_ref, p_ref, d_ref, e_ref = _equilibrate_reference(a, p)
+
+  np.testing.assert_allclose(a_eq.toarray(), a_ref.toarray(), atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
+
+
+def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
+                              d_tau, d_s):
+  """Reference sigma using _normalize then mu = (y @ s) / (m - z), as in the
+  original implementation before the allocation-free optimisation."""
+  _EPS = 1e-15  # matches qtqp._EPS
+  m, z = solver.m, solver.z
+  x_aff = x + alpha * d_x
+  y_aff = y + alpha * d_y
+  tau_aff = tau + alpha * d_tau
+  s_aff = s + alpha * d_s
+  _, y_aff_n, _, s_aff_n = solver._normalize(x_aff, y_aff, tau_aff, s_aff)  # pylint: disable=protected-access
+  mu_aff = (y_aff_n @ s_aff_n) / (m - z)
+  sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
+  return float(np.clip(sigma, 0.0, 1.0))
+
+
+@pytest.mark.parametrize('seed', 3142 + np.arange(10))
+def test_equivalent_compute_sigma(seed):
+  """Test that the optimised sigma matches the reference normalise-then-compute."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform(1e-6, 1.0)
+  alpha = rng.uniform(0.0, 1.0)
+  x = rng.normal(size=n)
+  y = rng.uniform(size=m)
+  tau = np.array([rng.uniform(0.1, 2.0)])
+  s = rng.uniform(size=m)
+  d_x = rng.normal(size=n)
+  d_y = rng.normal(size=m)
+  d_tau = np.array([rng.normal()])
+  d_s = rng.normal(size=m)
+
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  sigma = solver._compute_sigma(mu, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s)  # pylint: disable=protected-access
+  sigma_ref = _compute_sigma_reference(solver, mu, x, y, tau, s, alpha, d_x,
+                                       d_y, d_tau, d_s)
+
+  np.testing.assert_allclose(sigma, sigma_ref, atol=1e-14, rtol=1e-14)
