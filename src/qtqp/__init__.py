@@ -400,8 +400,10 @@ class QTQP:
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Ruiz equilibration to improve numerical conditioning."""
-    # Initialize the equilibrated matrices.
-    a, p, b, c = (self.a, self.p, self.b, self.c)
+    # Work on copies so self.a / self.p are not modified in-place; they are
+    # used unequilibrated later (e.g. in _check_termination).
+    a, p = self.a.copy(), self.p.copy()
+    b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
 
