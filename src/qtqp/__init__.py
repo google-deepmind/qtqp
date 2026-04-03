@@ -13,7 +13,23 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Interior point method for solving QPs."""
+"""Interior point method for solving QPs.
+
+  Algorithm: Mehrotra predictor-corrector interior point method with a
+  homogeneous embedding. Each iteration does:
+
+    1. Normalize (x, y, tau, s) to have the norm of the central path.
+    2. Pre-solve K^{-1} @ [c; b] (shared between predictor and corrector steps).
+    3. Predictor step: Newton direction with mu_target=0 (no centering).
+    4. Compute sigma (centering parameter) from predictor step quality.
+    5. Corrector step: Newton direction with mu_target=sigma*mu and
+       Mehrotra's second-order correction to improve complementarity.
+    6. Update iterates and check termination.
+
+  The embedding augments the problem with a homogeneous variable tau so the
+  algorithm can detect primal/dual infeasibility without a separate Phase I.
+
+"""
 
 import dataclasses
 import enum
@@ -215,7 +231,9 @@ class QTQP:
     y = np.zeros(self.m)
     s = np.zeros(self.m)
 
-    # Initialize inequality duals and slacksto 1.0 for interiority
+    # Initialize inequality duals and slacks to 1.0. This places the starting
+    # point strictly inside the cone (required for the IPM) and sets the
+    # initial barrier parameter mu = (y @ s) / (m - z) = 1.0.
     y[self.z :] = 1.0
     s[self.z :] = 1.0
 
@@ -223,18 +241,18 @@ class QTQP:
     # consistent vector operations (e.g., @ operator).
     tau = np.array([1.0])
 
-    # Check for valid initial interior point if supplied
-    if np.any(y[self.z :] < 0) or np.any(s[self.z :] < 0):
-      raise ValueError("Initial y or s has negative values in the pos cone.")
-    if np.any(s[: self.z] != 0):
-      raise ValueError("Initial s has nonzero values in the zero cone.")
-
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
       x, y, s = self._equilibrate_iterates(x, y, s)
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
+    # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
+    # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
+    # K is the augmented KKT matrix, so the full Newton RHS has the form r - q *
+    # tau+. Solving kinv_q = K^{-1} q once per iteration lets us write the
+    # parametric solution as: [x+; y+] = kinv_r - kinv_q * tau+ and reuse kinv_q
+    # in both the predictor and corrector steps.
     self.q = np.concatenate([c, b])
 
     self._linear_solver = direct.DirectKktSolver(
@@ -249,9 +267,13 @@ class QTQP:
     )
 
     stats = []
-    self.kinv_q = np.zeros_like(self.q)  # Initialize for warm-start.
+    self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     status = SolutionStatus.UNFINISHED
     self._log_header()
+
+    # Pre-allocate [x; y] and d_s to avoid repeated allocation each iteration.
+    xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
+    d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
     # --- Main Iteration Loop ---
     for self.it in range(max_iter):
@@ -272,11 +294,13 @@ class QTQP:
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
+      xy[: self.n] = x
+      xy[self.n :] = y
       x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=0.0,
-          r_anchor=np.concatenate([x, y]),
+          r_anchor=xy,
           tau_anchor=tau,
           y=y,
           s=s,
@@ -286,23 +310,34 @@ class QTQP:
       stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-      d_s_p = np.zeros(self.m)
-      d_s_p[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+      # Predictor slack step from the linearized complementarity condition with
+      # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
+      d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
       # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s_p)
+      alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
       sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s_p
+          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
       )
 
       # --- Step 3: Corrector Step ---
-      # Mehrotra correction term handles extra nonlinearity in complementarity.
-      correction = -d_s_p[self.z :] * d_y_p[self.z :] / y[self.z :]
+      # Mehrotra's second-order correction accounts for the nonlinear cross-term
+      # that the predictor's linear approximation ignores. Expanding the full
+      # complementarity condition to second order:
+      #   (y + d_y)(s + d_s) = sigma*mu
+      #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
+      # The predictor solved the linearized version (dropping d_y*d_s). Here we
+      # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
+      # (divided by y because the KKT complementarity block is scaled by 1/y),
+      # so the corrector step can incorporate it to land closer to the target.
+      correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+      xy[: self.n] = x_p
+      xy[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
           mu_target=sigma * mu,
-          r_anchor=np.concatenate([x_p, y_p]),
+          r_anchor=xy,
           tau_anchor=tau_p,
           y=y,
           s=s,
@@ -313,7 +348,8 @@ class QTQP:
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      d_s = np.zeros(self.m)
+      # Combined corrector slack step: same form as the predictor but now with
+      # centering target sigma*mu and the Mehrotra correction baked in.
       d_s[self.z :] = (
           sigma * mu / y[self.z :]
           + correction
@@ -364,8 +400,10 @@ class QTQP:
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Ruiz equilibration to improve numerical conditioning."""
-    # Initialize the equilibrated matrices.
-    a, p, b, c = (self.a, self.p, self.b, self.c)
+    # Work on copies so self.a / self.p are not modified in-place; they are
+    # used unequilibrated later (e.g. in _check_termination).
+    a, p = self.a.copy(), self.p.copy()
+    b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
 
@@ -384,11 +422,18 @@ class QTQP:
       e_i = 1.0 / np.sqrt(e_i)
       e_i = np.clip(e_i, min_scale, max_scale)
 
-      # Apply scaling
-      d_mat = sp.diags(d_i)
-      e_mat = sp.diags(e_i)
-      a = d_mat @ a @ e_mat
-      p = e_mat @ p @ e_mat
+      # Apply scaling directly to CSC data arrays, avoiding temporary sparse matrices.
+      # D @ A @ E: scale non-zero at row r, col c by d_i[r] * e_i[c].
+      # Equivalent to (for CSC matrices):
+      #     d_mat, e_mat = sp.diags(d_i), sp.diags(e_i)
+      #     a = d_mat @ a @ e_mat
+      #     p = e_mat @ p @ e_mat
+      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      a.data *= d_i[a.indices] * col_scale_a
+      if p.nnz > 0:
+      	# E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
+        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+        p.data *= e_i[p.indices] * col_scale_p
 
       # Accumulate scaling factors
       d *= d_i
@@ -428,24 +473,54 @@ class QTQP:
     y_aff = y + alpha * d_y
     tau_aff = tau + alpha * d_tau
     s_aff = s + alpha * d_s
-    _, y_aff, _, s_aff = self._normalize(x_aff, y_aff, tau_aff, s_aff)
-    mu_aff = (y_aff @ s_aff) / (self.m - self.z)
 
-    # If affine step reduces mu significantly, use small sigma (aggressive)
+    # Compute mu_aff directly without calling _normalize to avoid 4 extra
+    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
+    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
+    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
+    scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
+    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
+
+    # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
+    # drives mu close to zero, sigma is small (aggressive, little centering).
+    # If mu_aff ≈ mu (affine step didn't help much), sigma ≈ 1 (full centering).
+    # The cubic exponent amplifies the contrast, pushing sigma toward 0 or 1.
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
-    """Computes a search direction by solving the augmented KKT system."""
+    """Computes a Newton search direction by solving the augmented KKT system.
 
-    # Prepare RHS for the linear system.
+    The KKT system K @ [x+; y+] = r - q * tau+ is linear in tau+, giving the
+    parametric solution:
+        [x+; y+] = K^{-1}(r) - K^{-1}(q) * tau+  =  kinv_r - kinv_q * tau+
+    tau+ is then pinned by substituting this back into the tau equation of the
+    homogeneous embedding (see _solve_for_tau).
+
+    Args:
+      p: The quadratic cost matrix.
+      mu: Current barrier parameter.
+      mu_target: Complementarity target for this step (0 for predictor,
+        sigma*mu for corrector).
+      r_anchor: The current [x; y] iterate (as a single vector), used to
+        form the Newton RHS via r = (mu - mu_target) * r_anchor + ...
+      tau_anchor: The current tau iterate.
+      y: Current dual variables.
+      s: Current slack variables.
+      tau: Current homogeneous variable (used as fallback if tau solve fails).
+      correction: Optional Mehrotra second-order correction added to the
+        complementarity block of the RHS.
+    """
+    # Prepare RHS for the linear system (in-place to avoid r_cone allocation).
     r = (mu - mu_target) * r_anchor
-    r_cone = mu_target / y[self.z :] + s[self.z :]
+    if mu_target != 0.0:
+      r[self.n + self.z :] += mu_target / y[self.z :]
+    r[self.n + self.z :] += s[self.z :]
     if correction is not None:
-      r_cone += correction
-    r[self.n + self.z :] += r_cone
+      r[self.n + self.z :] += correction
 
     kinv_r, lin_sys_stats = self._linear_solver.solve(
         rhs=r,
@@ -467,33 +542,63 @@ class QTQP:
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
-    """Solves the quadratic equation for the tau step in homogeneous embedding."""
-    # Solve a quadratic equation for tau: t_a * tau^2 + t_b * tau + t_c = 0
+    """Solves for tau+ using the homogeneous embedding's tau equation.
+
+    The parametric KKT solution is:
+        [x+; y+] = kinv_r - kinv_q * tau+
+
+    Substituting this into the tau equation of the homogeneous embedding yields:
+        t_a * tau+^2 + t_b * tau+ + t_c = 0
+
+    The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
+    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
+    the positive root since tau >= 0 is required for the embedding to represent
+    a feasible point (tau=0 corresponds to a certificate of infeasibility or
+    unboundedness, which is handled separately at termination).
+    """
+    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    v = p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)
-    p_kinv_r, p_kinv_q = v[:, 0], v[:, 1]
-
-    t_a = mu + kinv_q @ q - kinv_q[:n] @ p_kinv_q
-    t_b = -r_tau[0] - kinv_r @ q + kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-    t_c = -kinv_r[:n] @ p_kinv_r - mu_target
+    t_a = mu + kinv_q @ q
+    t_b = -r_tau[0] - kinv_r @ q
+    t_c = -mu_target
+    if p.nnz > 0:
+      p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
+      t_a -= kinv_q[:n] @ p_kinv_q
+      t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
+      t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     # Standard quadratic formula for the positive root
+    if abs(t_a) < _EPS:
+      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
+
     discriminant = t_b**2 - 4 * t_a * t_c
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
 
     tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
 
-    if tau_sol < -1e-10:
-      raise ValueError(f"Negative tau solution found: {tau_sol}")
+    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
+      raise ValueError(f"Invalid tau solution found: {tau_sol}")
 
     return np.array([max(0.0, tau_sol)])
 
   def _normalize(self, x, y, tau, s):
-    """Normalizes iterates to have norm as determined by central path."""
+    """Normalizes iterates to match the homogeneous embedding central path norm.
+
+    The homogeneous embedding lifts the QP into a projective space. Only ratios
+    like x/tau and y/tau matter — tau is the homogeneous variable, and the final
+    solution is recovered as (x/tau, y/tau, s/tau).
+
+    We enforce the norm of the central path, which ensures convergence to
+    non-trivial solution, ie:
+        ||(x, y, tau)||^2 = m - z + 1
+    The right-hand side counts complementarity pairs: (m - z) from the
+    inequality constraints plus 1 for the tau-kappa pair of the embedding.
+
+    """
     xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     return x * scale, y * scale, tau * scale, s * scale
@@ -516,8 +621,12 @@ class QTQP:
     # Precompute commonly used matrix-vector products
     ax = self.a @ x
     aty = self.a.T @ y
-    px = self.p @ x
-    xpx = x @ px
+    if self.p.nnz == 0:
+      px = np.zeros(self.n)
+      xpx = 0.0
+    else:
+      px = self.p @ x
+      xpx = x @ px
     ctx = self.c @ x
     bty = self.b @ y
 
@@ -531,10 +640,16 @@ class QTQP:
     gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
     complementarity = np.abs((y @ s) * inv_tau * inv_tau)
 
-    # Infeasibility certificates
+    # Infeasibility certificates (Farkas-type, from the embedding structure).
+    # If the primal is unbounded (dual infeasible) this produces a ray x with
+    # c'x < 0 that satisfies the homogeneous primal conditions Ax + s ≈ 0 and Px
+    # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
     dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
     dinfeas_p = _norm(px, np.inf) / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
+    # If the primal is infeasible (dual unbounded) this produces a ray y
+    # with b'y < 0 that satisfies the homogeneous dual condition A'y ≈ 0.
+    # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = _norm(aty, np.inf) / (abs(bty) + _EPS)
 
     # Primal residual tolearance relative scale.
@@ -555,16 +670,19 @@ class QTQP:
     norm_y = _norm(y, np.inf)
     norm_s = _norm(s, np.inf)
 
+    # Solved: duality gap and both residuals are within tolerance.
     if (
         gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
       status = SolutionStatus.SOLVED
+    # Unbounded: x is a dual infeasibility certificate (primal unbounded ray).
     elif ctx < -_EPS and (
         dinfeas < self.atol_infeas + self.rtol_infeas * norm_x / abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
+    # Infeasible: y is a primal infeasibility certificate (dual unbounded ray).
     elif bty < -_EPS and (
         pinfeas < self.atol_infeas + self.rtol_infeas * norm_y / abs(bty)
     ):
