@@ -141,10 +141,10 @@ class QTQP:
     if self.c.shape != (self.n,):
       raise ValueError(f"c must have shape ({self.n},), got {self.c.shape}")
 
-    if self.z >= self.m:
+    if self.z < 0 or self.z >= self.m:
       raise ValueError(
-          f"Number of equality constraints z={self.z} must be strictly less "
-          f"than number of rows in A={self.m}"
+          f"Number of equality constraints z={self.z} must satisfy "
+          f"0 <= z < m={self.m}"
       )
 
     if p is None:
