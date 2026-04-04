@@ -262,10 +262,11 @@ class QTQP:
     # in both the predictor and corrector steps.
     self.q = np.concatenate([c, b])
 
-    # Precompute constant norms used in termination checks (b and c don't
-    # change across iterations).
-    self._norm_b = _norm(b, np.inf)
-    self._norm_c = _norm(c, np.inf)
+    # Precompute constant norms used in termination checks. _check_termination
+    # unequilibrates iterates and compares against the original self.b / self.c,
+    # so we use self.b and self.c here (not the equilibrated local b, c).
+    self._norm_b = _norm(self.b, np.inf)
+    self._norm_c = _norm(self.c, np.inf)
 
     self._linear_solver = direct.DirectKktSolver(
         a=a,
