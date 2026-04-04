@@ -145,6 +145,10 @@ class QTQP:
           f"than number of rows in A={self.m}"
       )
 
+    # Precompute constants that depend only on m and z.
+    self._inv_cone_size = 1.0 / (self.m - self.z)
+    self._sqrt_cone_size_plus_1 = np.sqrt(self.m - self.z + 1)
+
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
     else:
@@ -282,7 +286,7 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
-      mu = (y @ s) / (self.m - self.z)
+      mu = (y @ s) * self._inv_cone_size
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Solve for KKT @ q ---
@@ -357,10 +361,11 @@ class QTQP:
       )
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
-      x += step_size_scale * alpha * d_x
-      y += step_size_scale * alpha * d_y
-      tau += step_size_scale * alpha * d_tau
-      s += step_size_scale * alpha * d_s
+      step = step_size_scale * alpha
+      x += step * d_x
+      y += step * d_y
+      tau += step * d_tau
+      s += step * d_s
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
@@ -479,8 +484,8 @@ class QTQP:
     # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
     # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
     xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
-    scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
-    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
+    scale_sq = self._sqrt_cone_size_plus_1**2 / max(_EPS**2, xyt_norm_sq)
+    mu_aff = scale_sq * (y_aff @ s_aff) * self._inv_cone_size
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
     # drives mu close to zero, sigma is small (aggressive, little centering).
@@ -600,7 +605,7 @@ class QTQP:
 
     """
     xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
-    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
+    scale = self._sqrt_cone_size_plus_1 / max(_EPS, xyt_norm)
     return x * scale, y * scale, tau * scale, s * scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
