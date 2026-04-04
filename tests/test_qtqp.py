@@ -598,3 +598,273 @@ def test_equivalent_compute_sigma(seed):
                                        d_y, d_tau, d_s)
 
   np.testing.assert_allclose(sigma, sigma_ref, atol=1e-14, rtol=1e-14)
+
+
+# =============================================================================
+# LP tests (p=None)
+# =============================================================================
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4042 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
+  """Test QTQP as an LP (p=None); verifies the p.nnz==0 code path."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 5
+  a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
+  p_zero = sparse.csc_matrix((n, n))
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_solution(solution, a, b, c, p_zero, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4142 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_infeasible_lp(equilibrate, seed, linear_solver, record_iterations):
+  """Test infeasible LP detection (p=None)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 5
+  a, b, c, _ = _gen_infeasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_infeasible(solution, a, b, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4242 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_unbounded_lp(equilibrate, seed, linear_solver, record_iterations):
+  """Test unbounded LP detection (p=None).
+
+  _gen_unbounded constructs a direction x with c'x=-1 and Ax+s=0, s[z:]>=0.
+  That direction is valid for the LP regardless of P, so passing p=None still
+  yields an UNBOUNDED solution.
+  """
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 5
+  a, b, c, _ = _gen_unbounded(m, n, z, random_state=rng)
+  p_zero = sparse.csc_matrix((n, n))
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_unbounded(solution, a, c, p_zero, z)
+
+
+# =============================================================================
+# p=None equivalence: explicit zero P should give the same result as p=None
+# =============================================================================
+
+def test_p_none_equivalent_to_zero_matrix():
+  """Test that p=None and p=zeros give identical solutions."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 3
+  a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
+  p_zero = sparse.csc_matrix((n, n))
+
+  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(verbose=False)
+  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(verbose=False)
+
+  assert sol_none.status == qtqp.SolutionStatus.SOLVED
+  assert sol_zero.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(sol_none.x, sol_zero.x, atol=1e-10, rtol=1e-10)
+  np.testing.assert_allclose(sol_none.y, sol_zero.y, atol=1e-10, rtol=1e-10)
+
+
+# =============================================================================
+# All-inequality constraints (z=0)
+# =============================================================================
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4342 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_solve_all_inequalities(equilibrate, seed, linear_solver, record_iterations):
+  """Test solver with z=0 (all-inequality constraints, no equalities)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 0
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# Small-problem infeasible / unbounded
+# =============================================================================
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4442 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_infeasible_small(equilibrate, seed, linear_solver, record_iterations):
+  """Test infeasible detection on small problems (n+m < ~50)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 20, 10, 3
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_infeasible(solution, a, b, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 4542 + np.arange(5))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_unbounded_small(equilibrate, seed, linear_solver, record_iterations):
+  """Test unbounded detection on small problems (n+m < ~50)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 20, 10, 3
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      verbose=False,
+  )
+
+  record_iterations(solution.stats[-1]['iter'])
+  _assert_unbounded(solution, a, c, p, z)
+
+
+# =============================================================================
+# SolutionStatus.FAILED
+# =============================================================================
+
+def test_failed_status():
+  """Test that FAILED is returned when max_iter is exhausted."""
+  rng = np.random.default_rng(42)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      max_iter=1, verbose=False
+  )
+
+  assert solution.status == qtqp.SolutionStatus.FAILED
+  # FAILED still returns a finite best-effort iterate (not NaN).
+  assert np.all(np.isfinite(solution.x))
+  assert np.all(np.isfinite(solution.y))
+  assert np.all(np.isfinite(solution.s))
+
+
+# =============================================================================
+# collect_stats=False (default)
+# =============================================================================
+
+def test_collect_stats_false():
+  """Test that stats is empty when collect_stats=False (default)."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=False
+  )
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  assert solution.stats == []
+
+
+# =============================================================================
+# Stats content when collect_stats=True
+# =============================================================================
+
+def test_stats_keys():
+  """Test that collect_stats=True populates the expected per-iteration keys."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True
+  )
+
+  assert len(solution.stats) > 0
+  base_keys = {
+      'iter', 'pcost', 'dcost', 'pres', 'dres', 'gap', 'mu', 'sigma',
+      'alpha', 'tau', 'norm_x', 'norm_y', 'status', 'time',
+      'prelrhs', 'drelrhs', 'pinfeas', 'dinfeas',
+  }
+  collect_stats_keys = {
+      'complementarity', 'max_sy', 'min_sy', 'std_sy',
+      'max_s_over_y', 'min_s_over_y', 'mean_s_over_y',
+  }
+  for stats_i in solution.stats:
+    missing = base_keys - stats_i.keys()
+    assert not missing, f"Missing base keys: {missing}"
+    missing = collect_stats_keys - stats_i.keys()
+    assert not missing, f"Missing collect_stats keys: {missing}"
+
+
+# =============================================================================
+# Re-solve: calling solve() twice on the same instance
+# =============================================================================
+
+def test_resolve():
+  """Test that calling solve() twice on the same QTQP instance is consistent."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  sol1 = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  sol2 = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY_DENSE)
+
+  assert sol1.status == qtqp.SolutionStatus.SOLVED
+  assert sol2.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(sol1.x, sol2.x, atol=1e-5, rtol=1e-5)
+  np.testing.assert_allclose(sol1.y, sol2.y, atol=1e-5, rtol=1e-5)
+
+
+# =============================================================================
+# verbose=False produces no output
+# =============================================================================
+
+def test_verbose_false(capsys):
+  """Test that verbose=False suppresses all printed output."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+
+  captured = capsys.readouterr()
+  assert captured.out == ""
+
+
+# =============================================================================
+# Non-CSC input raises TypeError
+# =============================================================================
+
+def test_raise_error_non_csc_matrix():
+  """Test that TypeError is raised when a or p are not in CSC format."""
+  rng = np.random.default_rng(42)
+  m, n, z = 6, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  with pytest.raises(TypeError):
+    qtqp.QTQP(a=a.tocsr(), b=b, c=c, z=z, p=p)
+
+  with pytest.raises(TypeError):
+    qtqp.QTQP(a=a, b=b, c=c, z=z, p=p.tocsr())
