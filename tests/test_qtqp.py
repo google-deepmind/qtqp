@@ -1056,3 +1056,202 @@ def test_tolerance_effect_on_iterations():
   assert sol_loose.status == qtqp.SolutionStatus.SOLVED
   assert sol_tight.status == qtqp.SolutionStatus.SOLVED
   assert len(sol_loose.stats) <= len(sol_tight.stats)
+
+
+# =============================================================================
+# Verbose footer messages for all non-SOLVED statuses
+# =============================================================================
+
+def test_verbose_infeasible(capsys):
+  """Test that verbose=True prints the correct footer for infeasible problems."""
+  rng = np.random.default_rng(142)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+
+  out = capsys.readouterr().out
+  assert "Primal infeasible" in out
+
+
+def test_verbose_unbounded(capsys):
+  """Test that verbose=True prints the correct footer for unbounded problems."""
+  rng = np.random.default_rng(242)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+
+  out = capsys.readouterr().out
+  assert "Dual infeasible" in out
+
+
+def test_verbose_failed(capsys):
+  """Test that verbose=True prints the correct footer when max_iter is hit."""
+  rng = np.random.default_rng(42)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True, max_iter=1)
+
+  out = capsys.readouterr().out
+  assert "Failed to converge" in out
+
+
+# =============================================================================
+# max_iterative_refinement_steps=1 (single linear solve per Newton step)
+# =============================================================================
+
+def test_min_iterative_refinement_steps():
+  """Test that the solver converges with just one iterative refinement step."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      max_iterative_refinement_steps=1, verbose=False
+  )
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# Very small problem — designed use case for ScipyDenseSolver
+# =============================================================================
+
+def test_solve_tiny():
+  """Test SCIPY_DENSE on a tiny (5×3) problem — its primary intended use case."""
+  rng = np.random.default_rng(42)
+  m, n, z = 5, 3, 1
+  # Use a dense random matrix so the tiny problem is non-degenerate.
+  a = sparse.csc_matrix(rng.normal(size=(m, n)))
+  p_dense = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(p_dense.T @ p_dense * 0.1)
+  w = rng.normal(size=m)
+  y = w.copy()
+  y[z:] = 0.5 * (w[z:] + np.abs(w[z:]))
+  s = y - w
+  x = rng.normal(size=n)
+  b = np.array(a @ x + s).ravel()
+  c = np.array(-a.T @ y).ravel()
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      linear_solver=qtqp.LinearSolver.SCIPY_DENSE, verbose=False
+  )
+
+  _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# equilibrate=True and equilibrate=False produce the same solution
+# =============================================================================
+
+def test_equilibrate_same_solution():
+  """Test that equilibration does not change the optimal objective value."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_eq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=True, verbose=False
+  )
+  sol_noeq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=False, verbose=False
+  )
+
+  assert sol_eq.status == qtqp.SolutionStatus.SOLVED
+  assert sol_noeq.status == qtqp.SolutionStatus.SOLVED
+  # Both solutions must satisfy KKT independently.
+  _assert_solution(sol_eq, a, b, c, p, z)
+  _assert_solution(sol_noeq, a, b, c, p, z)
+  # Optimal objective values must agree (even if x differs near degeneracy).
+  obj_eq = c @ sol_eq.x + 0.5 * sol_eq.x @ p @ sol_eq.x
+  obj_noeq = c @ sol_noeq.x + 0.5 * sol_noeq.x @ p @ sol_noeq.x
+  np.testing.assert_allclose(obj_eq, obj_noeq, atol=1e-5, rtol=1e-5)
+
+
+# =============================================================================
+# Re-solve with flipped equilibrate setting
+# =============================================================================
+
+def test_resolve_flip_equilibrate():
+  """Test re-solving the same instance with different equilibrate settings."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  sol1 = solver.solve(equilibrate=True, verbose=False)
+  sol2 = solver.solve(equilibrate=False, verbose=False)
+
+  assert sol1.status == qtqp.SolutionStatus.SOLVED
+  assert sol2.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(sol1, a, b, c, p, z)
+  _assert_solution(sol2, a, b, c, p, z)
+  obj1 = c @ sol1.x + 0.5 * sol1.x @ p @ sol1.x
+  obj2 = c @ sol2.x + 0.5 * sol2.x @ p @ sol2.x
+  np.testing.assert_allclose(obj1, obj2, atol=1e-5, rtol=1e-5)
+
+
+# =============================================================================
+# complementarity is near zero at convergence
+# =============================================================================
+
+def test_complementarity_at_convergence():
+  """Test that complementarity (y.s / tau^2) is small at the solved iteration."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True
+  )
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  complementarity = solution.stats[-1]['complementarity']
+  assert complementarity < 1e-6, f"Complementarity {complementarity} too large at convergence"
+
+
+# =============================================================================
+# Iterative refinement: more steps produce a lower (or equal) residual
+# =============================================================================
+
+def test_iterative_refinement_improves_residual():
+  """Test that more refinement steps reduce the final linear system residual."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      max_iterative_refinement_steps=1, verbose=False, collect_stats=True
+  )
+  sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      max_iterative_refinement_steps=50, verbose=False, collect_stats=True
+  )
+
+  # Compare the first iteration (cold start) q-solve residual.
+  res_1 = sol_1.stats[0]['q_lin_sys_stats']['final_residual_norm']
+  res_50 = sol_50.stats[0]['q_lin_sys_stats']['final_residual_norm']
+  assert res_1 >= res_50, (
+      f"1-step residual {res_1} should be >= 50-step residual {res_50}"
+  )
+
+
+# =============================================================================
+# min_static_regularization: zero and large values both solve correctly
+# =============================================================================
+
+@pytest.mark.parametrize('reg', [0.0, 1e-4, 1e-2])
+def test_min_static_regularization(reg):
+  """Test that different min_static_regularization values still produce SOLVED."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      min_static_regularization=reg, verbose=False
+  )
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
