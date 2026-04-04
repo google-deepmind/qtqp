@@ -46,6 +46,7 @@ jobs:
         run: |
           conda install -y -c conda-forge scikit-sparse
           conda install -y -c conda-forge nanoeigenpy
+          conda install -y -c conda-forge scikit-umfpack
           python -m pip install -U pip
           python -m pip install qdldl pytest
           python -m pip install -e .[test] || python -m pip install -e .

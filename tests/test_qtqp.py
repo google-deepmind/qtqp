@@ -23,6 +23,8 @@ from scipy import sparse
 
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
+    qtqp.LinearSolver.SCIPY_DENSE,
+    qtqp.LinearSolver.UMFPACK,
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
@@ -189,7 +191,7 @@ def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats
@@ -209,7 +211,7 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats
@@ -229,7 +231,7 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats

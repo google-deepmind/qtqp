@@ -53,6 +53,8 @@ class LinearSolver(enum.Enum):
   """Available linear solvers."""
 
   SCIPY = direct.ScipySolver
+  SCIPY_DENSE = direct.ScipyDenseSolver
+  UMFPACK = direct.UmfpackSolver
   PARDISO = direct.MklPardisoSolver
   QDLDL = direct.QdldlSolver
   CHOLMOD = direct.CholModSolver
@@ -172,6 +174,7 @@ class QTQP:
       linear_solver: LinearSolver = LinearSolver.SCIPY,
       verbose: bool = True,
       equilibrate: bool = True,
+      collect_stats: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -199,6 +202,10 @@ class QTQP:
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
+      collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
+        statistics, complementarity, etc.) and return them in Solution.stats.
+        Defaults to False for faster throughput; set True when per-iteration
+        diagnostics are needed.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -285,7 +292,7 @@ class QTQP:
       mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
-      # --- Step 1: Solve for KKT @ q ---
+      # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
       # This is reused for both predictor and corrector parts of the step.
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
@@ -368,9 +375,10 @@ class QTQP:
       tau = np.maximum(tau, 1e-30)
 
       # --- Termination Check---
-      status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i)
+      status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats)
       self._log_iteration(stats_i)
-      stats.append(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
       if status != SolutionStatus.UNFINISHED:
         break
 
@@ -609,10 +617,8 @@ class QTQP:
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
-  def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i):
+  def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
-    sy = s * y
-    s_over_y = s / np.maximum(_EPS, y)
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -638,7 +644,6 @@ class QTQP:
     pres = _norm((ax + s) * inv_tau - self.b, np.inf)
     dres = _norm((px + aty) * inv_tau + self.c, np.inf)
     gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
-    complementarity = np.abs((y @ s) * inv_tau * inv_tau)
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
     # If the primal is unbounded (dual infeasible) this produces a ray x with
@@ -652,14 +657,14 @@ class QTQP:
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = _norm(aty, np.inf) / (abs(bty) + _EPS)
 
-    # Primal residual tolearance relative scale.
+    # Primal residual tolerance relative scale.
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
         _norm(s, np.inf) * inv_tau,
         _norm(self.b, np.inf),
     )
 
-    # Dual residual tolearance relative scale.
+    # Dual residual tolerance relative scale.
     drelrhs = max(
         _norm(px, np.inf) * inv_tau,
         _norm(aty, np.inf) * inv_tau,
@@ -668,7 +673,6 @@ class QTQP:
 
     norm_x = _norm(x, np.inf)
     norm_y = _norm(y, np.inf)
-    norm_s = _norm(s, np.inf)
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
@@ -699,7 +703,6 @@ class QTQP:
         "pres": pres,
         "dres": dres,
         "gap": gap,
-        "complementarity": complementarity,
         "pinfeas": pinfeas,
         "dinfeas": dinfeas,
         "dinfeas_a": dinfeas_a,
@@ -710,19 +713,27 @@ class QTQP:
         "tau": tau_arr[0],
         "norm_x": norm_x,
         "norm_y": norm_y,
-        "norm_s": norm_s,
         "status": status,
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
-        "max_sy": np.max(sy[self.z :]),
-        "min_sy": np.min(sy[self.z :]),
-        "std_sy": np.std(sy[self.z :]),
-        "max_s_over_y": np.max(s_over_y[self.z :]),
-        "min_s_over_y": np.min(s_over_y[self.z :]),
-        "mean_s_over_y": np.mean(s_over_y[self.z :]),
-        "std_s_over_y": np.std(s_over_y[self.z :]),
     })
+
+    if collect_stats:
+      sy = s * y
+      s_over_y = s / np.maximum(_EPS, y)
+      stats_i.update({
+          "complementarity": np.abs((y @ s) * inv_tau * inv_tau),
+          "norm_s": _norm(s, np.inf),
+          "max_sy": np.max(sy[self.z :]),
+          "min_sy": np.min(sy[self.z :]),
+          "std_sy": np.std(sy[self.z :]),
+          "max_s_over_y": np.max(s_over_y[self.z :]),
+          "min_s_over_y": np.min(s_over_y[self.z :]),
+          "mean_s_over_y": np.mean(s_over_y[self.z :]),
+          "std_s_over_y": np.std(s_over_y[self.z :]),
+      })
+
     return status
 
   def _log_header(self):

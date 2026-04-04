@@ -146,13 +146,14 @@ solve(
     rtol_infeas: float = 1e-9,
     max_iter: int = 100,
     step_size_scale: float = 0.99,
-    min_static_regularization: float = 1e-7,
+    min_static_regularization: float = 1e-8,
     max_iterative_refinement_steps: int = 50,
     linear_solver_atol: float = 1e-12,
     linear_solver_rtol: float = 1e-12,
     linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.SCIPY,
     verbose: bool = True,
     equilibrate: bool = True,
+    collect_stats: bool = False,
 ) -> qtqp.Solution
 ```
 
@@ -171,6 +172,9 @@ Key parameters:
     below).
 -   `verbose`: Print per-iteration table with key metrics.
 -   `equilibrate`: Scale/equilibrate data for numerical stability.
+-   `collect_stats`: If True, populate `Solution.stats` with per-iteration
+    diagnostics (sy, s/y statistics, complementarity, etc.). Defaults to False
+    for faster throughput.
 
 This method will return a `qtqp.Solution` object, with fields:
 
@@ -179,17 +183,36 @@ This method will return a `qtqp.Solution` object, with fields:
 -   `s`: (m) Slack variable or certificate of unboundedness.
 -   `status`: (`qtqp.SolutionStatus`) One of `SOLVED`, `INFEASIBLE`,
     `UNBOUNDED`, `FAILED`.
--   `stats`: (list of dicts) Includes primal/dual objective, residuals, gap, mu,
-    elapsed time, etc, for each iteration.
+-   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
+    `collect_stats=True`. When enabled, includes primal/dual objective,
+    residuals, gap, mu, elapsed time, and complementarity statistics.
 
 ## Linear solvers
 
 The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
 to the `solve` method via the `linear_solver` argument. By default
-`linear_solver=qtqp.LinearSolver.SCIPY` which uses `scipy.linalg.factorized`.
-QTQP supports several other linear solvers that may be faster or more reliable
-for your problem. The enum `qtqp.LinearSolver` contains values corresponding
-to the following backend solvers:
+`linear_solver=qtqp.LinearSolver.SCIPY` which uses scipy's SuperLU via
+`scipy.sparse.linalg.factorized`. QTQP supports several other linear solvers
+that may be faster or more reliable for your problem. The enum
+`qtqp.LinearSolver` contains values corresponding to the following backend
+solvers:
+
+#### Dense LU: `qtqp.LinearSolver.SCIPY_DENSE`
+
+A dense LU factorization via LAPACK (`dgetrf`/`dgetrs`). Recommended for small
+problems (n+m < ~200) where sparse data structure overhead dominates. No
+additional dependencies required.
+
+#### UMFPACK: `qtqp.LinearSolver.UMFPACK`
+
+UMFPACK separates symbolic and numeric factorization phases, so symbolic
+analysis (column ordering) only runs once per solve even though the KKT matrix
+is refactored every iteration. Available via the scikit-umfpack package. To
+install
+
+```bash
+conda install scikit-umfpack -c conda-forge
+```
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
