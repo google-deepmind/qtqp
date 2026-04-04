@@ -262,6 +262,11 @@ class QTQP:
     # in both the predictor and corrector steps.
     self.q = np.concatenate([c, b])
 
+    # Precompute constant norms used in termination checks (b and c don't
+    # change across iterations).
+    self._norm_b = _norm(b, np.inf)
+    self._norm_c = _norm(c, np.inf)
+
     self._linear_solver = direct.DirectKktSolver(
         a=a,
         p=p,
@@ -661,14 +666,14 @@ class QTQP:
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
         _norm(s, np.inf) * inv_tau,
-        _norm(self.b, np.inf),
+        self._norm_b,
     )
 
     # Dual residual tolerance relative scale.
     drelrhs = max(
         _norm(px, np.inf) * inv_tau,
         _norm(aty, np.inf) * inv_tau,
-        _norm(self.c, np.inf),
+        self._norm_c,
     )
 
     norm_x = _norm(x, np.inf)
