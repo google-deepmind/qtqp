@@ -868,3 +868,191 @@ def test_raise_error_non_csc_matrix():
 
   with pytest.raises(TypeError):
     qtqp.QTQP(a=a, b=b, c=c, z=z, p=p.tocsr())
+
+
+# =============================================================================
+# Known solution (README example)
+# =============================================================================
+
+def test_known_solution():
+  """Test against the README example with a known optimal solution."""
+  p = sparse.csc_matrix([[3.0, -1.0], [-1.0, 2.0]])
+  a = sparse.csc_matrix([[-1.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+  b = np.array([-1.0, 0.3, -0.5])
+  c = np.array([-1.0, -1.0])
+  z = 1
+
+  solution = qtqp.QTQP(p=p, a=a, b=b, c=c, z=z).solve(verbose=False)
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(solution.x, [0.3, -0.7], atol=1e-5, rtol=1e-5)
+
+
+# =============================================================================
+# Single inequality constraint (z = m-1)
+# =============================================================================
+
+@pytest.mark.parametrize('seed', 5042 + np.arange(5))
+def test_single_inequality_constraint(seed):
+  """Test with z=m-1 (one inequality, rest equalities) — boundary of valid z."""
+  rng = np.random.default_rng(seed)
+  m, n = 20, 10
+  z = m - 1
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+
+  _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# LP with all-inequality constraints (p=None, z=0)
+# =============================================================================
+
+@pytest.mark.parametrize('seed', 5142 + np.arange(5))
+def test_solve_lp_all_inequalities(seed):
+  """Test LP (p=None) with z=0 — exercises both LP and all-inequality paths."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 30, 20, 0
+  a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
+  p_zero = sparse.csc_matrix((n, n))
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=False)
+
+  _assert_solution(solution, a, b, c, p_zero, z)
+
+
+# =============================================================================
+# verbose=True produces expected output
+# =============================================================================
+
+def test_verbose_true(capsys):
+  """Test that verbose=True prints a header, iteration rows, and a footer."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+
+  out = capsys.readouterr().out
+  assert "QTQP" in out       # header line with version/dimensions
+  assert "iter" in out       # column header
+  assert "Solved" in out     # footer
+
+
+# =============================================================================
+# Stats: iteration counter is sequential and final status is correct
+# =============================================================================
+
+def test_stats_iter_sequence():
+  """Test that iter counts 0,1,2,... and final status matches solution status."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True
+  )
+
+  iters = [s['iter'] for s in solution.stats]
+  assert iters == list(range(len(iters))), "iter field should be 0,1,2,..."
+  assert solution.stats[-1]['status'] == qtqp.SolutionStatus.SOLVED
+
+
+# =============================================================================
+# _max_step_size unit tests
+# =============================================================================
+
+def test_max_step_size():
+  """Unit tests for _max_step_size boundary cases."""
+  rng = np.random.default_rng(42)
+  m, n, z = 10, 5, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  y = rng.uniform(0.1, 1.0, size=m)
+
+  # All non-negative directions: no variable decreases → step = 1.0.
+  delta_pos = rng.uniform(0.0, 1.0, size=m)
+  assert solver._max_step_size(y, delta_pos) == 1.0  # pylint: disable=protected-access
+
+  # Direction that limits step to exactly 0.5.
+  delta = np.zeros(m)
+  delta[0] = -2 * y[0]  # step of 0.5 brings y[0] to zero
+  alpha = solver._max_step_size(y, delta)  # pylint: disable=protected-access
+  np.testing.assert_allclose(alpha, 0.5, atol=1e-12)
+
+  # Step capped at 1.0 even when the unconstrained step would be larger.
+  delta_small = np.zeros(m)
+  delta_small[0] = -0.01 * y[0]  # only drives y[0] to 0 at step=100
+  alpha_capped = solver._max_step_size(y, delta_small)  # pylint: disable=protected-access
+  assert alpha_capped == 1.0
+
+
+# =============================================================================
+# Equilibration/unequilibration roundtrip
+# =============================================================================
+
+def test_equilibrate_unequilibrate_roundtrip():
+  """Test that equilibrating then unequilibrating iterates is the identity."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  _, _, _, _, solver.d, solver.e = solver._equilibrate()  # pylint: disable=protected-access
+
+  x = rng.normal(size=n)
+  y = rng.uniform(size=m)
+  s = rng.uniform(size=m)
+
+  x_eq, y_eq, s_eq = solver._equilibrate_iterates(x, y, s)  # pylint: disable=protected-access
+  x_rec, y_rec, s_rec = solver._unequilibrate_iterates(x_eq, y_eq, s_eq)  # pylint: disable=protected-access
+
+  np.testing.assert_allclose(x_rec, x, atol=1e-12, rtol=1e-12)
+  np.testing.assert_allclose(y_rec, y, atol=1e-12, rtol=1e-12)
+  np.testing.assert_allclose(s_rec, s, atol=1e-12, rtol=1e-12)
+
+
+# =============================================================================
+# _normalize invariant
+# =============================================================================
+
+def test_normalize_invariant():
+  """Test that _normalize enforces ||(x,y,tau)||^2 == m - z + 1."""
+  rng = np.random.default_rng(42)
+  m, n, z = 20, 10, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  x = rng.normal(size=n)
+  y = rng.normal(size=m)
+  tau = np.array([rng.uniform(0.1, 2.0)])
+  s = rng.uniform(size=m)
+
+  x_n, y_n, tau_n, _ = solver._normalize(x, y, tau, s)  # pylint: disable=protected-access
+
+  xyt_norm_sq = x_n @ x_n + y_n @ y_n + tau_n @ tau_n
+  np.testing.assert_allclose(xyt_norm_sq, m - z + 1, atol=1e-12, rtol=1e-12)
+
+
+# =============================================================================
+# Looser tolerances require fewer iterations
+# =============================================================================
+
+def test_tolerance_effect_on_iterations():
+  """Test that looser tolerances converge in fewer iterations."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_loose = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      atol=1e-3, rtol=1e-4, verbose=False, collect_stats=True
+  )
+  sol_tight = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      atol=1e-7, rtol=1e-8, verbose=False, collect_stats=True
+  )
+
+  assert sol_loose.status == qtqp.SolutionStatus.SOLVED
+  assert sol_tight.status == qtqp.SolutionStatus.SOLVED
+  assert len(sol_loose.stats) <= len(sol_tight.stats)
