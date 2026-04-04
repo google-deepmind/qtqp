@@ -654,13 +654,15 @@ class QTQP:
     # If the primal is unbounded (dual infeasible) this produces a ray x with
     # c'x < 0 that satisfies the homogeneous primal conditions Ax + s ≈ 0 and Px
     # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
+    norm_aty = _norm(aty, np.inf)
+    norm_px = _norm(px, np.inf)
     dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
-    dinfeas_p = _norm(px, np.inf) / (abs(ctx) + _EPS)
+    dinfeas_p = norm_px / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     # If the primal is infeasible (dual unbounded) this produces a ray y
     # with b'y < 0 that satisfies the homogeneous dual condition A'y ≈ 0.
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
-    pinfeas = _norm(aty, np.inf) / (abs(bty) + _EPS)
+    pinfeas = norm_aty / (abs(bty) + _EPS)
 
     # Primal residual tolerance relative scale.
     prelrhs = max(
@@ -671,8 +673,8 @@ class QTQP:
 
     # Dual residual tolerance relative scale.
     drelrhs = max(
-        _norm(px, np.inf) * inv_tau,
-        _norm(aty, np.inf) * inv_tau,
+        norm_px * inv_tau,
+        norm_aty * inv_tau,
         self._norm_c,
     )
 
