@@ -183,7 +183,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             counts.setdefault(label, {})[solver_name] = c
 
     # Determine column width from solver names (min 10 for the bar+count).
-    col_w = max(10, max((len(s) for s in solver_names), default=0) + 1)
+    col_w = max(10, max((len(s) for s in solver_names), default=0) + 3)
     global_max = max((c for by_solver in counts.values() for c in by_solver.values()), default=0)
     bar_w = col_w - 5  # leave room for " NNN"
 
