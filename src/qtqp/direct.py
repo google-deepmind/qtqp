@@ -360,87 +360,22 @@ class ScipyDenseSolver(LinearSolver):
     return "csr"
 
 
-def _load_mkl_lapack():
-  """Try to load dsytrf/dsytrs from MKL runtime via ctypes.
-
-  Returns (dsytrf, dsytrs) callables, or None if MKL is not available.
-  MKL's symmetric indefinite kernels are much faster than OpenBLAS's,
-  so we prefer them when available.
-  """
-  import ctypes  # pylint: disable=g-import-not-at-top
-  import ctypes.util  # pylint: disable=g-import-not-at-top
-  import sys  # pylint: disable=g-import-not-at-top
-
-  # Try to find the MKL runtime library.
-  for name in ("mkl_rt", "libmkl_rt"):
-    path = ctypes.util.find_library(name)
-    if path:
-      break
-  else:
-    # Try common paths when find_library fails.
-    import os  # pylint: disable=g-import-not-at-top
-    conda_prefix = os.environ.get("CONDA_PREFIX", "")
-    if sys.platform == "linux":
-      candidates = [os.path.join(conda_prefix, "lib", "libmkl_rt.so")]
-    elif sys.platform == "darwin":
-      candidates = [os.path.join(conda_prefix, "lib", "libmkl_rt.dylib")]
-    elif sys.platform == "win32":
-      candidates = [os.path.join(conda_prefix, "Library", "bin", "mkl_rt.dll")]
-    else:
-      candidates = []
-    path = next((c for c in candidates if os.path.exists(c)), None)
-
-  if path is None:
-    return None
-
-  try:
-    mkl = ctypes.CDLL(path)
-  except OSError:
-    return None
-
-  # We use the LAPACKE (row-major C interface) for simpler ctypes calling.
-  # LAPACK_COL_MAJOR = 102
-  try:
-    _dsytrf = mkl.LAPACKE_dsytrf
-    _dsytrs = mkl.LAPACKE_dsytrs
-  except AttributeError:
-    return None
-
-  _dsytrf.restype = ctypes.c_int
-  _dsytrs.restype = ctypes.c_int
-  return _dsytrf, _dsytrs
-
-
 class DenseLdltSolver(LinearSolver):
   """Dense symmetric indefinite (Bunch-Kaufman LDLT) solver via LAPACK.
 
   The KKT matrix is symmetric indefinite, so LDLT (dsytrf/dsytrs) needs
   roughly half the flops of general LU (dgetrf/dgetrs).  Otherwise follows
   the same buffer-reuse strategy as ScipyDenseSolver.
-
-  Attempts to use MKL's LAPACKE dsytrf/dsytrs when available (much faster
-  than OpenBLAS). Falls back to scipy's LAPACK wrappers otherwise.
   """
 
   def __init__(self):
-    import ctypes  # pylint: disable=g-import-not-at-top
+    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
 
+    self._dsytrf = lapack.dsytrf
+    self._dsytrs = lapack.dsytrs
     self._piv = None
     self._kkt_dense: np.ndarray | None = None
     self._ldl_dense: np.ndarray | None = None
-
-    mkl_funcs = _load_mkl_lapack()
-    if mkl_funcs is not None:
-      self._use_mkl = True
-      self._mkl_dsytrf, self._mkl_dsytrs = mkl_funcs
-      self._ctypes = ctypes
-      logging.info("DenseLdltSolver: using MKL LAPACKE dsytrf/dsytrs.")
-    else:
-      self._use_mkl = False
-      from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
-      self._dsytrf = lapack.dsytrf
-      self._dsytrs = lapack.dsytrs
-      logging.info("DenseLdltSolver: using scipy (OpenBLAS) dsytrf/dsytrs.")
 
   def factorize(self) -> None:
     if self._kkt_dense is None:
@@ -449,42 +384,14 @@ class DenseLdltSolver(LinearSolver):
     else:
       np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
       np.copyto(self._ldl_dense, self._kkt_dense)
-
-    if self._use_mkl:
-      n = self._ldl_dense.shape[0]
-      self._piv = np.empty(n, dtype=np.intc)
-      # LAPACK_COL_MAJOR=102, 'L'=76
-      info = self._mkl_dsytrf(
-          102, 76, n,
-          self._ldl_dense.ctypes.data_as(self._ctypes.c_void_p),
-          n,
-          self._piv.ctypes.data_as(self._ctypes.c_void_p),
-      )
-      if info != 0:
-        raise ValueError(f"MKL dsytrf failed with info={info}")
-    else:
-      self._ldl_dense, self._piv, _ = self._dsytrf(
-          self._ldl_dense, lower=True, overwrite_a=True
-      )
+    self._ldl_dense, self._piv, _ = self._dsytrf(
+        self._ldl_dense, lower=True, overwrite_a=True
+    )
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._kkt_dense @ x
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    if self._use_mkl:
-      n = self._ldl_dense.shape[0]
-      x = np.asfortranarray(rhs.copy())
-      info = self._mkl_dsytrs(
-          102, 76, n, 1,
-          self._ldl_dense.ctypes.data_as(self._ctypes.c_void_p),
-          n,
-          self._piv.ctypes.data_as(self._ctypes.c_void_p),
-          x.ctypes.data_as(self._ctypes.c_void_p),
-          n,
-      )
-      if info != 0:
-        raise ValueError(f"MKL dsytrs failed with info={info}")
-      return x
     x, _ = self._dsytrs(self._ldl_dense, self._piv, rhs, lower=True)
     return x
 
