@@ -245,7 +245,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             c = by_solver.get(s, 0)
             if c:
                 bw = max(1, round(c / global_max * bar_w))
-                bar = "\u2588" * bw
+                bar = "#" * bw
                 cell = f"{bar} {c}"
             else:
                 cell = ""
