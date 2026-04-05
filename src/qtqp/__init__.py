@@ -370,10 +370,11 @@ class QTQP:
       )
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
-      x += step_size_scale * alpha * d_x
-      y += step_size_scale * alpha * d_y
-      tau += step_size_scale * alpha * d_tau
-      s += step_size_scale * alpha * d_s
+      step = step_size_scale * alpha
+      x += step * d_x
+      y += step * d_y
+      tau += step * d_tau
+      s += step * d_s
 
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
