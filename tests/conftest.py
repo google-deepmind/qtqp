@@ -97,7 +97,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     # ---------------------------------------------------------------
     # Per-solver + problem-type breakdown
     # ---------------------------------------------------------------
-    terminalreporter.section("QTQP Per-Solver Statistics")
+    terminalreporter.section("QTQP Per-Solver Statistics (ordered by total time, fastest first)")
 
     types = ['feasible', 'infeasible', 'unbounded']
     fmt2 = "{:<15} {:<12} | {:>6} | {:>9} | {:>9} | {:>11} | {:>11} | {:>11}"
@@ -170,7 +170,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not all_times_flat:
         return
 
-    terminalreporter.section("QTQP Solve Time Distribution")
+    terminalreporter.section("QTQP Solve Time Distribution (ordered by total time, fastest first)")
 
     solver_names = solver_order
 
