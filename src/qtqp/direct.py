@@ -360,6 +360,87 @@ class ScipyDenseSolver(LinearSolver):
     return "csr"
 
 
+class DenseLdltSolver(LinearSolver):
+  """Dense symmetric indefinite (Bunch-Kaufman LDLT) solver via LAPACK.
+
+  The KKT matrix is symmetric indefinite, so LDLT (dsytrf/dsytrs) needs
+  roughly half the flops of general LU (dgetrf/dgetrs).  Otherwise follows
+  the same buffer-reuse strategy as ScipyDenseSolver.
+  """
+
+  def __init__(self):
+    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
+
+    self._dsytrf = lapack.dsytrf
+    self._dsytrs = lapack.dsytrs
+    self._piv = None
+    self._kkt_dense: np.ndarray | None = None
+    self._ldl_dense: np.ndarray | None = None
+
+  def factorize(self) -> None:
+    if self._kkt_dense is None:
+      self._kkt_dense = np.asfortranarray(self._kkt.toarray())
+      self._ldl_dense = self._kkt_dense.copy(order="F")
+    else:
+      np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
+      np.copyto(self._ldl_dense, self._kkt_dense)
+    self._ldl_dense, self._piv, _ = self._dsytrf(
+        self._ldl_dense, lower=True, overwrite_a=True
+    )
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt_dense @ x
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    x, _ = self._dsytrs(self._ldl_dense, self._piv, rhs, lower=True)
+    return x
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
+
+
+class CupyDenseSolver(LinearSolver):
+  """Dense LU solver on GPU via cupy (cuSOLVER).
+
+  Transfers the KKT matrix to GPU once and updates only the diagonal each
+  iteration.  Uses cupyx.lapack for direct getrf/getrs calls.
+  """
+
+  def __init__(self):
+    import cupy  # pylint: disable=g-import-not-at-top
+    import cupyx.lapack  # pylint: disable=g-import-not-at-top
+
+    self._cp = cupy
+    self._lapack = cupyx.lapack
+    self._kkt_gpu: cupy.ndarray | None = None
+    self._lu_gpu: cupy.ndarray | None = None
+    self._piv_gpu: cupy.ndarray | None = None
+
+  def factorize(self) -> None:
+    cp = self._cp
+    if self._kkt_gpu is None:
+      self._kkt_gpu = cp.asfortranarray(cp.asarray(self._kkt.toarray()))
+      self._lu_gpu = self._kkt_gpu.copy(order="F")
+    else:
+      diag_idx = cp.arange(self._kkt_gpu.shape[0])
+      self._kkt_gpu[diag_idx, diag_idx] = cp.asarray(self._kkt.diagonal())
+      cp.copyto(self._lu_gpu, self._kkt_gpu)
+    self._piv_gpu = cp.empty(self._kkt_gpu.shape[0], dtype=cp.int32)
+    self._lapack.getrf(self._lu_gpu, self._piv_gpu)
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt_gpu.get() @ x
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    cp = self._cp
+    rhs_gpu = cp.asfortranarray(cp.asarray(rhs.reshape(-1, 1)))
+    self._lapack.getrs(self._lu_gpu, self._piv_gpu, rhs_gpu)
+    return rhs_gpu.get().ravel()
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
+
+
 class DirectKktSolver:
   """Direct KKT linear system solver with iterative refinement.
 

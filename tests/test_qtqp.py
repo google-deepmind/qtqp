@@ -24,12 +24,14 @@ from scipy import sparse
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
     qtqp.LinearSolver.SCIPY_DENSE,
+    qtqp.LinearSolver.DENSE_LDLT,
     qtqp.LinearSolver.UMFPACK,
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
     # Requires GPU:
     # qtqp.LinearSolver.CUDSS,
+    # qtqp.LinearSolver.CUPY_DENSE,
 ]
 
 # Only run PARDISO on linux for now.
