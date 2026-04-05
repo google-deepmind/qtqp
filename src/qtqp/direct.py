@@ -73,10 +73,14 @@ class MklPardisoSolver(LinearSolver):
       )
       # iparm(12)=1: improved accuracy via symmetric weighted matching.
       # iparm(24)=1: two-level parallel factorization algorithm.
+      # iparm(25)=2: parallel forward/backward substitution.
+      #   Not yet in pydiso's settable whitelist, see:
+      #   https://github.com/simpeg/pydiso/issues/XX
       # Note: these are set after __init__ (which calls analyze+factor),
       # so they only take effect from the second factorization onward.
       self.factorization.set_iparm(12, 1)
       self.factorization.set_iparm(24, 1)
+      # self.factorization.set_iparm(25, 2)
     else:
       self.factorization.refactor(self._kkt)
 
