@@ -240,6 +240,57 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   _assert_unbounded(solution, a, c, p, z)
 
 
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 6042 + np.arange(3))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_solve_large(equilibrate, seed, linear_solver, record_iterations):
+  """Test solver on larger instances (1000x600) to stress backends."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 1000, 600, 60
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+  )
+
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 6142 + np.arange(3))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_infeasible_large(equilibrate, seed, linear_solver, record_iterations):
+  """Test infeasible detection on larger instances (1000x600)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 1000, 600, 60
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+  )
+
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
+  _assert_infeasible(solution, a, b, z)
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', list(6242 + np.arange(3)))
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_unbounded_large(equilibrate, seed, linear_solver, record_iterations):
+  """Test unbounded detection on larger instances (1000x600)."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 1000, 600, 60
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+  )
+
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
+  _assert_unbounded(solution, a, c, p, z)
+
+
 def test_raise_error_no_positive_constraints():
   """Test that an error is raised when z >= m."""
   rng = np.random.default_rng(442)

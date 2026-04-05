@@ -89,6 +89,11 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not per_solver:
         return
 
+    # Sort solvers by total solve time (fastest first).
+    def _total_time(name):
+        return sum(e['time'] for e in per_solver[name] if e['time'] is not None)
+    solver_order = sorted(per_solver.keys(), key=_total_time)
+
     # ---------------------------------------------------------------
     # Per-solver + problem-type breakdown
     # ---------------------------------------------------------------
@@ -102,7 +107,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     ))
     terminalreporter.write_line("-" * 95)
 
-    for solver_name in sorted(per_solver.keys()):
+    for solver_name in solver_order:
         entries = per_solver[solver_name]
 
         for ptype in types + ['ALL']:
@@ -167,7 +172,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     terminalreporter.section("QTQP Solve Time Distribution")
 
-    solver_names = sorted(per_solver.keys())
+    solver_names = solver_order
 
     # Build count matrix: counts[bin_label][solver_name] = count
     counts = {}
