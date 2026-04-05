@@ -429,7 +429,7 @@ class CupyDenseSolver(LinearSolver):
     self._lapack.getrf(self._lu_gpu, self._piv_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._kkt_gpu.get() @ x
+    return (self._kkt_gpu @ self._cp.asarray(x)).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     cp = self._cp
