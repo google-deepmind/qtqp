@@ -252,11 +252,9 @@ class CuDssSolver(LinearSolver):
     self._solver: nvmath.sparse.advanced.DirectSolver | None = None
     # GPU sparse matrix and vector buffer for matvec.
     self._kkt_gpu = None
-    self._kkt_nan_idxs = None
     self._x_gpu: cupy.ndarray | None = None
 
   def factorize(self):
-    cp = self._cp
     cp = self._cp
     if self._solver is None:
       sparse_system_type = (
