@@ -71,11 +71,14 @@ class MklPardisoSolver(LinearSolver):
       self.factorization = self.mkl_solver.MKLPardisoSolver(
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
-      # Recommended iparms for IPMs from Pardiso docs.
-      # These only affect the analysis step so should be set before __init__,
-      # but this is not currently possible with the current interface.
-      self.factorization.set_iparm(10, 1)
+      # iparm(12)=1: improved accuracy via symmetric weighted matching.
+      # iparm(23)=1: two-level parallel factorization algorithm.
+      # iparm(24)=1: two-level parallel forward/backward substitution.
+      # Note: these are set after __init__ (which calls analyze+factor),
+      # so they only take effect from the second factorization onward.
       self.factorization.set_iparm(12, 1)
+      self.factorization.set_iparm(23, 1)
+      self.factorization.set_iparm(24, 1)
     else:
       self.factorization.refactor(self._kkt)
 
