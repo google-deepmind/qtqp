@@ -242,12 +242,22 @@ class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving."""
 
   def __init__(self):
+    import cupy  # pylint: disable=g-import-not-at-top
+    import cupyx.scipy.sparse  # pylint: disable=g-import-not-at-top
     import nvmath  # pylint: disable=g-import-not-at-top
 
+    self._cp = cupy
+    self._cp_sparse = cupyx.scipy.sparse
     self.nvmath = nvmath
     self._solver: nvmath.sparse.advanced.DirectSolver | None = None
+    # GPU sparse matrix and vector buffer for matvec.
+    self._kkt_gpu = None
+    self._kkt_nan_idxs = None
+    self._x_gpu: cupy.ndarray | None = None
 
   def factorize(self):
+    cp = self._cp
+    cp = self._cp
     if self._solver is None:
       sparse_system_type = (
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
@@ -264,10 +274,20 @@ class CuDssSolver(LinearSolver):
           self._kkt, dummy_rhs, options=options
       )
       self._solver.plan()
+      # Transfer sparse KKT to GPU for matvec.
+      self._kkt_gpu = self._cp_sparse.csr_matrix(self._kkt)
+      self._x_gpu = cp.empty(self._kkt.shape[1], dtype=cp.float64)
     else:
       self._solver.reset_operands(a=self._kkt)
+      # Update the sparse data array on GPU (only diagonal values change
+      # between iterations but they're scattered in the CSR data array).
+      self._kkt_gpu.data.set(self._kkt.data)
 
     self._solver.factorize()
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    self._x_gpu.set(x)
+    return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     # Ensure RHS is Fortran contiguous for cuDSS expected input format
