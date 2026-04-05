@@ -454,10 +454,11 @@ class DenseLdltSolver(LinearSolver):
 class CupyDenseSolver(LinearSolver):
   """Dense LU solver on GPU via cupy (cuSOLVER).
 
-  Transfers the KKT matrix to GPU once and updates only the diagonal each
-  iteration.  Uses cupyx.lapack for direct getrf/getrs calls.  All
-  reusable GPU buffers (pivot array, vector temporaries) are allocated
-  once and reused across iterations to avoid per-call allocations.
+  Converts the sparse KKT to a dense GPU matrix once and updates only the
+  n+m diagonal entries each iteration (the only values that change).  Uses
+  cupyx.lapack for direct getrf/getrs calls.  getrf overwrites the matrix
+  with L/U factors, so a separate _lu_gpu buffer is maintained for the
+  factored form while _kkt_gpu stays pristine for matvec.
   """
 
   def __init__(self):
@@ -469,25 +470,39 @@ class CupyDenseSolver(LinearSolver):
     self._kkt_gpu: cupy.ndarray | None = None
     self._lu_gpu: cupy.ndarray | None = None
     self._piv_gpu: cupy.ndarray | None = None
-    self._diag_idx: cupy.ndarray | None = None
+    self._dense_diag_idx: cupy.ndarray | None = None  # arange(n) for dense diagonal
+    # Indices of diagonal entries in the sparse CSR data array.
+    self._sparse_diag_idx_cpu: np.ndarray | None = None
     # Pre-allocated GPU buffers for matvec and solve.
     self._x_gpu: cupy.ndarray | None = None
     self._rhs_gpu: cupy.ndarray | None = None
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Transfers diagonal updates to GPU; does not retain the CPU matrix."""
+    if self._kkt_gpu is None:
+      # First call: convert full sparse matrix to dense on GPU.
+      self._kkt_gpu = self._cp.asfortranarray(
+          self._cp.asarray(kkt.toarray())
+      )
+      # Cache the NaN sentinel positions in the sparse data array so we
+      # can extract just the diagonal values on subsequent calls.
+      self._sparse_diag_idx_cpu = np.where(np.isnan(kkt.data))[0]
+    else:
+      # Transfer only the n+m diagonal values that changed.
+      self._kkt_gpu[self._dense_diag_idx, self._dense_diag_idx] = (
+          self._cp.asarray(kkt.data[self._sparse_diag_idx_cpu])
+      )
+
   def factorize(self) -> None:
     cp = self._cp
-    if self._kkt_gpu is None:
-      self._kkt_gpu = cp.asfortranarray(cp.asarray(self._kkt.toarray()))
-      self._lu_gpu = self._kkt_gpu.copy(order="F")
+    if self._lu_gpu is None:
       n = self._kkt_gpu.shape[0]
-      self._diag_idx = cp.arange(n)
+      self._lu_gpu = self._kkt_gpu.copy(order="F")
+      self._dense_diag_idx = cp.arange(n)
       self._piv_gpu = cp.empty(n, dtype=cp.int32)
       self._x_gpu = cp.empty(n, dtype=cp.float64)
       self._rhs_gpu = cp.empty((n, 1), dtype=cp.float64, order="F")
     else:
-      self._kkt_gpu[self._diag_idx, self._diag_idx] = cp.asarray(
-          self._kkt.diagonal()
-      )
       cp.copyto(self._lu_gpu, self._kkt_gpu)
     self._lapack.getrf(self._lu_gpu, self._piv_gpu)
 
