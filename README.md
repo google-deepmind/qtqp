@@ -270,7 +270,7 @@ cuDSS uses a GPU accelerated sparse direct solver (requires a GPU). To install
 ```bash
 python -m pip install nvidia-cudss-cu12
 python -m pip install nvmath-python[cu12]
-pip install cupy-cuda12x
+python -m pip install cupy-cuda12x
 ```
 
 #### cupy dense GPU: `qtqp.LinearSolver.CUPY_DENSE`
@@ -278,7 +278,7 @@ pip install cupy-cuda12x
 Dense LU factorization on GPU via cuSOLVER (requires a GPU). To install
 
 ```bash
-pip install cupy-cuda12x
+python -m pip install cupy-cuda12x
 ```
 
 ## Citing this work
