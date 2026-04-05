@@ -480,7 +480,7 @@ class DenseLdltSolver(LinearSolver):
           n,
           self._piv.ctypes.data_as(self._ctypes.c_void_p),
           x.ctypes.data_as(self._ctypes.c_void_p),
-          1,
+          n,
       )
       if info != 0:
         raise ValueError(f"MKL dsytrs failed with info={info}")
