@@ -15,28 +15,45 @@
 """Direct KKT linear system solvers."""
 
 import logging
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 import numpy as np
 import scipy.sparse as sp
 
 
-class LinearSolver(Protocol):
-  """Protocol defining the interface for linear solvers."""
+class LinearSolver:
+  """Base class for KKT linear system solvers.
 
-  def update(self, kkt: sp.spmatrix) -> None:
-    """Factorizes or refactorizes the KKT matrix."""
-    ...
+  To add a new solver, subclass this and implement factorize, solve, and format.
+  set_kkt, __matmul__, and free are provided; override __matmul__ for a more
+  efficient matvec (e.g. a pre-allocated dense array).
+  """
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Stores the KKT matrix; called by DirectKktSolver before factorize."""
+    self._kkt = kkt
+
+  def factorize(self) -> None:
+    """Factorizes the stored KKT matrix (with regularized diagonals).
+
+    DirectKktSolver applies a diagonal correction during iterative refinement
+    to account for the difference between regularized and true diagonals,
+    so implementations only need to factorize kkt as given.
+    """
+    raise NotImplementedError
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Solves the linear system."""
-    ...
+    """Solves the factorized system for the given right-hand side."""
+    raise NotImplementedError
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt @ x
 
   def format(self) -> str:
-    """Returns the expected sparse matrix format (eg, 'csc' or 'csr')."""
-    ...
+    """Preferred sparse format for the KKT scaffold ('csc' or 'csr')."""
+    raise NotImplementedError
 
-  def free(self):
+  def free(self) -> None:
     pass
 
 
@@ -49,10 +66,10 @@ class MklPardisoSolver(LinearSolver):
     self.mkl_solver = pydiso.mkl_solver
     self.factorization: pydiso.mkl_solver.MKLPardisoSolver | None = None
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     if self.factorization is None:
       self.factorization = self.mkl_solver.MKLPardisoSolver(
-          kkt, matrix_type="real_symmetric_indefinite"
+          self._kkt, matrix_type="real_symmetric_indefinite"
       )
       # Recommended iparms for IPMs from Pardiso docs.
       # These only affect the analysis step so should be set before __init__,
@@ -60,7 +77,7 @@ class MklPardisoSolver(LinearSolver):
       self.factorization.set_iparm(10, 1)
       self.factorization.set_iparm(12, 1)
     else:
-      self.factorization.refactor(kkt)
+      self.factorization.refactor(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
@@ -85,11 +102,11 @@ class QdldlSolver(LinearSolver):
     self.qdldl = qdldl
     self.factorization: qdldl.Solver | None = None
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     if self.factorization is None:
-      self.factorization = self.qdldl.Solver(kkt)
+      self.factorization = self.qdldl.Solver(self._kkt)
     else:
-      self.factorization.update(kkt)
+      self.factorization.update(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization.solve(rhs)
@@ -104,9 +121,8 @@ class ScipySolver(LinearSolver):
   def __init__(self):
     self.factorization = None
 
-  def update(self, kkt: sp.spmatrix):
-    # Use to_csc() to ensure correct format, though usually it's a cheap view.
-    self.factorization = sp.linalg.factorized(kkt.tocsc())
+  def factorize(self):
+    self.factorization = sp.linalg.factorized(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
@@ -124,11 +140,11 @@ class CholModSolver(LinearSolver):
     self.cholmod = sksparse.cholmod
     self.factorization: sksparse.cholmod.CholeskyFactor | None = None
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     if self.factorization is None:
-      self.factorization = self.cholmod.cholesky(kkt, mode="simplicial")
+      self.factorization = self.cholmod.cholesky(self._kkt, mode="simplicial")
     else:
-      self.factorization.cholesky_inplace(kkt)
+      self.factorization.cholesky_inplace(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
@@ -146,12 +162,12 @@ class EigenSolver(LinearSolver):
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     if self._solver is None:
       self._solver = self.nanoeigenpy.SimplicialLDLT()
-      self._solver.analyzePattern(kkt)
+      self._solver.analyzePattern(self._kkt)
 
-    self._solver.factorize(kkt)
+    self._solver.factorize(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self._solver.solve(rhs)
@@ -177,9 +193,9 @@ class MumpsSolver(LinearSolver):
     # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
     self.ksp.setFromOptions()
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     kkt_wrapper = self.PETSc.Mat().createAIJ(
-        size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
+        size=self._kkt.shape, csr=(self._kkt.indptr, self._kkt.indices, self._kkt.data)
     )
     kkt_wrapper.setOption(self.PETSc.Mat.Option.SYMMETRIC, True)
     kkt_wrapper.setOption(self.PETSc.Mat.Option.SPD, False)
@@ -226,7 +242,7 @@ class CuDssSolver(LinearSolver):
     self.nvmath = nvmath
     self._solver: nvmath.sparse.advanced.DirectSolver | None = None
 
-  def update(self, kkt: sp.spmatrix):
+  def factorize(self):
     if self._solver is None:
       sparse_system_type = (
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
@@ -238,13 +254,13 @@ class CuDssSolver(LinearSolver):
           sparse_system_type=sparse_system_type, logger=logger
       )
       # RHS must be in column major order (Fortran) for cuDSS.
-      dummy_rhs = np.empty(kkt.shape[1], order="F", dtype=np.float64)
+      dummy_rhs = np.empty(self._kkt.shape[1], order="F", dtype=np.float64)
       self._solver = self.nvmath.sparse.advanced.DirectSolver(
-          kkt, dummy_rhs, options=options
+          self._kkt, dummy_rhs, options=options
       )
       self._solver.plan()
     else:
-      self._solver.reset_operands(a=kkt)
+      self._solver.reset_operands(a=self._kkt)
 
     self._solver.factorize()
 
@@ -265,6 +281,83 @@ class CuDssSolver(LinearSolver):
       # Force clean up any 'zombie' references, in order to avoid cuda errors.
       import gc  # pylint: disable=g-import-not-at-top
       gc.collect(0)  # Run GC only on the youngest generation.
+
+
+class UmfpackSolver(LinearSolver):
+  """Wrapper around UMFPACK (via scikit-umfpack) for LU factorization.
+
+  Unlike ScipySolver (scipy SuperLU), UMFPACK separates symbolic and numeric
+  factorization phases. Symbolic analysis runs only on the first call since the
+  sparsity pattern is fixed across IPM iterations; subsequent calls redo only
+  the cheaper numeric factorization.
+  """
+
+  def __init__(self):
+    import scikits.umfpack as umfpack  # pylint: disable=g-import-not-at-top
+
+    self._umfpack = umfpack
+    self._ctx = umfpack.UmfpackContext("di")
+    self._symbolic_done = False
+
+  def factorize(self):
+    if not self._symbolic_done:
+      self._ctx.symbolic(self._kkt)
+      self._symbolic_done = True
+    self._ctx.numeric(self._kkt)
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    return self._ctx.solve(self._umfpack.UMFPACK_A, self._kkt, rhs, autoTranspose=True)
+
+  def format(self) -> Literal["csc"]:
+    return "csc"
+
+
+class ScipyDenseSolver(LinearSolver):
+  """Dense LU solver via LAPACK for small KKT systems.
+
+  For small problems (n+m < ~200), avoids the overhead of sparse data
+  structures (symbolic analysis, CSC index arrays, indirect memory access)
+  that dominates over actual arithmetic in sparse solvers.
+
+  Calls LAPACK (dgetrf/dgetrs) directly with cached function handles to avoid
+  per-call Python wrapper overhead (input validation, lapack func lookup) in
+  scipy.linalg.lu_factor/lu_solve, which dominates for tiny matrices.
+
+  Two Fortran-order buffers are kept: _kkt_dense holds the original matrix
+  values for the matvec; _lu_dense is a copy that dgetrf overwrites in-place
+  with the LU factors (overwrite_a=True avoids a per-call allocation).
+  """
+
+  def __init__(self):
+    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
+
+    # Cache function handles to avoid per-call get_lapack_funcs lookup.
+    self._dgetrf = lapack.dgetrf
+    self._dgetrs = lapack.dgetrs
+    self._piv = None
+    self._kkt_dense: np.ndarray | None = None
+    self._lu_dense: np.ndarray | None = None
+
+  def factorize(self) -> None:
+    if self._kkt_dense is None:
+      # Fortran order so dgetrf can overwrite in-place without an internal copy.
+      self._kkt_dense = np.asfortranarray(self._kkt.toarray())
+      self._lu_dense = self._kkt_dense.copy(order="F")
+    else:
+      # Only the diagonal changes each IPM iteration; off-diagonal blocks are fixed.
+      np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
+      np.copyto(self._lu_dense, self._kkt_dense)
+    self._lu_dense, self._piv, _ = self._dgetrf(self._lu_dense, overwrite_a=True)
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt_dense @ x
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    x, _ = self._dgetrs(self._lu_dense, self._piv, rhs)
+    return x
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
 
 
 class DirectKktSolver:
@@ -333,46 +426,45 @@ class DirectKktSolver:
     self._kkt_nan_idxs = np.isnan(self._kkt.data)  # Sentinel positions to update.
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
-    self._kkt_diags = np.empty(self.n + self.m, dtype=np.float64)  # [p_diags+mu, s/y+mu]
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)
     self._reg_diags = np.empty(self.n + self.m, dtype=np.float64)
     self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
+    self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
 
-    This method employs an optimization to avoid copying the full sparse KKT
-    matrix. It temporarily injects the regularized diagonals for the solver,
-    then immediately restores the true diagonals for residual calculation.
+    Computes regularized diagonals (clamped to min_static_regularization) for
+    numerical stability, and stores the difference from the true diagonals as
+    diag_correction. This correction is applied during iterative refinement so
+    that the solver converges to the solution of the true (unregularized) system.
 
     Args:
       mu: The barrier parameter.
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
-    # Fill KKT diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
+    # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    self._kkt_diags[: self.n] = self._p_diags + mu
-    self._kkt_diags[self.n : self.n + self.z] = mu
-    self._kkt_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
+    self._true_diags[: self.n] = self._p_diags + mu
+    self._true_diags[self.n : self.n + self.z] = mu
+    self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
-    # "True" diagonals for accurate residual calculation (no regularization).
-    np.copyto(self._true_diags, self._kkt_diags)
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
     # Flip the sign of the cone variables.
     self._true_diags[self.n :] *= -1.0
     self._reg_diags[self.n :] *= -1.0
 
-    # Inject regularized diagonals so the factorization is numerically stable,
-    # then immediately restore the true (unregularized) diagonals. This means
-    # the stored kkt matrix reflects the exact problem, so residuals computed
-    # during iterative refinement (kkt_rhs - kkt @ sol) measure the true error.
-    # Refinement then implicitly corrects for the regularization bias introduced
-    # by the factorization, converging to the unregularized solution.
+    # Inject regularized diagonals and factorize. The solver sees one consistent
+    # matrix throughout. During iterative refinement, DirectKktSolver adds
+    # diag_correction * sol to the residual to account for the difference
+    # between the regularized matrix (used for factorization and matvec) and
+    # the true matrix (whose solution we seek), converging to the exact answer.
     self._kkt.data[self._kkt_nan_idxs] = self._reg_diags
-    self._solver.update(self._kkt)
-    self._kkt.data[self._kkt_nan_idxs] = self._true_diags
+    self._solver.set_kkt(self._kkt)
+    self._solver.factorize()
+    np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
@@ -404,8 +496,12 @@ class DirectKktSolver:
     tolerance = self._atol + self._rtol * np.linalg.norm(self._kkt_rhs, np.inf)
 
     # Initial sol and residual.
+    # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
+    #   kkt_true @ sol = kkt_reg @ sol - diag_correction @ sol
+    # so residual = kkt_rhs - kkt_reg @ sol + diag_correction * sol.
+    # self._solver @ sol computes kkt_reg @ sol (using the factorized matrix).
     sol = warm_start.copy()
-    residual = self._kkt_rhs - self._kkt @ sol
+    residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -415,7 +511,7 @@ class DirectKktSolver:
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
       sol += self._solver.solve(residual)
-      residual = self._kkt_rhs - self._kkt @ sol
+      residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.
