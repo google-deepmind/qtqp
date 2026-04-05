@@ -1,4 +1,3 @@
-import math
 import pytest
 from collections import defaultdict
 
@@ -54,23 +53,6 @@ _TIME_BINS = [
     (float('inf'), '>1s'),
 ]
 
-def _bin_times(times):
-    """Bucket a list of times into log-scale bins. Returns list of (label, count)."""
-    counts = [0] * len(_TIME_BINS)
-    for t in times:
-        for i, (upper, _) in enumerate(_TIME_BINS):
-            if t < upper:
-                counts[i] += 1
-                break
-    return [(label, c) for (_, label), c in zip(_TIME_BINS, counts) if c > 0]
-
-def _bar(count, max_count, max_width=20):
-    """Render a proportional bar."""
-    if max_count == 0:
-        return ''
-    width = max(1, round(count / max_count * max_width))
-    return '\u2588' * width
-
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     stats = config.solver_stats
@@ -80,9 +62,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     # --- Per-test summary (existing) ---
     terminalreporter.section("QTQP Solver Iteration Statistics")
 
-    fmt = "{:<25} | {:<10} | {:<10} | {:<10}"
+    name_width = max(len("Test Name"), max((len(n) for n in stats), default=0))
+    fmt = "{:<" + str(name_width) + "} | {:<10} | {:<10} | {:<10}"
     terminalreporter.write_line(fmt.format("Test Name", "Count", "Avg Iter", "Max Iter"))
-    terminalreporter.write_line("-" * 65)
+    terminalreporter.write_line("-" * (name_width + 40))
 
     all_iterations = []
     for name, values in sorted(stats.items()):
@@ -91,7 +74,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         maximum = max(values)
         terminalreporter.write_line(fmt.format(name, len(values), f"{avg:.2f}", maximum))
 
-    terminalreporter.write_line("-" * 65)
+    terminalreporter.write_line("-" * (name_width + 40))
     if all_iterations:
         total_avg = sum(all_iterations) / len(all_iterations)
         total_max = max(all_iterations)
@@ -170,7 +153,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         ))
 
     # ---------------------------------------------------------------
-    # Solve-time histogram per solver
+    # Solve-time histogram: vertical layout (one row per time bucket,
+    # solvers as columns) for easy cross-solver comparison.
     # ---------------------------------------------------------------
     all_times_flat = [e['time'] for entries in per_solver.values()
                       for e in entries if e['time'] is not None]
@@ -179,20 +163,44 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     terminalreporter.section("QTQP Solve Time Distribution")
 
-    # Find the global max bucket count for consistent bar scaling.
-    solver_buckets = {}
-    global_max = 0
-    for solver_name in sorted(per_solver.keys()):
-        times = [e['time'] for e in per_solver[solver_name] if e['time'] is not None]
-        if times:
-            buckets = _bin_times(times)
-            solver_buckets[solver_name] = buckets
-            for _, c in buckets:
-                global_max = max(global_max, c)
+    solver_names = sorted(per_solver.keys())
 
-    for solver_name, buckets in solver_buckets.items():
-        parts = []
-        for label, count in buckets:
-            bar = _bar(count, global_max, max_width=20)
-            parts.append(f"[{label:>7}] {bar} {count}")
-        terminalreporter.write_line(f"{solver_name:<15} {'   '.join(parts)}")
+    # Build count matrix: counts[bin_label][solver_name] = count
+    counts = {}
+    for solver_name in solver_names:
+        times = [e['time'] for e in per_solver[solver_name] if e['time'] is not None]
+        bin_counts = [0] * len(_TIME_BINS)
+        for t in times:
+            for i, (upper, _) in enumerate(_TIME_BINS):
+                if t < upper:
+                    bin_counts[i] += 1
+                    break
+        for (_, label), c in zip(_TIME_BINS, bin_counts):
+            counts.setdefault(label, {})[solver_name] = c
+
+    # Determine column width from solver names (min 10 for the bar+count).
+    col_w = max(10, max((len(s) for s in solver_names), default=0) + 1)
+    global_max = max((c for by_solver in counts.values() for c in by_solver.values()), default=0)
+    bar_w = col_w - 5  # leave room for " NNN"
+
+    # Header row with solver names.
+    header = f"{'':>10}" + "".join(f"{s:>{col_w}}" for s in solver_names)
+    terminalreporter.write_line(header)
+    terminalreporter.write_line("-" * len(header))
+
+    # One row per time bucket.
+    for _, label in _TIME_BINS:
+        by_solver = counts.get(label, {})
+        if not any(by_solver.get(s, 0) for s in solver_names):
+            continue
+        cells = []
+        for s in solver_names:
+            c = by_solver.get(s, 0)
+            if c:
+                bw = max(1, round(c / global_max * bar_w))
+                bar = "\u2588" * bw
+                cell = f"{bar} {c}"
+            else:
+                cell = ""
+            cells.append(f"{cell:>{col_w}}")
+        terminalreporter.write_line(f"{label:>10}" + "".join(cells))
