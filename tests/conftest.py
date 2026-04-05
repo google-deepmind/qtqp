@@ -162,6 +162,44 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         ))
 
     # ---------------------------------------------------------------
+    # Size scaling table: standard vs large instances side by side.
+    # ---------------------------------------------------------------
+    def _is_large(e):
+        return '_large' in e['test']
+
+    has_large = any(_is_large(e) for entries in per_solver.values() for e in entries)
+    if has_large:
+        terminalreporter.section("QTQP Size Scaling (ordered by total time, fastest first)")
+
+        def _time_cols(entries):
+            times = sorted(e['time'] for e in entries if e['time'] is not None)
+            if not times:
+                return f"{'n/a':>10} {'n/a':>10} {'n/a':>10}"
+            med = times[len(times) // 2]
+            return f"{med:>10.2e} {max(times):>10.2e} {sum(times):>10.2e}"
+
+        hdr = (
+            f"{'Solver':<15} | {'--- standard instances ---':^32}"
+            f" | {'---- large instances ----':^32}"
+        )
+        sub = (
+            f"{'':15} | {'med':>10} {'max':>10} {'tot':>10}"
+            f" | {'med':>10} {'max':>10} {'tot':>10}"
+        )
+        terminalreporter.write_line(hdr)
+        terminalreporter.write_line(sub)
+        terminalreporter.write_line("-" * len(hdr))
+
+        for solver_name in solver_order:
+            entries = per_solver[solver_name]
+            std = [e for e in entries if not _is_large(e)]
+            lrg = [e for e in entries if _is_large(e)]
+            terminalreporter.write_line(
+                f"{solver_name:<15} | {_time_cols(std)}"
+                f" | {_time_cols(lrg)}"
+            )
+
+    # ---------------------------------------------------------------
     # Solve-time histogram: vertical layout (one row per time bucket,
     # solvers as columns) for easy cross-solver comparison.
     # ---------------------------------------------------------------
