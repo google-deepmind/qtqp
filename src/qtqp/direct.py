@@ -403,7 +403,9 @@ class CupyDenseSolver(LinearSolver):
   """Dense LU solver on GPU via cupy (cuSOLVER).
 
   Transfers the KKT matrix to GPU once and updates only the diagonal each
-  iteration.  Uses cupyx.lapack for direct getrf/getrs calls.
+  iteration.  Uses cupyx.lapack for direct getrf/getrs calls.  All
+  reusable GPU buffers (pivot array, vector temporaries) are allocated
+  once and reused across iterations to avoid per-call allocations.
   """
 
   def __init__(self):
@@ -415,27 +417,36 @@ class CupyDenseSolver(LinearSolver):
     self._kkt_gpu: cupy.ndarray | None = None
     self._lu_gpu: cupy.ndarray | None = None
     self._piv_gpu: cupy.ndarray | None = None
+    self._diag_idx: cupy.ndarray | None = None
+    # Pre-allocated GPU buffers for matvec and solve.
+    self._x_gpu: cupy.ndarray | None = None
+    self._rhs_gpu: cupy.ndarray | None = None
 
   def factorize(self) -> None:
     cp = self._cp
     if self._kkt_gpu is None:
       self._kkt_gpu = cp.asfortranarray(cp.asarray(self._kkt.toarray()))
       self._lu_gpu = self._kkt_gpu.copy(order="F")
+      n = self._kkt_gpu.shape[0]
+      self._diag_idx = cp.arange(n)
+      self._piv_gpu = cp.empty(n, dtype=cp.int32)
+      self._x_gpu = cp.empty(n, dtype=cp.float64)
+      self._rhs_gpu = cp.empty((n, 1), dtype=cp.float64, order="F")
     else:
-      diag_idx = cp.arange(self._kkt_gpu.shape[0])
-      self._kkt_gpu[diag_idx, diag_idx] = cp.asarray(self._kkt.diagonal())
+      self._kkt_gpu[self._diag_idx, self._diag_idx] = cp.asarray(
+          self._kkt.diagonal()
+      )
       cp.copyto(self._lu_gpu, self._kkt_gpu)
-    self._piv_gpu = cp.empty(self._kkt_gpu.shape[0], dtype=cp.int32)
     self._lapack.getrf(self._lu_gpu, self._piv_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return (self._kkt_gpu @ self._cp.asarray(x)).get()
+    self._x_gpu.set(x)
+    return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    cp = self._cp
-    rhs_gpu = cp.asfortranarray(cp.asarray(rhs.reshape(-1, 1)))
-    self._lapack.getrs(self._lu_gpu, self._piv_gpu, rhs_gpu)
-    return rhs_gpu.get().ravel()
+    self._rhs_gpu[:, 0].set(rhs)
+    self._lapack.getrs(self._lu_gpu, self._piv_gpu, self._rhs_gpu)
+    return self._rhs_gpu[:, 0].get()
 
   def format(self) -> Literal["csr"]:
     return "csr"
