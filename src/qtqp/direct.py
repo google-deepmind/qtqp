@@ -361,31 +361,31 @@ class ScipyDenseSolver(LinearSolver):
   """
 
   def __init__(self):
-    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
+    from scipy.linalg import lapack, blas  # pylint: disable=g-import-not-at-top
 
     self._dpotrf = lapack.dpotrf
     self._dpotrs = lapack.dpotrs
+    self._dsyrk = blas.dsyrk
+    self._dsymv = blas.dsymv
     self._n = 0
     self._m = 0
-
-    # Blocks extracted once from the KKT scaffold.
-    self._A: np.ndarray | None = None       # (m, n) dense
-    self._P_offdiag: np.ndarray | None = None  # (n, n) P with diagonal zeroed
-
-    # Per-iteration diagonal vectors.
-    self._R_x: np.ndarray | None = None     # (n,) positive
-    self._R_y: np.ndarray | None = None     # (m,) positive
-
-    # Factorization buffers (Fortran order for LAPACK).
-    self._G: np.ndarray | None = None       # (n, n)
-    self._chol: np.ndarray | None = None    # (n, n)
-
-    # Scratch buffer for scaled A (avoids per-iteration allocation).
-    self._A_scaled: np.ndarray | None = None  # (m, n)
 
   def set_dims(self, n: int, m: int, z: int) -> None:
     self._n = n
     self._m = m
+    # Blocks extracted once from the KKT scaffold (populated in first set_kkt).
+    self._A: np.ndarray | None = None         # (m, n) dense, C-order
+    self._P_offdiag: np.ndarray | None = None  # (n, n) P with diagonal zeroed, F-order
+
+    # Pre-allocate all per-iteration buffers.
+    self._R_x = np.empty(n, dtype=np.float64)
+    self._R_y = np.empty(m, dtype=np.float64)
+    self._G = np.empty((n, n), dtype=np.float64, order="F")
+    self._chol = np.empty((n, n), dtype=np.float64, order="F")
+    self._A_scaled = np.empty((m, n), dtype=np.float64, order="F")
+    self._diag_idx = np.diag_indices(n)
+    self._result = np.empty(n + m, dtype=np.float64)
+    self._g = np.empty(n, dtype=np.float64)
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     n, m = self._n, self._m
@@ -395,27 +395,24 @@ class ScipyDenseSolver(LinearSolver):
       P_block = kkt_dense[:n, :n].copy()
       np.fill_diagonal(P_block, 0.0)
       self._P_offdiag = np.asfortranarray(P_block)
-      self._G = np.empty((n, n), dtype=np.float64, order="F")
-      self._chol = np.empty((n, n), dtype=np.float64, order="F")
-      self._A_scaled = np.empty((m, n), dtype=np.float64)
     diag = kkt.diagonal()
-    self._R_x = diag[:n].copy()
-    self._R_y = (-diag[n:]).copy()
+    np.copyto(self._R_x, diag[:n])
+    np.negative(diag[n:], out=self._R_y)
 
   def factorize(self) -> None:
     # G = P_offdiag + diag(R_x) + A' diag(1/R_y) A
-    diag_idx = np.diag_indices_from(self._G)
     np.copyto(self._G, self._P_offdiag)
-    self._G[diag_idx] += self._R_x
+    self._G[self._diag_idx] += self._R_x
     np.multiply(self._A, (1.0 / np.sqrt(self._R_y))[:, None], out=self._A_scaled)
-    # Use A_scaled.T @ A_scaled for the rank-k update (calls BLAS dgemm).
-    self._G += self._A_scaled.T @ self._A_scaled
+    # Symmetric rank-k update: G += A_scaled.T @ A_scaled via BLAS dsyrk.
+    self._dsyrk(1.0, self._A_scaled, beta=1.0, c=self._G, trans=1,
+                lower=1, overwrite_c=True)
     # G is theoretically SPD but the rank-k update can introduce roundoff
     # that makes it very slightly indefinite (eigenvalue ~ -1e-8) when 1/R_y
     # spans many orders of magnitude.  A tiny relative perturbation fixes
     # this; iterative refinement (which uses the exact block matvec in
     # __matmul__) corrects for any factorization-level perturbation.
-    self._G[diag_idx] += 1e-14 * np.max(self._G[diag_idx])
+    self._G[self._diag_idx] += 1e-14 * np.max(self._G[self._diag_idx])
     np.copyto(self._chol, self._G)
     self._chol, info = self._dpotrf(self._chol, lower=True, overwrite_a=True)
     if info != 0:
@@ -424,8 +421,12 @@ class ScipyDenseSolver(LinearSolver):
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     n = self._n
     x_x, x_y = x[:n], x[n:]
-    result = np.empty_like(x)
-    result[:n] = self._P_offdiag @ x_x + self._R_x * x_x + self._A.T @ x_y
+    result = self._result
+    # result[:n] = P_offdiag @ x_x + R_x * x_x + A.T @ x_y
+    self._dsymv(1.0, self._P_offdiag, x_x, 0.0, result[:n], lower=1,
+                overwrite_y=1)
+    result[:n] += self._R_x * x_x
+    result[:n] += self._A.T @ x_y
     result[n:] = self._A @ x_x - self._R_y * x_y
     return result
 
@@ -433,11 +434,15 @@ class ScipyDenseSolver(LinearSolver):
     n = self._n
     inv_R_y = 1.0 / self._R_y
     # Reduced RHS: g = rhs_x + A' (R_y^{-1} rhs_y)
-    g = rhs[:n] + self._A.T @ (inv_R_y * rhs[n:])
+    g = self._g
+    np.copyto(g, rhs[:n])
+    g += self._A.T @ (inv_R_y * rhs[n:])
     x, _ = self._dpotrs(self._chol, g, lower=True)
     # Back-substitute: y = R_y^{-1} (A x - rhs_y)
-    y = inv_R_y * (self._A @ x - rhs[n:])
-    return np.concatenate([x, y])
+    result = self._result
+    result[:n] = x
+    np.multiply(inv_R_y, self._A @ x - rhs[n:], out=result[n:])
+    return result
 
   def format(self) -> Literal["csr"]:
     return "csr"
@@ -460,16 +465,18 @@ class CupyDenseSolver(LinearSolver):
     self._n = 0
     self._m = 0
 
-    self._A_gpu = None
-    self._P_offdiag_gpu = None
-    self._R_x_gpu = None
-    self._R_y_gpu = None
-    self._G_gpu = None
-    self._cho = None  # (cho, lower) tuple from cho_factor
-
   def set_dims(self, n: int, m: int, z: int) -> None:
+    cp = self._cp
     self._n = n
     self._m = m
+    self._A_gpu = None
+    self._P_offdiag_gpu = None
+    self._R_x_gpu = cp.empty(n, dtype=cp.float64)
+    self._R_y_gpu = cp.empty(m, dtype=cp.float64)
+    self._G_gpu = cp.empty((n, n), dtype=cp.float64)
+    self._diag_idx = cp.arange(n)
+    self._result_gpu = cp.empty(n + m, dtype=cp.float64)
+    self._cho = None  # (cho, lower) tuple from cho_factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     cp = self._cp
@@ -480,15 +487,14 @@ class CupyDenseSolver(LinearSolver):
       P_block = kkt_dense[:n, :n].copy()
       np.fill_diagonal(P_block, 0.0)
       self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
-      self._G_gpu = cp.empty((n, n), dtype=cp.float64)
     diag = kkt.diagonal()
-    self._R_x_gpu = cp.asarray(diag[:n])
-    self._R_y_gpu = cp.asarray(-diag[n:])
+    self._R_x_gpu.set(diag[:n])
+    self._R_y_gpu.set(-diag[n:])
 
   def factorize(self) -> None:
     cp = self._cp
+    idx = self._diag_idx
     cp.copyto(self._G_gpu, self._P_offdiag_gpu)
-    idx = cp.arange(self._n)
     self._G_gpu[idx, idx] += self._R_x_gpu
     A_scaled = self._A_gpu * (1.0 / cp.sqrt(self._R_y_gpu))[:, None]
     self._G_gpu += A_scaled.T @ A_scaled
@@ -501,7 +507,7 @@ class CupyDenseSolver(LinearSolver):
     n = self._n
     x_gpu = cp.asarray(x)
     x_x, x_y = x_gpu[:n], x_gpu[n:]
-    result = cp.empty(n + self._m, dtype=cp.float64)
+    result = self._result_gpu
     result[:n] = self._P_offdiag_gpu @ x_x + self._R_x_gpu * x_x + self._A_gpu.T @ x_y
     result[n:] = self._A_gpu @ x_x - self._R_y_gpu * x_y
     return cp.asnumpy(result)
@@ -513,10 +519,9 @@ class CupyDenseSolver(LinearSolver):
     inv_R_y = 1.0 / self._R_y_gpu
     g = rhs_gpu[:n] + self._A_gpu.T @ (inv_R_y * rhs_gpu[n:])
     x = self._linalg.cho_solve(self._cho, g)
-    y = inv_R_y * (self._A_gpu @ x - rhs_gpu[n:])
-    result = cp.empty(n + self._m, dtype=cp.float64)
+    result = self._result_gpu
     result[:n] = x
-    result[n:] = y
+    cp.multiply(inv_R_y, self._A_gpu @ x - rhs_gpu[n:], out=result[n:])
     return cp.asnumpy(result)
 
   def format(self) -> Literal["csr"]:
