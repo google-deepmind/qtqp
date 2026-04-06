@@ -72,10 +72,10 @@ class MklPardisoSolver(LinearSolver):
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
       # iparm(10): pivot perturbation exponent, perturbation = 10^(-iparm(10)).
-      #   Default for symmetric indefinite is 1 (10^-1) which is very loose.
-      #   We tighten to 10^-5 for better accuracy; going tighter (e.g. 8)
-      #   can cause zero-pivot errors on near-singular KKT systems that arise
-      #   during infeasibility/unboundedness detection.
+      #   Default for symmetric indefinite is 13 (10^-13).  We loosen to
+      #   10^-5 because near-singular KKT systems that arise during
+      #   infeasibility/unboundedness detection need more room; going
+      #   tighter (e.g. 8) causes zero-pivot errors on those systems.
       # iparm(12)=1: improved accuracy via symmetric weighted matching.
       # iparm(24)=1: two-level parallel factorization algorithm.
       # Note: these are set after __init__ (which calls analyze+factor),
