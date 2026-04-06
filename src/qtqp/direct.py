@@ -188,60 +188,103 @@ class EigenSolver(LinearSolver):
 
 
 class MumpsSolver(LinearSolver):
-  """Wrapper for MUMPS solver (via petsc4py)."""
+  """Wrapper for MUMPS solver (via petsc4py).
+
+  Creates a single PETSc Mat/KSP pair on the first factorize call and reuses
+  them across iterations.  Only the numeric values are updated each call;
+  the sparsity pattern (and MUMPS symbolic analysis) is computed once.
+  """
 
   def __init__(self):
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
-    self.PETSc = petsc4py.PETSc  # pylint: disable=invalid-name
-    self.ksp = self.PETSc.KSP().create()
-
-    # Configure as a direct solver (apply preconditioner only)
-    self.ksp.setType(self.PETSc.KSP.Type.PREONLY)
-    self.ksp.getPC().setType(self.PETSc.PC.Type.LU)
-    self.ksp.getPC().setFactorSolverType("mumps")
-
-    # Allow command-line customization (eg, -mat_mumps_icntl_14 20).
-    self.ksp.setFromOptions()
+    self._PETSc = petsc4py.PETSc
+    self._mat = None
+    self._ksp = None
+    self._b = None
+    self._x = None
 
   def factorize(self):
-    kkt_wrapper = self.PETSc.Mat().createAIJ(
-        size=self._kkt.shape, csr=(self._kkt.indptr, self._kkt.indices, self._kkt.data)
-    )
-    kkt_wrapper.setOption(self.PETSc.Mat.Option.SYMMETRIC, True)
-    kkt_wrapper.setOption(self.PETSc.Mat.Option.SPD, False)
-    kkt_wrapper.assemble()
+    PETSc = self._PETSc
+    kkt = self._kkt
 
-    # Check if KSP already has a matrix defined to determine the flag
-    already_factorized = self.ksp.getOperators()[0] is not None
-    if already_factorized:
-      flag = self.PETSc.Mat.Structure.SAME_NONZERO_PATTERN
+    if self._mat is None:
+      # First call: build PETSc Mat from CSR, configure KSP + MUMPS.
+      # createAIJWithArrays shares the scipy data buffer, so
+      # DirectKktSolver's in-place diagonal updates are visible to PETSc
+      # without any copy.  On subsequent factorize calls we just bump the
+      # state counter and refactorize.
+      self._mat = PETSc.Mat().createAIJWithArrays(
+          kkt.shape, (kkt.indptr, kkt.indices, kkt.data)
+      )
+      self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
+      self._mat.setOption(PETSc.Mat.Option.SPD, False)
+      self._mat.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATIONS, False)
+      self._mat.assemble()
+
+      self._ksp = PETSc.KSP().create()
+      self._ksp.setType(PETSc.KSP.Type.PREONLY)
+      self._pc = self._ksp.getPC()
+      self._pc.setType(PETSc.PC.Type.LU)
+      self._pc.setFactorSolverType("mumps")
+      self._ksp.setOperators(self._mat)
+
+      # MUMPS ICNTL parameters must be set before setUp (before symbolic
+      # analysis).  We use PETSc options which are read during setUp.
+      opts = PETSc.Options()
+      # ICNTL(14): percentage increase in estimated working space.
+      # Quasidefinite KKT matrices need generous headroom; MUMPS may
+      # silently produce poor-quality factors when space is tight.
+      opts.setValue("-mat_mumps_icntl_14", "2000")
+      # ICNTL(24): null pivot detection — important for near-singular
+      # systems that arise during infeasibility / unboundedness detection.
+      opts.setValue("-mat_mumps_icntl_24", "1")
+      # Allow further command-line customization to override the above.
+      self._ksp.setFromOptions()
+
+      # Trigger symbolic analysis + first numeric factorization.
+      self._ksp.setUp()
+      self._F = self._pc.getFactorMatrix()
+      self._mumps_icntl_14 = self._F.getMumpsIcntl(14)
+
+      # Pre-allocate RHS and solution vectors.
+      self._b = self._mat.createVecRight()
+      self._x = self._mat.createVecRight()
+      self._sol = np.empty(kkt.shape[0], dtype=np.float64)
     else:
-      flag = self.PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN
+      # Subsequent calls: the shared data array already has the new values
+      # (DirectKktSolver updates the scipy matrix in-place).  We just need
+      # to tell PETSc the values changed and redo the numeric factorization.
+      self._mat.stateIncrease()
+      self._ksp.setUp()
 
-    try:
-      self.ksp.setOperators(kkt_wrapper, kkt_wrapper, flag)
-    except TypeError:
-      # Fallback for older petsc4py API; usually auto-detects reuse
-      self.ksp.setOperators(kkt_wrapper, kkt_wrapper)
-
-    # Force factorization (symbolic first time, numeric every time)
-    self.ksp.setUp()
+    # If MUMPS ran out of working space (INFOG(1) == -9), double ICNTL(14)
+    # and retry until it succeeds.
+    while self._F.getMumpsInfog(1) == -9:
+      self._mumps_icntl_14 *= 2
+      self._F.setMumpsIcntl(14, self._mumps_icntl_14)
+      self._mat.stateIncrease()
+      self._ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    b = self.PETSc.Vec().createWithArray(rhs.ravel())
-    x = self.PETSc.Vec().createSeq(rhs.size)
-    self.ksp.solve(b, x)
-    return x.getArray().real.reshape(rhs.shape)
+    self._b.array[:] = rhs
+    self._ksp.solve(self._b, self._x)
+    np.copyto(self._sol, self._x.array)
+    return self._sol
 
   def format(self) -> Literal["csr"]:
     return "csr"
 
   def free(self):
     """Frees the solver resources."""
-    if self.ksp is not None:
-      self.ksp.destroy()
-      self.ksp = None
+    if self._ksp is not None:
+      self._ksp.destroy()
+      self._ksp = None
+    if self._mat is not None:
+      self._mat.destroy()
+      self._mat = None
+    self._b = None
+    self._x = None
 
 
 class CuDssSolver(LinearSolver):
