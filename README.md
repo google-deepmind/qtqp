@@ -197,11 +197,13 @@ that may be faster or more reliable for your problem. The enum
 `qtqp.LinearSolver` contains values corresponding to the following backend
 solvers:
 
-#### Dense LU: `qtqp.LinearSolver.SCIPY_DENSE`
+#### Dense Cholesky: `qtqp.LinearSolver.SCIPY_DENSE`
 
-A dense LU factorization via LAPACK (`dgetrf`/`dgetrs`). Recommended for small
-problems (n+m < ~200) where sparse data structure overhead dominates. No
-additional dependencies required.
+A dense Cholesky factorization of the n×n Gram matrix
+`G = R_x + P + A' diag(1/R_y) A` via LAPACK (`dpotrf`/`dpotrs`). Uses
+Schur-complement reduction to factorize n×n instead of (n+m)×(n+m).
+Recommended for small-to-medium problems where sparse overhead dominates.
+No additional dependencies required.
 
 #### UMFPACK: `qtqp.LinearSolver.UMFPACK`
 
@@ -255,14 +257,6 @@ Cholmod is available in the scikit sparse package. To install
 conda install scikit-sparse -c conda-forge
 ```
 
-#### Dense LDLT: `qtqp.LinearSolver.DENSE_LDLT`
-
-A dense symmetric indefinite (Bunch-Kaufman LDLT) factorization via LAPACK
-(`dsytrf`/`dsytrs`). Exploits the symmetric structure of the KKT matrix for
-roughly half the flops of general LU. Performance depends heavily on the LAPACK
-backend (MKL is well-optimized; OpenBLAS is significantly slower). No additional
-dependencies required.
-
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
 
 cuDSS uses a GPU accelerated sparse direct solver (requires a GPU). To install
@@ -275,7 +269,8 @@ python -m pip install cupy-cuda12x
 
 #### cupy dense GPU: `qtqp.LinearSolver.CUPY_DENSE`
 
-Dense LU factorization on GPU via cuSOLVER (requires a GPU). To install
+GPU Cholesky factorization of the n×n Gram matrix via cupy/cuSOLVER. Uses the
+same Schur-complement reduction as SCIPY_DENSE. To install
 
 ```bash
 python -m pip install cupy-cuda12x
