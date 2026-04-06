@@ -248,10 +248,9 @@ class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving.
 
   Maintains a single GPU sparse matrix used for both the nvmath DirectSolver
-  (factorize/solve) and for matvec during iterative refinement.  nvmath holds
-  a reference (not a copy) to this matrix, so in-place updates are visible
-  without calling reset_operands.  Only the n+m diagonal entries that change
-  each iteration are transferred from CPU to GPU (not the full nnz data array).
+  (factorize/solve) and for matvec during iterative refinement.  Only the n+m
+  diagonal entries that change each iteration are transferred from CPU to GPU
+  (not the full nnz data array).
   """
 
   def __init__(self):
@@ -310,9 +309,9 @@ class CuDssSolver(LinearSolver):
           self._kkt_gpu, self._rhs_gpu, options=options
       )
       self._solver.plan()
-    # No reset_operands needed: nvmath holds a reference to _kkt_gpu (not a
-    # copy) when the matrix is already on GPU.  set_kkt updates _kkt_gpu.data
-    # in-place via cupy .set(), so nvmath sees the new values directly.
+    else:
+      # Notify nvmath that the matrix data has changed.
+      self._solver.reset_operands(a=self._kkt_gpu)
 
     self._solver.factorize()
 
@@ -321,9 +320,8 @@ class CuDssSolver(LinearSolver):
     return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    # Transfer RHS into pre-allocated GPU buffer; nvmath holds a reference
-    # to _rhs_gpu so no reset_operands call is needed.
     self._rhs_gpu.set(rhs)
+    self._solver.reset_operands(b=self._rhs_gpu)
     result = self._solver.solve()
     # Return numpy for DirectKktSolver's iterative refinement.
     return self._cp.asnumpy(result)
@@ -462,34 +460,30 @@ class CupyDenseSolver(LinearSolver):
 
   Converts the sparse KKT to a dense GPU matrix once and updates only the
   n+m diagonal entries each iteration (the only values that change).  Uses
-  cupyx.lapack for direct getrf/getrs calls.  getrf overwrites the matrix
-  with L/U factors, so a separate _lu_gpu buffer is maintained for the
-  factored form while _kkt_gpu stays pristine for matvec.
+  cupyx.scipy.linalg.lu_factor/lu_solve for LU factorization.  lu_factor
+  overwrites its input with L/U factors, so a copy is made each iteration
+  while _kkt_gpu stays pristine for matvec.
   """
 
   def __init__(self):
     import cupy  # pylint: disable=g-import-not-at-top
-    import cupyx.lapack  # pylint: disable=g-import-not-at-top
+    import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
 
     self._cp = cupy
-    self._lapack = cupyx.lapack
+    self._linalg = cupyx.scipy.linalg
     self._kkt_gpu: cupy.ndarray | None = None
-    self._lu_gpu: cupy.ndarray | None = None
-    self._piv_gpu: cupy.ndarray | None = None
+    self._lu_and_piv = None  # (lu, piv) tuple from lu_factor
     self._dense_diag_idx: cupy.ndarray | None = None  # arange(n) for dense diagonal
     # Indices of diagonal entries in the sparse CSR data array.
     self._sparse_diag_idx_cpu: np.ndarray | None = None
-    # Pre-allocated GPU buffers for matvec and solve.
+    # Pre-allocated GPU buffer for matvec.
     self._x_gpu: cupy.ndarray | None = None
-    self._rhs_gpu: cupy.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Transfers diagonal updates to GPU; does not retain the CPU matrix."""
     if self._kkt_gpu is None:
       # First call: convert full sparse matrix to dense on GPU.
-      self._kkt_gpu = self._cp.asfortranarray(
-          self._cp.asarray(kkt.toarray())
-      )
+      self._kkt_gpu = self._cp.asarray(kkt.toarray(), dtype=self._cp.float64)
       # Cache the NaN sentinel positions in the sparse data array so we
       # can extract just the diagonal values on subsequent calls.
       self._sparse_diag_idx_cpu = np.where(np.isnan(kkt.data))[0]
@@ -501,25 +495,23 @@ class CupyDenseSolver(LinearSolver):
 
   def factorize(self) -> None:
     cp = self._cp
-    if self._lu_gpu is None:
+    if self._dense_diag_idx is None:
       n = self._kkt_gpu.shape[0]
-      self._lu_gpu = self._kkt_gpu.copy(order="F")
       self._dense_diag_idx = cp.arange(n)
-      self._piv_gpu = cp.empty(n, dtype=cp.int32)
       self._x_gpu = cp.empty(n, dtype=cp.float64)
-      self._rhs_gpu = cp.empty((n, 1), dtype=cp.float64, order="F")
-    else:
-      cp.copyto(self._lu_gpu, self._kkt_gpu)
-    self._lapack.getrf(self._lu_gpu, self._piv_gpu)
+    # lu_factor overwrites its input, so pass a copy.
+    self._lu_and_piv = self._linalg.lu_factor(
+        self._kkt_gpu.copy(), overwrite_a=True
+    )
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     self._x_gpu.set(x)
     return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    self._rhs_gpu[:, 0].set(rhs)
-    self._lapack.getrs(self._lu_gpu, self._piv_gpu, self._rhs_gpu)
-    return self._rhs_gpu[:, 0].get()
+    rhs_gpu = self._cp.asarray(rhs)
+    result = self._linalg.lu_solve(self._lu_and_piv, rhs_gpu)
+    return self._cp.asnumpy(result)
 
   def format(self) -> Literal["csr"]:
     return "csr"
