@@ -525,7 +525,7 @@ class CupyDenseSolver(LinearSolver):
     import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
 
     self._cp = cupy
-    self._linalg = cupyx.scipy.linalg
+    self._cupyx_linalg = cupyx.scipy.linalg
     self._n = 0
     self._m = 0
 
@@ -540,7 +540,7 @@ class CupyDenseSolver(LinearSolver):
     self._G_gpu = cp.empty((n, n), dtype=cp.float64)
     self._diag_idx = cp.arange(n)
     self._result_gpu = cp.empty(n + m, dtype=cp.float64)
-    self._cho = None  # (cho, lower) tuple from cho_factor
+    self._L = None  # Lower-triangular Cholesky factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     cp = self._cp
@@ -564,7 +564,7 @@ class CupyDenseSolver(LinearSolver):
     self._G_gpu += A_scaled.T @ A_scaled
     # Same numerical perturbation as ScipyDenseSolver.factorize.
     self._G_gpu[idx, idx] += 1e-14 * cp.max(self._G_gpu[idx, idx])
-    self._cho = self._linalg.cho_factor(self._G_gpu, lower=True)
+    self._L = cp.linalg.cholesky(self._G_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     cp = self._cp
@@ -582,7 +582,9 @@ class CupyDenseSolver(LinearSolver):
     rhs_gpu = cp.asarray(rhs)
     inv_R_y = 1.0 / self._R_y_gpu
     g = rhs_gpu[:n] + self._A_gpu.T @ (inv_R_y * rhs_gpu[n:])
-    x = self._linalg.cho_solve(self._cho, g)
+    # Solve L L' x = g via triangular solves.
+    x = self._cupyx_linalg.solve_triangular(self._L, g, lower=True)
+    x = self._cupyx_linalg.solve_triangular(self._L, x, lower=True, trans='C')
     result = self._result_gpu
     result[:n] = x
     cp.multiply(inv_R_y, self._A_gpu @ x - rhs_gpu[n:], out=result[n:])
