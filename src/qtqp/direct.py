@@ -199,8 +199,12 @@ class MumpsSolver(LinearSolver):
 
     if self._mat is None:
       # First call: build PETSc Mat from CSR, configure KSP + MUMPS.
-      self._mat = PETSc.Mat().createAIJ(
-          size=kkt.shape, csr=(kkt.indptr, kkt.indices, kkt.data)
+      # createAIJWithArrays shares the scipy data buffer, so
+      # DirectKktSolver's in-place diagonal updates are visible to PETSc
+      # without any copy.  On subsequent factorize calls we just bump the
+      # state counter and refactorize.
+      self._mat = PETSc.Mat().createAIJWithArrays(
+          kkt.shape, (kkt.indptr, kkt.indices, kkt.data)
       )
       self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
       self._mat.setOption(PETSc.Mat.Option.SPD, False)
@@ -233,17 +237,19 @@ class MumpsSolver(LinearSolver):
       # Pre-allocate RHS and solution vectors.
       self._b = self._mat.createVecRight()
       self._x = self._mat.createVecRight()
+      self._sol = np.empty(kkt.shape[0], dtype=np.float64)
     else:
-      # Subsequent calls: update values in-place, redo numeric factorization.
-      self._mat.zeroEntries()
-      self._mat.setValuesCSR(kkt.indptr, kkt.indices, kkt.data)
-      self._mat.assemble()
+      # Subsequent calls: the shared data array already has the new values
+      # (DirectKktSolver updates the scipy matrix in-place).  We just need
+      # to tell PETSc the values changed and redo the numeric factorization.
+      self._mat.stateIncrease()
       self._ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     self._b.array[:] = rhs
     self._ksp.solve(self._b, self._x)
-    return self._x.array.copy()
+    np.copyto(self._sol, self._x.array)
+    return self._sol
 
   def format(self) -> Literal["csr"]:
     return "csr"
