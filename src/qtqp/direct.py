@@ -248,9 +248,9 @@ class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving.
 
   Maintains a single GPU sparse matrix used for both the nvmath DirectSolver
-  (factorize/solve) and for matvec during iterative refinement.  Only the n+m
-  diagonal entries that change each iteration are transferred from CPU to GPU
-  (not the full nnz data array).
+  (factorize/solve) and for matvec during iterative refinement.  nvmath wraps
+  the GPU matrix's data pointer directly, so in-place updates are visible
+  without calling reset_operands (which would invalidate the plan).
   """
 
   def __init__(self):
@@ -266,26 +266,16 @@ class CuDssSolver(LinearSolver):
     self._kkt_gpu = None
     self._x_gpu: cupy.ndarray | None = None  # matvec input buffer
     self._rhs_gpu: cupy.ndarray | None = None  # solve RHS buffer
-    # Indices of diagonal entries in the CSR data array (the only entries
-    # that change between iterations).  Computed once on first set_kkt.
-    self._diag_idx_cpu: np.ndarray | None = None  # CPU int indices
-    self._diag_idx_gpu = None  # cupy int indices on GPU
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Transfers KKT data to GPU; does not retain the CPU matrix."""
     if self._kkt_gpu is None:
       # First call: transfer full structure + data to GPU.
       self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
-      # The scaffold has NaN sentinels at diagonal positions; find them
-      # so subsequent calls only transfer those entries.
-      self._diag_idx_cpu = np.where(np.isnan(kkt.data))[0]
-      self._diag_idx_gpu = self._cp.asarray(self._diag_idx_cpu)
     else:
-      # Only transfer the changed diagonal values (n+m entries instead
-      # of the full nnz data array).
-      self._kkt_gpu.data[self._diag_idx_gpu] = self._cp.asarray(
-          kkt.data[self._diag_idx_cpu]
-      )
+      # Update the data array on GPU.  The sparsity structure is fixed;
+      # only values change between iterations.
+      self._kkt_gpu.data.set(kkt.data)
 
   def factorize(self):
     cp = self._cp
@@ -301,17 +291,13 @@ class CuDssSolver(LinearSolver):
       )
       n = self._kkt_gpu.shape[1]
       self._x_gpu = cp.empty(n, dtype=cp.float64)
-      # RHS buffer (Fortran order required by cuDSS).  Passed to the
-      # DirectSolver constructor so nvmath holds a reference to it;
-      # solve() writes into this same buffer via .set().
       self._rhs_gpu = cp.empty(n, order="F", dtype=cp.float64)
       self._solver = self.nvmath.sparse.advanced.DirectSolver(
           self._kkt_gpu, self._rhs_gpu, options=options
       )
       self._solver.plan()
-    else:
-      # Notify nvmath that the matrix data has changed.
-      self._solver.reset_operands(a=self._kkt_gpu)
+    # nvmath wraps _kkt_gpu's data pointer; in-place updates via .set()
+    # are visible without reset_operands (which would invalidate the plan).
 
     self._solver.factorize()
 
@@ -321,7 +307,6 @@ class CuDssSolver(LinearSolver):
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     self._rhs_gpu.set(rhs)
-    self._solver.reset_operands(b=self._rhs_gpu)
     result = self._solver.solve()
     # Return numpy for DirectKktSolver's iterative refinement.
     return self._cp.asnumpy(result)
@@ -473,31 +458,24 @@ class CupyDenseSolver(LinearSolver):
     self._linalg = cupyx.scipy.linalg
     self._kkt_gpu: cupy.ndarray | None = None
     self._lu_and_piv = None  # (lu, piv) tuple from lu_factor
-    self._dense_diag_idx: cupy.ndarray | None = None  # arange(n) for dense diagonal
-    # Indices of diagonal entries in the sparse CSR data array.
-    self._sparse_diag_idx_cpu: np.ndarray | None = None
     # Pre-allocated GPU buffer for matvec.
     self._x_gpu: cupy.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Transfers diagonal updates to GPU; does not retain the CPU matrix."""
+    """Transfers KKT to GPU; does not retain the CPU matrix."""
     if self._kkt_gpu is None:
       # First call: convert full sparse matrix to dense on GPU.
       self._kkt_gpu = self._cp.asarray(kkt.toarray(), dtype=self._cp.float64)
-      # Cache the NaN sentinel positions in the sparse data array so we
-      # can extract just the diagonal values on subsequent calls.
-      self._sparse_diag_idx_cpu = np.where(np.isnan(kkt.data))[0]
     else:
-      # Transfer only the n+m diagonal values that changed.
-      self._kkt_gpu[self._dense_diag_idx, self._dense_diag_idx] = (
-          self._cp.asarray(kkt.data[self._sparse_diag_idx_cpu])
-      )
+      # Re-transfer the full dense matrix.  Only n+m diagonal entries
+      # change between iterations but toarray() is the simplest way to
+      # get a consistent dense view from the sparse scaffold.
+      self._kkt_gpu.set(kkt.toarray())
 
   def factorize(self) -> None:
     cp = self._cp
-    if self._dense_diag_idx is None:
+    if self._x_gpu is None:
       n = self._kkt_gpu.shape[0]
-      self._dense_diag_idx = cp.arange(n)
       self._x_gpu = cp.empty(n, dtype=cp.float64)
     # lu_factor overwrites its input, so pass a copy.
     self._lu_and_piv = self._linalg.lu_factor(
