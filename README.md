@@ -255,13 +255,30 @@ Cholmod is available in the scikit sparse package. To install
 conda install scikit-sparse -c conda-forge
 ```
 
+#### Dense LDLT: `qtqp.LinearSolver.DENSE_LDLT`
+
+A dense symmetric indefinite (Bunch-Kaufman LDLT) factorization via LAPACK
+(`dsytrf`/`dsytrs`). Exploits the symmetric structure of the KKT matrix for
+roughly half the flops of general LU. Performance depends heavily on the LAPACK
+backend (MKL is well-optimized; OpenBLAS is significantly slower). No additional
+dependencies required.
+
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
 
-cuDSS uses a GPU accelerated direct solver (requires a GPU). To install
+cuDSS uses a GPU accelerated sparse direct solver (requires a GPU). To install
 
 ```bash
 python -m pip install nvidia-cudss-cu12
 python -m pip install nvmath-python[cu12]
+python -m pip install cupy-cuda12x
+```
+
+#### cupy dense GPU: `qtqp.LinearSolver.CUPY_DENSE`
+
+Dense LU factorization on GPU via cuSOLVER (requires a GPU). To install
+
+```bash
+python -m pip install cupy-cuda12x
 ```
 
 ## Citing this work
