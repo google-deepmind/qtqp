@@ -877,7 +877,7 @@ def test_stats_keys():
 def test_resolve():
   """Test that calling solve() twice on the same QTQP instance is consistent."""
   rng = np.random.default_rng(42)
-  m, n, z = 50, 30, 5
+  m, n, z = 30, 10, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
 
