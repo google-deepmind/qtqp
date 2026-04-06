@@ -399,6 +399,101 @@ class ScipyDenseSolver(LinearSolver):
     return "csr"
 
 
+class DenseLdltSolver(LinearSolver):
+  """Dense symmetric indefinite (Bunch-Kaufman LDLT) solver via LAPACK.
+
+  The KKT matrix is symmetric indefinite, so LDLT (dsytrf/dsytrs) needs
+  roughly half the flops of general LU (dgetrf/dgetrs).  Otherwise follows
+  the same buffer-reuse strategy as ScipyDenseSolver.
+  """
+
+  def __init__(self):
+    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
+
+    self._dsytrf = lapack.dsytrf
+    self._dsytrs = lapack.dsytrs
+    self._piv = None
+    self._kkt_dense: np.ndarray | None = None
+    self._ldl_dense: np.ndarray | None = None
+
+  def factorize(self) -> None:
+    if self._kkt_dense is None:
+      self._kkt_dense = np.asfortranarray(self._kkt.toarray())
+      self._ldl_dense = self._kkt_dense.copy(order="F")
+    else:
+      np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
+      np.copyto(self._ldl_dense, self._kkt_dense)
+    self._ldl_dense, self._piv, _ = self._dsytrf(
+        self._ldl_dense, lower=True, overwrite_a=True
+    )
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt_dense @ x
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    x, _ = self._dsytrs(self._ldl_dense, self._piv, rhs, lower=True)
+    return x
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
+
+
+class CupyDenseSolver(LinearSolver):
+  """Dense LU solver on GPU via cupy (cuSOLVER).
+
+  Converts the sparse KKT to a dense GPU matrix via set_kkt and re-transfers
+  the full dense matrix each iteration.  Uses cupyx.scipy.linalg.lu_factor/
+  lu_solve for LU factorization.  lu_factor overwrites its input, so a copy
+  is made each iteration while _kkt_gpu stays pristine for matvec.
+  """
+
+  def __init__(self):
+    import cupy  # pylint: disable=g-import-not-at-top
+    import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
+
+    self._cp = cupy
+    self._linalg = cupyx.scipy.linalg
+    self._kkt_gpu: cupy.ndarray | None = None
+    self._lu_and_piv = None  # (lu, piv) tuple from lu_factor
+    # Pre-allocated GPU buffers for matvec and solve.
+    self._x_gpu: cupy.ndarray | None = None
+    self._rhs_gpu: cupy.ndarray | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Transfers KKT to GPU; does not retain the CPU matrix."""
+    if self._kkt_gpu is None:
+      # First call: convert full sparse matrix to dense on GPU.
+      self._kkt_gpu = self._cp.asarray(kkt.toarray(), dtype=self._cp.float64)
+    else:
+      # Re-transfer the full dense matrix.  Only n+m diagonal entries
+      # change between iterations but toarray() is the simplest way to
+      # get a consistent dense view from the sparse scaffold.
+      self._kkt_gpu.set(kkt.toarray())
+
+  def factorize(self) -> None:
+    cp = self._cp
+    if self._x_gpu is None:
+      n = self._kkt_gpu.shape[0]
+      self._x_gpu = cp.empty(n, dtype=cp.float64)
+      self._rhs_gpu = cp.empty(n, dtype=cp.float64)
+    # lu_factor overwrites its input, so pass a copy.
+    self._lu_and_piv = self._linalg.lu_factor(
+        self._kkt_gpu.copy(), overwrite_a=True
+    )
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    self._x_gpu.set(x)
+    return (self._kkt_gpu @ self._x_gpu).get()
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    self._rhs_gpu.set(rhs)
+    result = self._linalg.lu_solve(self._lu_and_piv, self._rhs_gpu)
+    return self._cp.asnumpy(result)
+
+  def format(self) -> Literal["csr"]:
+    return "csr"
+
+
 class DirectKktSolver:
   """Direct KKT linear system solver with iterative refinement.
 
