@@ -98,8 +98,8 @@ class MklPardisoSolver(LinearSolver):
     except self.mkl_solver.PardisoError:
       # Near-singular KKT systems (infeasibility/unboundedness detection)
       # can cause zero-pivot errors.  Retry with a looser perturbation
-      # (10^-3); iterative refinement corrects for the loose factorization.
-      self.factorization.set_iparm(10, 3)
+      # (10^-2); iterative refinement corrects for the loose factorization.
+      self.factorization.set_iparm(10, 2)
       self.factorization._analyze()  # pylint: disable=protected-access
       self.factorization._factor()  # pylint: disable=protected-access
       result = self.factorization.solve(rhs)
