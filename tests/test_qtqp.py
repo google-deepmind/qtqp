@@ -43,8 +43,8 @@ if sys.platform.startswith('linux'):
 try:
   import petsc4py.PETSc  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
-except (ImportError, ModuleNotFoundError):
-  pass
+except (ImportError, ModuleNotFoundError) as e:
+  print(f'Skipping MUMPS tests: {e}')
 
 
 def _gen_feasible(m, n, z, random_state=None):
