@@ -441,11 +441,10 @@ class DenseLdltSolver(LinearSolver):
 class CupyDenseSolver(LinearSolver):
   """Dense LU solver on GPU via cupy (cuSOLVER).
 
-  Converts the sparse KKT to a dense GPU matrix once and updates only the
-  n+m diagonal entries each iteration (the only values that change).  Uses
-  cupyx.scipy.linalg.lu_factor/lu_solve for LU factorization.  lu_factor
-  overwrites its input with L/U factors, so a copy is made each iteration
-  while _kkt_gpu stays pristine for matvec.
+  Converts the sparse KKT to a dense GPU matrix via set_kkt and re-transfers
+  the full dense matrix each iteration.  Uses cupyx.scipy.linalg.lu_factor/
+  lu_solve for LU factorization.  lu_factor overwrites its input, so a copy
+  is made each iteration while _kkt_gpu stays pristine for matvec.
   """
 
   def __init__(self):
@@ -456,8 +455,9 @@ class CupyDenseSolver(LinearSolver):
     self._linalg = cupyx.scipy.linalg
     self._kkt_gpu: cupy.ndarray | None = None
     self._lu_and_piv = None  # (lu, piv) tuple from lu_factor
-    # Pre-allocated GPU buffer for matvec.
+    # Pre-allocated GPU buffers for matvec and solve.
     self._x_gpu: cupy.ndarray | None = None
+    self._rhs_gpu: cupy.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Transfers KKT to GPU; does not retain the CPU matrix."""
@@ -475,6 +475,7 @@ class CupyDenseSolver(LinearSolver):
     if self._x_gpu is None:
       n = self._kkt_gpu.shape[0]
       self._x_gpu = cp.empty(n, dtype=cp.float64)
+      self._rhs_gpu = cp.empty(n, dtype=cp.float64)
     # lu_factor overwrites its input, so pass a copy.
     self._lu_and_piv = self._linalg.lu_factor(
         self._kkt_gpu.copy(), overwrite_a=True
@@ -485,8 +486,8 @@ class CupyDenseSolver(LinearSolver):
     return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    rhs_gpu = self._cp.asarray(rhs)
-    result = self._linalg.lu_solve(self._lu_and_piv, rhs_gpu)
+    self._rhs_gpu.set(rhs)
+    result = self._linalg.lu_solve(self._lu_and_piv, self._rhs_gpu)
     return self._cp.asnumpy(result)
 
   def format(self) -> Literal["csr"]:
