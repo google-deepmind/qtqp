@@ -85,10 +85,11 @@ class MklPardisoSolver(LinearSolver):
       #   Fortran iparm(11) = 1: scaling (C index 10)
       #   Fortran iparm(13) = 1: weighted matching (C index 12)
       #   Fortran iparm(24) = 1: two-level parallel factorization (C index 23)
-      # Pivot perturbation (Fortran iparm(10), C index 9) is left at its
-      # default of 13 (10^-13) for symmetric indefinite.
+      #   Fortran iparm(10) = 8: pivot perturbation 10^-8 (C index 9)
+      #     Default is 13 (10^-13); 8 is recommended for IPM systems.
       # Note: these are set after __init__ (which calls analyze+factor),
       # so they only take effect from the second factorization onward.
+      self.factorization.set_iparm(9, 8)   # pivot perturbation
       self.factorization.set_iparm(10, 1)  # scaling
       self.factorization.set_iparm(12, 1)  # matching
       self.factorization.set_iparm(23, 1)  # two-level parallel factorization
