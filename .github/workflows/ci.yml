@@ -52,7 +52,7 @@ jobs:
       - name: Run tests
         shell: bash -l {0}
         run: |
-          pytest -v -s
+          pytest
 
   build-and-publish:
     if: startsWith(github.ref, 'refs/tags/')
