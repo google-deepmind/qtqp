@@ -29,6 +29,14 @@ class LinearSolver:
   efficient matvec (e.g. a pre-allocated dense array).
   """
 
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    """Stores problem dimensions; called once before set_kkt.
+
+    Dense solvers override this to pre-allocate buffers sized by n and m.
+    Sparse solvers ignore it (the default is a no-op).
+    """
+    pass
+
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Stores the KKT matrix; called by DirectKktSolver before factorize."""
     self._kkt = kkt
@@ -393,99 +401,132 @@ class UmfpackSolver(LinearSolver):
 
 
 class ScipyDenseSolver(LinearSolver):
-  """Dense LU solver via LAPACK for small KKT systems.
+  """Dense Cholesky solver via Gram/Schur-complement reduction.
 
-  For small problems (n+m < ~200), avoids the overhead of sparse data
-  structures (symbolic analysis, CSC index arrays, indirect memory access)
-  that dominates over actual arithmetic in sparse solvers.
+  Instead of factorizing the full (n+m)x(n+m) KKT system, eliminates y to
+  obtain an n x n SPD system solved by Cholesky (dpotrf).  Reduces
+  factorization cost from O((n+m)^3) to O(n^3), a large win when m >> n
+  (typical for QPs).
 
-  Calls LAPACK (dgetrf/dgetrs) directly with cached function handles to avoid
-  per-call Python wrapper overhead (input validation, lapack func lookup) in
-  scipy.linalg.lu_factor/lu_solve, which dominates for tiny matrices.
+  **Derivation.**  The KKT system is:
 
-  Two Fortran-order buffers are kept: _kkt_dense holds the original matrix
-  values for the matvec; _lu_dense is a copy that dgetrf overwrites in-place
-  with the LU factors (overwrite_a=True avoids a per-call allocation).
+      [ H   A'] [x]   [r_x]
+      [ A  -D ] [y] = [r_y]
+
+  where H = P + diag(R_x) (n x n, SPD) and D = diag(R_y) (m x m, D > 0).
+  From the second row:  y = D^{-1} (A x - r_y).
+  Substituting into the first row gives the Gram (normal-equations) system:
+
+      G x = r_x + A' D^{-1} r_y,   where  G = H + A' D^{-1} A.
+
+  G is SPD (H is SPD from regularization, A' D^{-1} A is PSD).
+
+  **Implementation.**  The KKT diagonal mixes P's diagonal with R_x (the
+  regularization), so we store P_offdiag (P with diagonal zeroed) once and
+  read the combined diagonal each iteration:
+
+      G = P_offdiag + diag(kkt_diag[:n]) + A' D^{-1} A
+        = P_offdiag + diag(P_diag + R_x)  + A' D^{-1} A
+        = P + diag(R_x) + A' D^{-1} A     = H + A' D^{-1} A.
+
+  The A' D^{-1} A term is formed via dsyrk on A_scaled = diag(1/sqrt(R_y)) A
+  so that A_scaled' A_scaled = A' D^{-1} A, exploiting BLAS3 symmetry.
   """
 
   def __init__(self):
-    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
+    from scipy.linalg import lapack, blas  # pylint: disable=g-import-not-at-top
 
-    # Cache function handles to avoid per-call get_lapack_funcs lookup.
-    self._dgetrf = lapack.dgetrf
-    self._dgetrs = lapack.dgetrs
-    self._piv = None
-    self._kkt_dense: np.ndarray | None = None
-    self._lu_dense: np.ndarray | None = None
+    self._dpotrf = lapack.dpotrf
+    self._dpotrs = lapack.dpotrs
+    self._dsyrk = blas.dsyrk
+    self._dsymv = blas.dsymv
+    self._n = 0
+    self._m = 0
 
-  def factorize(self) -> None:
-    if self._kkt_dense is None:
-      # Fortran order so dgetrf can overwrite in-place without an internal copy.
-      self._kkt_dense = np.asfortranarray(self._kkt.toarray())
-      self._lu_dense = self._kkt_dense.copy(order="F")
-    else:
-      # Only the diagonal changes each IPM iteration; off-diagonal blocks are fixed.
-      np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
-      np.copyto(self._lu_dense, self._kkt_dense)
-    self._lu_dense, self._piv, _ = self._dgetrf(self._lu_dense, overwrite_a=True)
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    self._n = n
+    self._m = m
+    # Blocks extracted once from the KKT scaffold (populated in first set_kkt).
+    self._A: np.ndarray | None = None         # (m, n) dense, C-order
+    self._P_offdiag: np.ndarray | None = None  # (n, n) P with diagonal zeroed, F-order
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._kkt_dense @ x
+    # Pre-allocate all per-iteration buffers.
+    self._R_x = np.empty(n, dtype=np.float64)
+    self._R_y = np.empty(m, dtype=np.float64)
+    self._G = np.empty((n, n), dtype=np.float64, order="F")
+    self._chol = np.empty((n, n), dtype=np.float64, order="F")
+    self._A_scaled = np.empty((m, n), dtype=np.float64, order="F")
+    self._diag_idx = np.diag_indices(n)
+    self._result = np.empty(n + m, dtype=np.float64)
+    self._g = np.empty(n, dtype=np.float64)
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
-    x, _ = self._dgetrs(self._lu_dense, self._piv, rhs)
-    return x
-
-  def format(self) -> Literal["csr"]:
-    return "csr"
-
-
-class DenseLdltSolver(LinearSolver):
-  """Dense symmetric indefinite (Bunch-Kaufman LDLT) solver via LAPACK.
-
-  The KKT matrix is symmetric indefinite, so LDLT (dsytrf/dsytrs) needs
-  roughly half the flops of general LU (dgetrf/dgetrs).  Otherwise follows
-  the same buffer-reuse strategy as ScipyDenseSolver.
-  """
-
-  def __init__(self):
-    from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
-
-    self._dsytrf = lapack.dsytrf
-    self._dsytrs = lapack.dsytrs
-    self._piv = None
-    self._kkt_dense: np.ndarray | None = None
-    self._ldl_dense: np.ndarray | None = None
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    n, m = self._n, self._m
+    if self._A is None:
+      kkt_dense = kkt.toarray()
+      self._A = np.ascontiguousarray(kkt_dense[n:, :n], dtype=np.float64)
+      P_block = kkt_dense[:n, :n].copy()
+      np.fill_diagonal(P_block, 0.0)
+      self._P_offdiag = np.asfortranarray(P_block)
+    diag = kkt.diagonal()
+    np.copyto(self._R_x, diag[:n])
+    np.negative(diag[n:], out=self._R_y)
 
   def factorize(self) -> None:
-    if self._kkt_dense is None:
-      self._kkt_dense = np.asfortranarray(self._kkt.toarray())
-      self._ldl_dense = self._kkt_dense.copy(order="F")
-    else:
-      np.fill_diagonal(self._kkt_dense, self._kkt.diagonal())
-      np.copyto(self._ldl_dense, self._kkt_dense)
-    self._ldl_dense, self._piv, _ = self._dsytrf(
-        self._ldl_dense, lower=True, overwrite_a=True
-    )
+    # G = P_offdiag + diag(R_x) + A' diag(1/R_y) A
+    np.copyto(self._G, self._P_offdiag)
+    self._G[self._diag_idx] += self._R_x
+    np.multiply(self._A, (1.0 / np.sqrt(self._R_y))[:, None], out=self._A_scaled)
+    # Symmetric rank-k update: G += A_scaled.T @ A_scaled via BLAS dsyrk.
+    self._dsyrk(1.0, self._A_scaled, beta=1.0, c=self._G, trans=1,
+                lower=1, overwrite_c=True)
+    # G is theoretically SPD but the rank-k update can introduce roundoff
+    # that makes it very slightly indefinite (eigenvalue ~ -1e-8) when 1/R_y
+    # spans many orders of magnitude.  A tiny relative perturbation fixes
+    # this; iterative refinement (which uses the exact block matvec in
+    # __matmul__) corrects for any factorization-level perturbation.
+    self._G[self._diag_idx] += 1e-14 * np.max(self._G[self._diag_idx])
+    np.copyto(self._chol, self._G)
+    self._chol, info = self._dpotrf(self._chol, lower=True, overwrite_a=True)
+    if info != 0:
+      raise np.linalg.LinAlgError(f"Cholesky failed (dpotrf info={info})")
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._kkt_dense @ x
+    n = self._n
+    x_x, x_y = x[:n], x[n:]
+    result = self._result
+    # result[:n] = P_offdiag @ x_x + R_x * x_x + A.T @ x_y
+    self._dsymv(1.0, self._P_offdiag, x_x, 0.0, result[:n], lower=1,
+                overwrite_y=1)
+    result[:n] += self._R_x * x_x
+    result[:n] += self._A.T @ x_y
+    result[n:] = self._A @ x_x - self._R_y * x_y
+    return result
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    x, _ = self._dsytrs(self._ldl_dense, self._piv, rhs, lower=True)
-    return x
+    n = self._n
+    inv_R_y = 1.0 / self._R_y
+    # Reduced RHS: g = rhs_x + A' (R_y^{-1} rhs_y)
+    g = self._g
+    np.copyto(g, rhs[:n])
+    g += self._A.T @ (inv_R_y * rhs[n:])
+    x, _ = self._dpotrs(self._chol, g, lower=True)
+    # Back-substitute: y = R_y^{-1} (A x - rhs_y)
+    result = self._result
+    result[:n] = x
+    np.multiply(inv_R_y, self._A @ x - rhs[n:], out=result[n:])
+    return result
 
   def format(self) -> Literal["csr"]:
     return "csr"
 
 
 class CupyDenseSolver(LinearSolver):
-  """Dense LU solver on GPU via cupy (cuSOLVER).
+  """GPU Cholesky solver via Gram/Schur-complement reduction (cupy).
 
-  Converts the sparse KKT to a dense GPU matrix via set_kkt and re-transfers
-  the full dense matrix each iteration.  Uses cupyx.scipy.linalg.lu_factor/
-  lu_solve for LU factorization.  lu_factor overwrites its input, so a copy
-  is made each iteration while _kkt_gpu stays pristine for matvec.
+  GPU counterpart of ScipyDenseSolver.  See that class's docstring for the
+  Gram derivation.  Forms G = H + A' D^{-1} A on the GPU and factorizes
+  with Cholesky via cupyx.scipy.linalg.cho_factor.
   """
 
   def __init__(self):
@@ -493,43 +534,70 @@ class CupyDenseSolver(LinearSolver):
     import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
 
     self._cp = cupy
-    self._linalg = cupyx.scipy.linalg
-    self._kkt_gpu: cupy.ndarray | None = None
-    self._lu_and_piv = None  # (lu, piv) tuple from lu_factor
-    # Pre-allocated GPU buffers for matvec and solve.
-    self._x_gpu: cupy.ndarray | None = None
-    self._rhs_gpu: cupy.ndarray | None = None
+    self._cupyx_linalg = cupyx.scipy.linalg
+    self._n = 0
+    self._m = 0
+
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    cp = self._cp
+    self._n = n
+    self._m = m
+    self._A_gpu = None
+    self._P_offdiag_gpu = None
+    self._R_x_gpu = cp.empty(n, dtype=cp.float64)
+    self._R_y_gpu = cp.empty(m, dtype=cp.float64)
+    self._G_gpu = cp.empty((n, n), dtype=cp.float64)
+    self._diag_idx = cp.arange(n)
+    self._result_gpu = cp.empty(n + m, dtype=cp.float64)
+    self._L = None  # Lower-triangular Cholesky factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Transfers KKT to GPU; does not retain the CPU matrix."""
-    if self._kkt_gpu is None:
-      # First call: convert full sparse matrix to dense on GPU.
-      self._kkt_gpu = self._cp.asarray(kkt.toarray(), dtype=self._cp.float64)
-    else:
-      # Re-transfer the full dense matrix.  Only n+m diagonal entries
-      # change between iterations but toarray() is the simplest way to
-      # get a consistent dense view from the sparse scaffold.
-      self._kkt_gpu.set(kkt.toarray())
+    cp = self._cp
+    n, m = self._n, self._m
+    if self._A_gpu is None:
+      kkt_dense = kkt.toarray()
+      self._A_gpu = cp.asarray(kkt_dense[n:, :n], dtype=cp.float64)
+      P_block = kkt_dense[:n, :n].copy()
+      np.fill_diagonal(P_block, 0.0)
+      self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
+    diag = kkt.diagonal()
+    self._R_x_gpu.set(diag[:n])
+    self._R_y_gpu.set(-diag[n:])
 
   def factorize(self) -> None:
     cp = self._cp
-    if self._x_gpu is None:
-      n = self._kkt_gpu.shape[0]
-      self._x_gpu = cp.empty(n, dtype=cp.float64)
-      self._rhs_gpu = cp.empty(n, dtype=cp.float64)
-    # lu_factor overwrites its input, so pass a copy.
-    self._lu_and_piv = self._linalg.lu_factor(
-        self._kkt_gpu.copy(), overwrite_a=True
-    )
+    idx = self._diag_idx
+    cp.copyto(self._G_gpu, self._P_offdiag_gpu)
+    self._G_gpu[idx, idx] += self._R_x_gpu
+    A_scaled = self._A_gpu * (1.0 / cp.sqrt(self._R_y_gpu))[:, None]
+    self._G_gpu += A_scaled.T @ A_scaled
+    # Same numerical perturbation as ScipyDenseSolver.factorize.
+    self._G_gpu[idx, idx] += 1e-14 * cp.max(self._G_gpu[idx, idx])
+    self._L = cp.linalg.cholesky(self._G_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    self._x_gpu.set(x)
-    return (self._kkt_gpu @ self._x_gpu).get()
+    cp = self._cp
+    n = self._n
+    x_gpu = cp.asarray(x)
+    x_x, x_y = x_gpu[:n], x_gpu[n:]
+    result = self._result_gpu
+    result[:n] = self._P_offdiag_gpu @ x_x + self._R_x_gpu * x_x + self._A_gpu.T @ x_y
+    result[n:] = self._A_gpu @ x_x - self._R_y_gpu * x_y
+    return cp.asnumpy(result)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    self._rhs_gpu.set(rhs)
-    result = self._linalg.lu_solve(self._lu_and_piv, self._rhs_gpu)
-    return self._cp.asnumpy(result)
+    cp = self._cp
+    n = self._n
+    rhs_gpu = cp.asarray(rhs)
+    inv_R_y = 1.0 / self._R_y_gpu
+    g = rhs_gpu[:n] + self._A_gpu.T @ (inv_R_y * rhs_gpu[n:])
+    # Solve L L' x = g via triangular solves.
+    x = self._cupyx_linalg.solve_triangular(self._L, g, lower=True)
+    x = self._cupyx_linalg.solve_triangular(self._L, x, lower=True, trans='C')
+    result = self._result_gpu
+    result[:n] = x
+    cp.multiply(inv_R_y, self._A_gpu @ x - rhs_gpu[n:], out=result[n:])
+    return cp.asnumpy(result)
 
   def format(self) -> Literal["csr"]:
     return "csr"
@@ -583,6 +651,7 @@ class DirectKktSolver:
     self._atol = atol
     self._rtol = rtol
     self._solver = solver
+    self._solver.set_dims(n=self.n, m=self.m, z=self.z)
 
     # Build the KKT scaffold once. NaN is used as a sentinel to mark the
     # diagonal positions that must be overwritten each iteration (because they
