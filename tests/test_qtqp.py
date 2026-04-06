@@ -38,9 +38,13 @@ _SOLVERS = [
 if sys.platform.startswith('linux'):
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 
-# Petsc4py not available on windows.
-if not sys.platform.startswith('win32'):
+# Petsc4py not available on windows; some conda builds also fail to load
+# (e.g. CUDA-linked builds on machines without a GPU).
+try:
+  import petsc4py.PETSc  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+except (ImportError, ModuleNotFoundError):
+  pass
 
 
 def _gen_feasible(m, n, z, random_state=None):
