@@ -37,10 +37,13 @@ _SOLVERS = [
 if sys.platform.startswith('linux'):
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 
-# MUMPS is producting NaNs, disable for now.
-# Petsc4py not available on windows
-# if not sys.platform.startswith('win32'):
-#  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+# Petsc4py not available on windows; some conda builds also fail to load
+# (e.g. CUDA-linked builds on machines without a GPU).
+try:
+  import petsc4py.PETSc  # noqa: F401
+  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+except (ImportError, ModuleNotFoundError) as e:
+  print(f'Skipping MUMPS tests: {e}')
 
 
 def _gen_feasible(m, n, z, random_state=None):
