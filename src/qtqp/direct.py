@@ -79,32 +79,28 @@ class MklPardisoSolver(LinearSolver):
       self.factorization = self.mkl_solver.MKLPardisoSolver(
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
-      # iparm(10): pivot perturbation exponent, perturbation = 10^(-iparm(10)).
-      #   Default for symmetric indefinite is 13 (10^-13).  We match the
-      #   solver's static regularization floor (10^-8).
-      # iparm(12)=1: improved accuracy via symmetric weighted matching.
-      # iparm(24)=1: two-level parallel factorization algorithm.
+      # pydiso uses 0-based C indexing: set_iparm(i, v) sets C iparm[i],
+      # which is Fortran iparm(i+1).  Intel recommends for symmetric
+      # indefinite IPM/saddle-point systems:
+      #   Fortran iparm(11) = 1: scaling (C index 10)
+      #   Fortran iparm(13) = 1: weighted matching (C index 12)
+      # Pivot perturbation (Fortran iparm(10), C index 9) is left at its
+      # default of 8 (10^-8) for symmetric indefinite.
       # Note: these are set after __init__ (which calls analyze+factor),
       # so they only take effect from the second factorization onward.
-      self.factorization.set_iparm(10, 8)
-      self.factorization.set_iparm(12, 1)
-      self.factorization.set_iparm(24, 1)
+      self.factorization.set_iparm(10, 1)  # scaling
+      self.factorization.set_iparm(12, 1)  # matching
     else:
       self.factorization.refactor(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
       return self.factorization.solve(rhs)
-    except self.mkl_solver.PardisoError:
-      # Near-singular KKT systems (infeasibility/unboundedness detection)
-      # can cause zero-pivot errors.  Retry with a looser perturbation
-      # (10^-2); iterative refinement corrects for the loose factorization.
-      self.factorization.set_iparm(10, 2)
+    except self.mkl_solver.PardisoError as e:
+      logging.warning("PardisoError: %s", e)
       self.factorization._analyze()  # pylint: disable=protected-access
       self.factorization._factor()  # pylint: disable=protected-access
-      result = self.factorization.solve(rhs)
-      self.factorization.set_iparm(10, 8)
-      return result
+      return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csr"]:
     return "csr"
