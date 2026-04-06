@@ -195,7 +195,7 @@ def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
   )
 
   # Record stats
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
   _assert_solution(solution, a, b, c, p, z)
 
@@ -215,7 +215,7 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
   )
 
   # Record stats
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
   _assert_infeasible(solution, a, b, z)
 
@@ -235,7 +235,7 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   )
 
   # Record stats
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
   _assert_unbounded(solution, a, c, p, z)
 
@@ -619,7 +619,7 @@ def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_solution(solution, a, b, c, p_zero, z)
 
 
@@ -637,7 +637,7 @@ def test_infeasible_lp(equilibrate, seed, linear_solver, record_iterations):
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_infeasible(solution, a, b, z)
 
 
@@ -661,7 +661,7 @@ def test_unbounded_lp(equilibrate, seed, linear_solver, record_iterations):
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_unbounded(solution, a, c, p_zero, z)
 
 
@@ -703,7 +703,7 @@ def test_solve_all_inequalities(equilibrate, seed, linear_solver, record_iterati
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_solution(solution, a, b, c, p, z)
 
 
@@ -725,7 +725,7 @@ def test_infeasible_small(equilibrate, seed, linear_solver, record_iterations):
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_infeasible(solution, a, b, z)
 
 
@@ -743,7 +743,7 @@ def test_unbounded_small(equilibrate, seed, linear_solver, record_iterations):
       verbose=False,
   )
 
-  record_iterations(solution.stats[-1]['iter'])
+  record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_unbounded(solution, a, c, p, z)
 
 
