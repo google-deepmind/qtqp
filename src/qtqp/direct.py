@@ -247,10 +247,9 @@ class MumpsSolver(LinearSolver):
 class CuDssSolver(LinearSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving.
 
-  Maintains a single GPU sparse matrix used for both the nvmath DirectSolver
-  (factorize/solve) and for matvec during iterative refinement.  nvmath wraps
-  the GPU matrix's data pointer directly, so in-place updates are visible
-  without calling reset_operands (which would invalidate the plan).
+  nvmath receives the CPU scipy matrix and handles its own GPU transfer
+  via copy_across_memspace.  A separate cupy GPU sparse matrix is kept
+  for matvec during iterative refinement.
   """
 
   def __init__(self):
@@ -262,20 +261,9 @@ class CuDssSolver(LinearSolver):
     self._cp_sparse = cupyx.scipy.sparse
     self.nvmath = nvmath
     self._solver: nvmath.sparse.advanced.DirectSolver | None = None
-    # Single GPU sparse matrix used for both nvmath and matvec.
+    # GPU sparse matrix for matvec (separate from nvmath's internal copy).
     self._kkt_gpu = None
-    self._x_gpu: cupy.ndarray | None = None  # matvec input buffer
-    self._rhs_gpu: cupy.ndarray | None = None  # solve RHS buffer
-
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Transfers KKT data to GPU; does not retain the CPU matrix."""
-    if self._kkt_gpu is None:
-      # First call: transfer full structure + data to GPU.
-      self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
-    else:
-      # Update the data array on GPU.  The sparsity structure is fixed;
-      # only values change between iterations.
-      self._kkt_gpu.data.set(kkt.data)
+    self._x_gpu: cupy.ndarray | None = None
 
   def factorize(self):
     cp = self._cp
@@ -289,15 +277,18 @@ class CuDssSolver(LinearSolver):
       options = self.nvmath.sparse.advanced.DirectSolverOptions(
           sparse_system_type=sparse_system_type, logger=logger
       )
-      n = self._kkt_gpu.shape[1]
-      self._x_gpu = cp.empty(n, dtype=cp.float64)
-      self._rhs_gpu = cp.empty(n, order="F", dtype=cp.float64)
+      # RHS must be in column major order (Fortran) for cuDSS.
+      dummy_rhs = np.empty(self._kkt.shape[1], order="F", dtype=np.float64)
       self._solver = self.nvmath.sparse.advanced.DirectSolver(
-          self._kkt_gpu, self._rhs_gpu, options=options
+          self._kkt, dummy_rhs, options=options
       )
       self._solver.plan()
-    # nvmath wraps _kkt_gpu's data pointer; in-place updates via .set()
-    # are visible without reset_operands (which would invalidate the plan).
+      # Separate GPU copy for matvec.
+      self._kkt_gpu = self._cp_sparse.csr_matrix(self._kkt)
+      self._x_gpu = cp.empty(self._kkt.shape[1], dtype=cp.float64)
+    else:
+      self._solver.reset_operands(a=self._kkt)
+      self._kkt_gpu.data.set(self._kkt.data)
 
     self._solver.factorize()
 
@@ -306,10 +297,10 @@ class CuDssSolver(LinearSolver):
     return (self._kkt_gpu @ self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    self._rhs_gpu.set(rhs)
-    result = self._solver.solve()
-    # Return numpy for DirectKktSolver's iterative refinement.
-    return self._cp.asnumpy(result)
+    # Ensure RHS is Fortran contiguous for cuDSS expected input format.
+    rhs_fortran = np.asfortranarray(rhs, dtype=np.float64)
+    self._solver.reset_operands(b=rhs_fortran)
+    return self._solver.solve()
 
   def format(self) -> Literal["csr"]:
     return "csr"
