@@ -71,19 +71,16 @@ class MklPardisoSolver(LinearSolver):
       self.factorization = self.mkl_solver.MKLPardisoSolver(
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
-      # iparm(10)=8: pivot perturbation of 10^(-8).  Pardiso's supernodal
-      #   Bunch-Kaufman pivoting can encounter near-zero pivots even when
-      #   the overall matrix is well-conditioned (QTQP adds 1e-8 static
-      #   regularization).  The default (10^-13) is too small; 10^-8
-      #   matches QTQP's regularization floor.
+      # iparm(10): pivot perturbation exponent, perturbation = 10^(-iparm(10)).
+      #   Default for symmetric indefinite is 1 (10^-1) which is very loose.
+      #   We tighten to 10^-5 for better accuracy; going tighter (e.g. 8)
+      #   can cause zero-pivot errors on near-singular KKT systems that arise
+      #   during infeasibility/unboundedness detection.
       # iparm(12)=1: improved accuracy via symmetric weighted matching.
       # iparm(24)=1: two-level parallel factorization algorithm.
-      # iparm(25)=2: parallel forward/backward substitution.
-      #   Not yet in pydiso's settable whitelist, see:
-      #   https://github.com/simpeg/pydiso/issues/XX
       # Note: these are set after __init__ (which calls analyze+factor),
       # so they only take effect from the second factorization onward.
-      self.factorization.set_iparm(10, 8)
+      self.factorization.set_iparm(10, 5)
       self.factorization.set_iparm(12, 1)
       self.factorization.set_iparm(24, 1)
       # self.factorization.set_iparm(25, 2)
