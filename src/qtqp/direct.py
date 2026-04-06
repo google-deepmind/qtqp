@@ -213,17 +213,17 @@ class MumpsSolver(LinearSolver):
 
       self._ksp = PETSc.KSP().create()
       self._ksp.setType(PETSc.KSP.Type.PREONLY)
-      pc = self._ksp.getPC()
-      pc.setType(PETSc.PC.Type.LU)
-      pc.setFactorSolverType("mumps")
+      self._pc = self._ksp.getPC()
+      self._pc.setType(PETSc.PC.Type.LU)
+      self._pc.setFactorSolverType("mumps")
       self._ksp.setOperators(self._mat)
 
       # MUMPS ICNTL parameters must be set before setUp (before symbolic
       # analysis).  We use PETSc options which are read during setUp.
       opts = PETSc.Options()
-      # ICNTL(14): percentage increase in estimated working space.  The
-      # default (20) is too small for quasidefinite KKT matrices whose
-      # fill-in grows as the diagonal becomes ill-conditioned.
+      # ICNTL(14): percentage increase in estimated working space.
+      # Quasidefinite KKT matrices need generous headroom; MUMPS may
+      # silently produce poor-quality factors when space is tight.
       opts.setValue("-mat_mumps_icntl_14", "2000")
       # ICNTL(24): null pivot detection — important for near-singular
       # systems that arise during infeasibility / unboundedness detection.
@@ -233,6 +233,8 @@ class MumpsSolver(LinearSolver):
 
       # Trigger symbolic analysis + first numeric factorization.
       self._ksp.setUp()
+      self._F = self._pc.getFactorMatrix()
+      self._mumps_icntl_14 = self._F.getMumpsIcntl(14)
 
       # Pre-allocate RHS and solution vectors.
       self._b = self._mat.createVecRight()
@@ -242,6 +244,14 @@ class MumpsSolver(LinearSolver):
       # Subsequent calls: the shared data array already has the new values
       # (DirectKktSolver updates the scipy matrix in-place).  We just need
       # to tell PETSc the values changed and redo the numeric factorization.
+      self._mat.stateIncrease()
+      self._ksp.setUp()
+
+    # If MUMPS ran out of working space (INFOG(1) == -9), double ICNTL(14)
+    # and retry until it succeeds.
+    while self._F.getMumpsInfog(1) == -9:
+      self._mumps_icntl_14 *= 2
+      self._F.setMumpsIcntl(14, self._mumps_icntl_14)
       self._mat.stateIncrease()
       self._ksp.setUp()
 
