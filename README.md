@@ -199,10 +199,10 @@ solvers:
 
 #### Dense Cholesky: `qtqp.LinearSolver.SCIPY_DENSE`
 
-A dense Cholesky factorization of the n×n Gram matrix
-`G = R_x + P + A' diag(1/R_y) A` via LAPACK (`dpotrf`/`dpotrs`). Uses
-Schur-complement reduction to factorize n×n instead of (n+m)×(n+m).
-Recommended for small-to-medium problems where sparse overhead dominates.
+Uses Schur-complement (Gram) reduction to eliminate y from the KKT system,
+producing an n×n SPD Gram matrix `G = P + diag(R_x) + A' diag(1/R_y) A`
+factorized via Cholesky (LAPACK `dpotrf`/`dpotrs`). Reduces factorization
+cost from O((n+m)^3) to O(n^3), a large win when m >> n (typical for QPs).
 No additional dependencies required.
 
 #### UMFPACK: `qtqp.LinearSolver.UMFPACK`
@@ -269,8 +269,8 @@ python -m pip install cupy-cuda12x
 
 #### cupy dense GPU: `qtqp.LinearSolver.CUPY_DENSE`
 
-GPU Cholesky factorization of the n×n Gram matrix via cupy/cuSOLVER. Uses the
-same Schur-complement reduction as SCIPY_DENSE. To install
+GPU counterpart of SCIPY_DENSE: same Gram/Schur-complement reduction with
+Cholesky factorization on GPU via cupy/cuSOLVER (requires a GPU). To install
 
 ```bash
 python -m pip install cupy-cuda12x
