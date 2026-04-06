@@ -72,30 +72,30 @@ class MklPardisoSolver(LinearSolver):
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
       # iparm(10): pivot perturbation exponent, perturbation = 10^(-iparm(10)).
-      #   Default for symmetric indefinite is 13 (10^-13).  We loosen to
-      #   10^-5 because near-singular KKT systems that arise during
-      #   infeasibility/unboundedness detection need more room; going
-      #   tighter (e.g. 8) causes zero-pivot errors on those systems.
+      #   Default for symmetric indefinite is 13 (10^-13).  We match the
+      #   solver's static regularization floor (10^-8).
       # iparm(12)=1: improved accuracy via symmetric weighted matching.
       # iparm(24)=1: two-level parallel factorization algorithm.
       # Note: these are set after __init__ (which calls analyze+factor),
       # so they only take effect from the second factorization onward.
-      self.factorization.set_iparm(10, 5)
+      self.factorization.set_iparm(10, 8)
       self.factorization.set_iparm(12, 1)
       self.factorization.set_iparm(24, 1)
-      # self.factorization.set_iparm(25, 2)
     else:
       self.factorization.refactor(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
       return self.factorization.solve(rhs)
-    except self.mkl_solver.PardisoError as e:
-      logging.warning("PardisoError: %s", e)
-      logging.warning("Performing analysis and factorization steps again.")
+    except self.mkl_solver.PardisoError:
+      # Near-singular KKT systems (infeasibility/unboundedness detection)
+      # can cause zero-pivot errors.  Retry with a looser perturbation.
+      self.factorization.set_iparm(10, 4)
       self.factorization._analyze()  # pylint: disable=protected-access
       self.factorization._factor()  # pylint: disable=protected-access
-      return self.factorization.solve(rhs)
+      result = self.factorization.solve(rhs)
+      self.factorization.set_iparm(10, 8)
+      return result
 
   def format(self) -> Literal["csr"]:
     return "csr"
