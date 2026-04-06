@@ -277,7 +277,7 @@ class QTQP:
         max_iterative_refinement_steps=max_iterative_refinement_steps,
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
-        solver=linear_solver.value(n=self.n, m=self.m, z=self.z),
+        solver=linear_solver.value(),
     )
 
     stats = []

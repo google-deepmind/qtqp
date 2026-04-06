@@ -29,7 +29,12 @@ class LinearSolver:
   efficient matvec (e.g. a pre-allocated dense array).
   """
 
-  def __init__(self, **kwargs):
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    """Stores problem dimensions; called once before set_kkt.
+
+    Dense solvers override this to pre-allocate buffers sized by n and m.
+    Sparse solvers ignore it (the default is a no-op).
+    """
     pass
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
@@ -63,8 +68,7 @@ class LinearSolver:
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pydiso.mkl_solver.MKLPardisoSolver."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import pydiso.mkl_solver  # pylint: disable=g-import-not-at-top
 
     self.mkl_solver = pydiso.mkl_solver
@@ -100,8 +104,7 @@ class MklPardisoSolver(LinearSolver):
 class QdldlSolver(LinearSolver):
   """Wrapper around qdldl.Solver for quasi-definite LDL factorization."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import qdldl  # pylint: disable=g-import-not-at-top
 
     self.qdldl = qdldl
@@ -123,8 +126,7 @@ class QdldlSolver(LinearSolver):
 class ScipySolver(LinearSolver):
   """Wrapper around scipy.linalg.factorized."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     self.factorization = None
 
   def factorize(self):
@@ -140,8 +142,7 @@ class ScipySolver(LinearSolver):
 class CholModSolver(LinearSolver):
   """Wrapper around sksparse.cholmod for Cholesky LDLt factorization."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import sksparse.cholmod  # pylint: disable=g-import-not-at-top
 
     self.cholmod = sksparse.cholmod
@@ -163,8 +164,7 @@ class CholModSolver(LinearSolver):
 class EigenSolver(LinearSolver):
   """Wrapper around Eigen Simplicial LDL^T."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import nanoeigenpy  # pylint: disable=g-import-not-at-top
 
     self.nanoeigenpy = nanoeigenpy
@@ -187,8 +187,7 @@ class EigenSolver(LinearSolver):
 class MumpsSolver(LinearSolver):
   """Wrapper for MUMPS solver (via petsc4py)."""
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
     self.PETSc = petsc4py.PETSc  # pylint: disable=invalid-name
@@ -253,8 +252,7 @@ class CuDssSolver(LinearSolver):
   (which would invalidate the plan).
   """
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import cupy  # pylint: disable=g-import-not-at-top
     import cupyx.scipy.sparse  # pylint: disable=g-import-not-at-top
     import nvmath  # pylint: disable=g-import-not-at-top
@@ -330,8 +328,7 @@ class UmfpackSolver(LinearSolver):
   the cheaper numeric factorization.
   """
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import scikits.umfpack as umfpack  # pylint: disable=g-import-not-at-top
 
     self._umfpack = umfpack
@@ -363,14 +360,13 @@ class ScipyDenseSolver(LinearSolver):
   m >> n (typical for QPs).
   """
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     from scipy.linalg import lapack  # pylint: disable=g-import-not-at-top
 
     self._dpotrf = lapack.dpotrf
     self._dpotrs = lapack.dpotrs
-    self._n = kwargs['n']
-    self._m = kwargs['m']
+    self._n = 0
+    self._m = 0
 
     # Blocks extracted once from the KKT scaffold.
     self._A: np.ndarray | None = None       # (m, n) dense
@@ -386,6 +382,10 @@ class ScipyDenseSolver(LinearSolver):
 
     # Scratch buffer for scaled A (avoids per-iteration allocation).
     self._A_scaled: np.ndarray | None = None  # (m, n)
+
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    self._n = n
+    self._m = m
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     n, m = self._n, self._m
@@ -451,15 +451,14 @@ class CupyDenseSolver(LinearSolver):
   factorizes with Cholesky via cupyx.scipy.linalg.cho_factor.
   """
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
+  def __init__(self):
     import cupy  # pylint: disable=g-import-not-at-top
     import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
 
     self._cp = cupy
     self._linalg = cupyx.scipy.linalg
-    self._n = kwargs['n']
-    self._m = kwargs['m']
+    self._n = 0
+    self._m = 0
 
     self._A_gpu = None
     self._P_offdiag_gpu = None
@@ -467,6 +466,10 @@ class CupyDenseSolver(LinearSolver):
     self._R_y_gpu = None
     self._G_gpu = None
     self._cho = None  # (cho, lower) tuple from cho_factor
+
+  def set_dims(self, n: int, m: int, z: int) -> None:
+    self._n = n
+    self._m = m
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     cp = self._cp
@@ -568,6 +571,7 @@ class DirectKktSolver:
     self._atol = atol
     self._rtol = rtol
     self._solver = solver
+    self._solver.set_dims(n=self.n, m=self.m, z=self.z)
 
     # Build the KKT scaffold once. NaN is used as a sentinel to mark the
     # diagonal positions that must be overwritten each iteration (because they

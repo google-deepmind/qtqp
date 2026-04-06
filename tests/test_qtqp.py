@@ -336,7 +336,7 @@ def test_direct_linear_solver(seed, linear_solver):
       max_iterative_refinement_steps=10,
       atol=1e-12,
       rtol=1e-12,
-      solver=linear_solver.value(n=n, m=m, z=z),
+      solver=linear_solver.value(),
   )
   q = np.concatenate([c, b])
   linear_solver.update(mu=mu, s=s, y=y)
@@ -373,7 +373,7 @@ def test_resolvent_operator(seed, linear_solver):
       max_iterative_refinement_steps=10,
       atol=1e-12,
       rtol=1e-12,
-      solver=linear_solver.value(n=n, m=m, z=z),
+      solver=linear_solver.value(),
   )
   solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
   solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
@@ -442,7 +442,7 @@ def test_newton_step_converges_to_central_path(seed, linear_solver):
       max_iterative_refinement_steps=10,
       atol=1e-12,
       rtol=1e-12,
-      solver=linear_solver.value(n=n, m=m, z=z),
+      solver=linear_solver.value(),
   )
   for _ in range(20):  # 20 steps should be enough for convergence.
     solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
@@ -547,7 +547,7 @@ def test_equivalent_tau_solution(seed, linear_solver):
       max_iterative_refinement_steps=10,
       atol=1e-12,
       rtol=1e-12,
-      solver=linear_solver.value(n=n, m=m, z=z),
+      solver=linear_solver.value(),
   )
   solver._linear_solver.update(mu=mu, s=s, y=y)  # pylint: disable=protected-access
   solver.kinv_q, _ = solver._linear_solver.solve(  # pylint: disable=protected-access
