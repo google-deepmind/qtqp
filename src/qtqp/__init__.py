@@ -54,7 +54,6 @@ class LinearSolver(enum.Enum):
 
   SCIPY = direct.ScipySolver
   SCIPY_DENSE = direct.ScipyDenseSolver
-  DENSE_LDLT = direct.DenseLdltSolver
   CUPY_DENSE = direct.CupyDenseSolver
   UMFPACK = direct.UmfpackSolver
   PARDISO = direct.MklPardisoSolver

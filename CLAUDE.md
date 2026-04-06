@@ -46,7 +46,7 @@ The solver lives in two files under `src/qtqp/`:
 
 Preprocessing: Ruiz equilibration (`_equilibrate`) scales A and P rows/columns for numerical stability. The `tau` variable enables homogeneous embedding for infeasible/unbounded detection.
 
-**`direct.py`** — `DirectKktSolver` wraps multiple backend linear solvers via a Protocol interface. Default is scipy; optional backends require extra packages: `qdldl`, `scikit-sparse` (CHOLMOD), `nanoeigenpy` (Eigen), `pydiso` (MKL Pardiso), `petsc4py` (MUMPS), `nvidia-cudss` + `cupy` (CUDSS GPU sparse), `cupy` (CUPY_DENSE GPU dense). The solver builds the augmented KKT matrix, factorizes it, and performs iterative refinement each call to `.solve()`.
+**`direct.py`** — `DirectKktSolver` wraps multiple backend linear solvers via a Protocol interface. Default is scipy; optional backends require extra packages: `qdldl`, `scikit-sparse` (CHOLMOD), `nanoeigenpy` (Eigen), `pydiso` (MKL Pardiso), `petsc4py` (MUMPS), `nvidia-cudss` + `cupy` (CUDSS GPU sparse), `cupy` (CUPY_DENSE GPU dense). Sparse solvers factorize the full (n+m)x(n+m) KKT matrix. Dense solvers (`SCIPY_DENSE`, `CUPY_DENSE`) use a Gram/Schur-complement reduction to factorize an n×n SPD system with Cholesky instead. The solver performs iterative refinement each call to `.solve()`.
 
 **`tests/test_qtqp.py`** — Integration tests that call the full solver. `conftest.py` provides a fixture that collects per-iteration stats. Tests check solution accuracy with `np.testing.assert_allclose`.
 
@@ -54,4 +54,4 @@ Preprocessing: Ruiz equilibration (`_equilibrate`) scales A and P rows/columns f
 
 - Input matrices must be in CSC (compressed sparse column) format
 - Python 3.9+ required; core deps are numpy ≥1.23 and scipy ≥1.9
-- CI runs on Ubuntu/macOS/Windows with Python 3.10–3.13
+- CI runs on Ubuntu/macOS/Windows with Python 3.10–3.14
