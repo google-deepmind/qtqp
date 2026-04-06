@@ -351,13 +351,34 @@ class UmfpackSolver(LinearSolver):
 class ScipyDenseSolver(LinearSolver):
   """Dense Cholesky solver via Gram/Schur-complement reduction.
 
-  Instead of factorizing the full (n+m)x(n+m) KKT system, forms the n x n
-  Gram matrix G = diag(R_x) + P_offdiag + A' diag(1/R_y) A and factorizes
-  with Cholesky (dpotrf).  G is SPD because R_x > 0 (regularized), P is PSD,
-  and A' diag(1/R_y) A is PSD.
+  Instead of factorizing the full (n+m)x(n+m) KKT system, eliminates y to
+  obtain an n x n SPD system solved by Cholesky (dpotrf).  Reduces
+  factorization cost from O((n+m)^3) to O(n^3), a large win when m >> n
+  (typical for QPs).
 
-  Reduces factorization cost from O((n+m)^3) to O(n^3), a large win when
-  m >> n (typical for QPs).
+  **Derivation.**  The KKT system is:
+
+      [ H   A'] [x]   [r_x]
+      [ A  -D ] [y] = [r_y]
+
+  where H = P + diag(R_x) (n x n, SPD) and D = diag(R_y) (m x m, D > 0).
+  From the second row:  y = D^{-1} (A x - r_y).
+  Substituting into the first row gives the Gram (normal-equations) system:
+
+      G x = r_x + A' D^{-1} r_y,   where  G = H + A' D^{-1} A.
+
+  G is SPD (H is SPD from regularization, A' D^{-1} A is PSD).
+
+  **Implementation.**  The KKT diagonal mixes P's diagonal with R_x (the
+  regularization), so we store P_offdiag (P with diagonal zeroed) once and
+  read the combined diagonal each iteration:
+
+      G = P_offdiag + diag(kkt_diag[:n]) + A' D^{-1} A
+        = P_offdiag + diag(P_diag + R_x)  + A' D^{-1} A
+        = P + diag(R_x) + A' D^{-1} A     = H + A' D^{-1} A.
+
+  The A' D^{-1} A term is formed via dsyrk on A_scaled = diag(1/sqrt(R_y)) A
+  so that A_scaled' A_scaled = A' D^{-1} A, exploiting BLAS3 symmetry.
   """
 
   def __init__(self):
@@ -451,9 +472,9 @@ class ScipyDenseSolver(LinearSolver):
 class CupyDenseSolver(LinearSolver):
   """GPU Cholesky solver via Gram/Schur-complement reduction (cupy).
 
-  GPU counterpart of ScipyDenseSolver: forms the n x n Gram matrix
-  G = diag(R_x) + P_offdiag + A' diag(1/R_y) A on the GPU and
-  factorizes with Cholesky via cupyx.scipy.linalg.cho_factor.
+  GPU counterpart of ScipyDenseSolver.  See that class's docstring for the
+  Gram derivation.  Forms G = H + A' D^{-1} A on the GPU and factorizes
+  with Cholesky via cupyx.scipy.linalg.cho_factor.
   """
 
   def __init__(self):
