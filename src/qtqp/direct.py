@@ -159,6 +159,7 @@ class DirectKktSolver:
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
+    self._mu = mu
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     self._true_diags[: self.n] = self._p_diags + mu
@@ -208,7 +209,14 @@ class DirectKktSolver:
     # Use pre-allocated buffer to avoid a copy allocation on every call.
     np.copyto(self._kkt_rhs, rhs)
     self._kkt_rhs[self.n :] *= -1.0
-    tolerance = self._atol + self._rtol * np.linalg.norm(self._kkt_rhs, np.inf)
+    # Adaptive tolerance: scale with mu so early IPM iterations (large mu,
+    # well-conditioned) use loose tolerances, saving refinement steps.
+    # IPM convergence only requires solve error = o(mu), so c*mu is safe.
+    # The atol/rtol floor ensures accuracy at convergence (small mu).
+    tolerance = max(
+        self._atol + self._rtol * np.linalg.norm(self._kkt_rhs, np.inf),
+        1e-4 * self._mu,
+    )
 
     # Initial sol and residual.
     # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
