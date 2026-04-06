@@ -38,10 +38,9 @@ _SOLVERS = [
 if sys.platform.startswith('linux'):
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 
-# MUMPS is producting NaNs, disable for now.
-# Petsc4py not available on windows
-# if not sys.platform.startswith('win32'):
-#  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+# Petsc4py not available on windows.
+if not sys.platform.startswith('win32'):
+  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
 
 
 def _gen_feasible(m, n, z, random_state=None):
