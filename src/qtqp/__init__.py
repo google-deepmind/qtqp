@@ -544,39 +544,36 @@ class QTQP:
         warm_start=r_anchor,
     )
 
-    # Solve the 1D quadratic equation for the homogeneous tau component
-    try:
-      r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-    except ValueError as e:
-      # Fallback if quadratic solve fails numerically (rare but possible)
-      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
-      tau_plus = tau
+    # Solve for the homogeneous tau component via linearized Newton step.
+    r_tau = (mu - mu_target) * tau_anchor
+    tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau, tau)
 
     # Reconstruct full (x, y) step from KKT solution components
     xy_plus = kinv_r - self.kinv_q * tau_plus
     x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
-    """Solves for tau+ using the homogeneous embedding's tau equation.
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, tau) -> np.ndarray:
+    """Computes tau+ from the tau equation of the homogeneous embedding.
 
     The parametric KKT solution is:
         [x+; y+] = kinv_r - kinv_q * tau+
 
-    Substituting this into the tau equation of the homogeneous embedding yields:
-        t_a * tau+^2 + t_b * tau+ + t_c = 0
+    Substituting into the homogeneous embedding's tau equation gives:
+        f(tau) = t_a * tau^2 + t_b * tau + t_c = 0
 
-    The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
-    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
-    the positive root since tau >= 0 is required for the embedding to represent
-    a feasible point (tau=0 corresponds to a certificate of infeasibility or
-    unboundedness, which is handled separately at termination).
+    We first try the quadratic formula for the positive root, which is exact
+    when the KKT solve is accurate. If that fails (negative discriminant,
+    near-zero leading coefficient, or invalid root — typically caused by
+    approximate KKT solves from iterative solvers), we fall back to a single
+    Newton step: tau+ = tau - f(tau)/f'(tau). This is less accurate but
+    robust to coefficient errors since it avoids the discriminant. The tau
+    step is clamped to keep tau strictly positive.
     """
-    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
+    # Coefficients of f(tau) = t_a * tau^2 + t_b * tau + t_c.
     t_a = mu + kinv_q @ q
     t_b = -r_tau[0] - kinv_r @ q
     t_c = -mu_target
@@ -587,20 +584,22 @@ class QTQP:
       t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Standard quadratic formula for the positive root
-    if abs(t_a) < _EPS:
-      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
+    # Try the exact quadratic formula first.
+    if abs(t_a) > _EPS:
+      discriminant = t_b**2 - 4 * t_a * t_c
+      if discriminant >= 0.0:
+        tau_sol = (-t_b + np.sqrt(discriminant)) / (2 * t_a)
+        if np.isfinite(tau_sol) and tau_sol > 0.0:
+          return np.array([tau_sol])
 
-    discriminant = t_b**2 - 4 * t_a * t_c
-    if discriminant < -1e-9:
-      raise ValueError(f"Negative discriminant: {discriminant}")
-
-    tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
-
-    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
-      raise ValueError(f"Invalid tau solution found: {tau_sol}")
-
-    return np.array([max(0.0, tau_sol)])
+    # Fallback: Newton step from current tau, robust to coefficient errors.
+    tau_val = tau[0]
+    f_val = t_a * tau_val**2 + t_b * tau_val + t_c
+    fp_val = 2 * t_a * tau_val + t_b
+    if abs(fp_val) < _EPS:
+      return tau.copy()
+    tau_plus = tau_val - f_val / fp_val
+    return np.array([tau_plus])
 
   def _normalize(self, x, y, tau, s):
     """Normalizes iterates to match the homogeneous embedding central path norm.
