@@ -39,11 +39,7 @@ if sys.platform.startswith('linux'):
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':
-  try:
-    import macldlt  # noqa: F401
-    _SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
-  except ImportError:
-    print('Skipping ACCELERATE tests: macldlt not installed')
+  _SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
 
 # Petsc4py not available on windows; some conda builds also fail to load
 # (e.g. CUDA-linked builds on machines without a GPU).
