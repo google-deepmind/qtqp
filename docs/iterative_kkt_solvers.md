@@ -4,6 +4,25 @@ This document records the experiments and findings from investigating iterative
 (matrix-free) alternatives to direct factorization for solving KKT systems in
 QTQP's primal-dual interior point method.
 
+## TL;DR
+
+**CG on the normal equations is the only iterative method that works.** All
+attempts to solve the full (n+m) x (n+m) KKT system iteratively failed --
+including MINRES with diagonal scaling (4 variants), PETSc GMRES with block
+fieldsplit (6 configurations), full ILU (2 configs), and Schur complement
+fieldsplit (5 configs). Every method breaks down at small mu (barrier parameter)
+because no tested preconditioner adequately captures the off-diagonal A/A^T
+coupling that dominates the KKT system as mu -> 0.
+
+CG on normal equations works by reducing to an n x n SPD system where a cheap
+diagonal preconditioner (`diag(P) + mu + colsum(A^2/d)`) captures both
+diagonal and off-diagonal contributions. This is implemented as
+`LinearSolver.CG` and passes all 218 tests.
+
+**If you are revisiting this work**: the barrier is preconditioning, not the
+Krylov method. Any future attempt on the full KKT needs a preconditioner that
+accounts for A/A^T coupling -- see "Future Directions" at the end.
+
 ## Background
 
 QTQP solves QPs via a primal-dual IPM. Each iteration solves multiple KKT systems
@@ -33,7 +52,21 @@ QTQP adds `mu*I` to both diagonal blocks (not just the (1,1) block). This means:
 The condition number of the KKT matrix is O(||A||^2 / mu^2), which grows as
 mu -> 0. This is the central challenge for iterative methods.
 
-## Approaches Tested
+## Summary of Results
+
+| Approach | Passes tests? | Failure mode |
+|----------|:---:|---|
+| CG on normal equations | YES | -- |
+| MINRES + diagonal preconditioner (scipy) | no | scipy checks preconditioned residual, not true residual |
+| MINRES unpreconditioned | no | kappa = O(1/mu^2), cannot converge at small mu |
+| MINRES + explicit diagonal scaling | no | unscaling amplifies residual by O(1/sqrt(mu)) |
+| MINRES + scaling + iterative refinement | no | each refinement step has same amplification |
+| PETSc GMRES + ICC/Jacobi fieldsplit | no | block PC ignores A/A^T coupling, breaks down at mu ~ 1e-4 |
+| PETSc GMRES + full ILU | no | ILU quality degrades at small mu |
+| PETSc Schur complement (5 variants) | no | inner solve needs normal-equations-quality preconditioner |
+| Direct LU (baseline) | YES | -- (but O(nnz^1.5) fill-in) |
+
+## Detailed Experiments
 
 ### 1. CG on Normal Equations (WORKS -- shipped as `LinearSolver.CG`)
 
@@ -241,33 +274,49 @@ Schur complement only uses -(D+mu*I) (the (2,2) block), missing the
 for the Schur complement would need `diag(A(P+mu*I)^{-1}A^T)` -- which is
 exactly what CgNormalEqSolver already computes.
 
-## Why CG on Normal Equations is the Right Approach
+## Why Every Full-KKT Iterative Method Failed
 
-The experiments above show a consistent pattern: all iterative methods on the
-full (n+m) x (n+m) KKT system fail at small mu because:
+All tested methods on the full (n+m) x (n+m) KKT system share the same root
+cause: **no tested preconditioner captures the off-diagonal A/A^T coupling**.
 
-1. **Block preconditioners** ignore the A/A^T coupling that dominates at small mu
-2. **Full ILU** quality degrades with the condition number
-3. **Diagonal scaling** reduces kappa but introduces unscaling amplification
-4. **Schur complement** needs a good inner preconditioner, which is the normal
-   equations diagonal -- exactly what CG on normal equations already uses
+As mu -> 0, the KKT diagonal blocks shrink to O(mu) while the off-diagonal
+blocks A, A^T remain O(||A||). This means the off-diagonal coupling dominates
+the system, and any preconditioner that ignores it (block-diagonal, diagonal
+scaling, ILU with limited fill) becomes ineffective.
 
-CG on normal equations succeeds because:
+Specifically:
+- **Block preconditioners** treat A/A^T as zero -- completely wrong at small mu
+- **Diagonal scaling** equalizes the diagonal but cannot touch the off-diagonal
+  structure, and unscaling amplifies the residual by O(1/sqrt(mu))
+- **Full ILU** tries to capture coupling but its quality degrades as
+  kappa = O(1/mu^2) grows -- the incomplete factorization becomes a poor
+  approximation of a very ill-conditioned matrix
+- **Schur complement** properly accounts for coupling in principle, but the
+  inner solve on the Schur complement S = D + A H^{-1} A^T needs a
+  preconditioner that captures `diag(A H^{-1} A^T)` -- which is exactly
+  the normal equations preconditioner
 
-1. **SPD structure**: The reduction eliminates the indefinite structure, giving
-   an n x n SPD system amenable to CG
-2. **Effective preconditioner**: `diag(N) = diag(P) + mu + colsum(A^2/d)` captures
-   both the P and A^T D^{-1} A contributions to N's diagonal
-3. **Matrix-free**: N is never formed explicitly; each CG iteration costs
-   O(nnz(A)) via `N v = (P+mu*I)v + A^T(D^{-1}(Av))`
+## Why CG on Normal Equations Succeeds
+
+CG on normal equations avoids the preconditioning barrier by **eliminating the
+indefinite structure entirely**:
+
+1. **SPD reduction**: Substituting y out gives N = H + A^T D^{-1} A, an n x n
+   SPD system. No indefiniteness, no sign-dependent amplification.
+2. **The preconditioner captures off-diagonal coupling**: `diag(N) = diag(P) + mu + colsum(A^2/d)` includes the `A^T D^{-1} A` contribution. This is
+   the key difference -- every failed method lacked this.
+3. **Matrix-free**: N is never formed; each CG iteration costs O(nnz(A)) via
+   `N v = (P+mu*I)v + A^T(D^{-1}(Av))`
 4. **No fill-in**: Unlike direct methods, there is no sparse factorization
 
-The Schur complement approach via PETSc is mathematically equivalent but with
-more complexity and no advantage over the scipy CG implementation.
+The PETSc Schur complement approach is mathematically equivalent (the Schur
+complement IS the normal equations) but with more complexity and no advantage
+over scipy CG with the diagonal preconditioner.
 
 ## Conditioning Analysis
 
-Both the full KKT and normal equations N have condition number O(||A||^2/mu^2):
+**Key fact**: Both the full KKT and normal equations N have condition number
+**O(||A||^2/mu^2)** -- they are equally ill-conditioned.
 
 - **KKT**: eigenvalues in `[-max(d+mu), -mu] U [mu, max(diag(P)+mu) + ||A||^2/mu]`,
   giving `kappa(KKT) = O(||A||^2/mu^2)`
@@ -275,14 +324,15 @@ Both the full KKT and normal equations N have condition number O(||A||^2/mu^2):
   `lambda_min >= mu` and `lambda_max >= ||A_eq||^2/mu`,
   giving `kappa(N) >= ||A_eq||^2/mu^2`
 
-The diagonal preconditioner for N reduces the effective condition number
-significantly in practice, making CG iteration counts manageable across all
-mu values encountered in the IPM.
+CG on normal equations does NOT succeed because of better conditioning. It
+succeeds because its diagonal preconditioner is effective (capturing both
+diagonal and off-diagonal contributions to N), while no comparably cheap
+preconditioner exists for the full indefinite KKT.
 
-An initial claim that QTQP's mu*I regularization gives O(1/mu) conditioning
-(vs O(1/mu^2) for standard IPMs) was incorrect. The mu*I terms bound the
-smallest eigenvalue at O(mu), but the largest eigenvalue is dominated by the
-off-diagonal coupling ||A||^2/mu, giving O(1/mu^2) regardless.
+**Corrected misconception**: An initial claim that QTQP's mu*I regularization
+gives O(1/mu) conditioning (vs O(1/mu^2) for standard IPMs) was wrong. The
+mu*I terms bound the smallest eigenvalue at O(mu), but the largest eigenvalue
+is dominated by the off-diagonal coupling ||A||^2/mu, giving O(1/mu^2).
 
 ## Code in This Branch
 
