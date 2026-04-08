@@ -41,6 +41,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import direct
+from . import indirect
 
 __version__ = "0.0.3"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -63,6 +64,9 @@ class LinearSolver(enum.Enum):
   CUDSS = direct.CuDssSolver
   EIGEN = direct.EigenSolver
   MUMPS = direct.MumpsSolver
+  MINRES = indirect.ScipyMinresSolver
+  MINRES_PETSC = indirect.PetscFieldSplitSolver
+  CG = indirect.CgNormalEqSolver
 
 
 class SolutionStatus(enum.Enum):
@@ -270,16 +274,39 @@ class QTQP:
     self._norm_b = _norm(self.b, np.inf)
     self._norm_c = _norm(self.c, np.inf)
 
-    self._linear_solver = direct.DirectKktSolver(
-        a=a,
-        p=p,
-        z=self.z,
-        min_static_regularization=min_static_regularization,
-        max_iterative_refinement_steps=max_iterative_refinement_steps,
-        atol=linear_solver_atol,
-        rtol=linear_solver_rtol,
-        solver=linear_solver.value(),
-    )
+    if linear_solver.value is indirect.CgNormalEqSolver:
+      self._linear_solver = indirect.CgNormalEqSolver(
+          a=a,
+          p=p,
+          z=self.z,
+          atol=linear_solver_atol,
+          rtol=linear_solver_rtol,
+      )
+    elif issubclass(linear_solver.value, indirect.IterativeSolver):
+      # PetscFieldSplitSolver needs (n, m) dimensions; others take no args.
+      if issubclass(linear_solver.value, indirect.PetscFieldSplitSolver):
+        solver_instance = linear_solver.value(n=self.n, m=self.m)
+      else:
+        solver_instance = linear_solver.value()
+      self._linear_solver = indirect.IndirectKktSolver(
+          a=a,
+          p=p,
+          z=self.z,
+          atol=linear_solver_atol,
+          rtol=linear_solver_rtol,
+          solver=solver_instance,
+      )
+    else:
+      self._linear_solver = direct.DirectKktSolver(
+          a=a,
+          p=p,
+          z=self.z,
+          min_static_regularization=min_static_regularization,
+          max_iterative_refinement_steps=max_iterative_refinement_steps,
+          atol=linear_solver_atol,
+          rtol=linear_solver_rtol,
+          solver=linear_solver.value(),
+      )
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.

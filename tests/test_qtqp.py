@@ -28,7 +28,26 @@ _SOLVERS = [
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
+    qtqp.LinearSolver.MINRES,
+    qtqp.LinearSolver.CG,
 ]
+
+# Iterative solvers need looser IPM and assertion tolerances.
+_ITERATIVE_SOLVERS = {
+    qtqp.LinearSolver.MINRES,
+    qtqp.LinearSolver.CG,
+    qtqp.LinearSolver.MINRES_PETSC,
+}
+_ITERATIVE_TOL = dict(atol=1e-4, rtol=1e-4)
+_ITERATIVE_SOLVE_TOL = dict(
+    atol=1e-4,
+    rtol=1e-4,
+    atol_infeas=1e-4,
+    rtol_infeas=1e-4,
+    linear_solver_atol=1e-8,
+    linear_solver_rtol=1e-8,
+)
+_DIRECT_SOLVERS = [s for s in _SOLVERS if s not in _ITERATIVE_SOLVERS]
 
 
 class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
@@ -46,25 +65,30 @@ class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
 try:
   import pymklpardiso  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+  _DIRECT_SOLVERS.append(qtqp.LinearSolver.PARDISO)
 except (ImportError, ModuleNotFoundError) as e:
   print(f'Skipping PARDISO tests: {e}')
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':
   _SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
+  _DIRECT_SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
 
 # Petsc4py not available on windows; some conda builds also fail to load
 # (e.g. CUDA-linked builds on machines without a GPU).
 try:
   import petsc4py.PETSc  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
+  _DIRECT_SOLVERS.append(qtqp.LinearSolver.MUMPS)
+  _SOLVERS.append(qtqp.LinearSolver.MINRES_PETSC)
 except (ImportError, ModuleNotFoundError) as e:
-  print(f'Skipping MUMPS tests: {e}')
+  print(f'Skipping MUMPS/MINRES_PETSC tests: {e}')
 
 try:
   import cupy  # noqa: F401
   if cupy.cuda.runtime.getDeviceCount() > 0:
     _SOLVERS.append(qtqp.LinearSolver.CUPY_DENSE)
+    _DIRECT_SOLVERS.append(qtqp.LinearSolver.CUPY_DENSE)
 except Exception as e:  # pylint: disable=broad-exception-caught
   print(f'Skipping CUPY_DENSE tests: {e}')
 
@@ -73,6 +97,7 @@ try:
   import nvmath  # noqa: F401
   if cupy.cuda.runtime.getDeviceCount() > 0:
     _SOLVERS.append(qtqp.LinearSolver.CUDSS)
+    _DIRECT_SOLVERS.append(qtqp.LinearSolver.CUDSS)
 except Exception as e:  # pylint: disable=broad-exception-caught
   print(f'Skipping CUDSS tests: {e}')
 
@@ -224,15 +249,19 @@ def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   # Record stats
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
-  _assert_solution(solution, a, b, c, p, z)
+  _assert_solution(solution, a, b, c, p, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -244,15 +273,19 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   # Record stats
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
-  _assert_infeasible(solution, a, b, z)
+  _assert_infeasible(solution, a, b, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -264,15 +297,19 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   # Record stats
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
 
-  _assert_unbounded(solution, a, c, p, z)
+  _assert_unbounded(solution, a, c, p, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -283,13 +320,17 @@ def test_solve_large(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_solution(solution, a, b, c, p, z)
+  _assert_solution(solution, a, b, c, p, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -300,13 +341,17 @@ def test_infeasible_large(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_infeasible(solution, a, b, z)
+  _assert_infeasible(solution, a, b, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -317,13 +362,17 @@ def test_unbounded_large(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_unbounded(solution, a, c, p, z)
+  _assert_unbounded(solution, a, c, p, z, **assert_tol)
 
 
 def test_raise_error_no_positive_constraints():
@@ -351,7 +400,7 @@ def test_raise_error_negative_invalid_shapes():
 
 
 @pytest.mark.parametrize('seed', 842 + np.arange(10))
-@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('linear_solver', _DIRECT_SOLVERS)
 def test_direct_linear_solver(seed, linear_solver):
   """Test that the direct linear solver works as expected."""
   rng = np.random.default_rng(seed)
@@ -433,7 +482,7 @@ def test_upper_triangular_kkt_matvec_matches_full():
 
 
 @pytest.mark.parametrize('seed', 942 + np.arange(20))
-@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('linear_solver', _DIRECT_SOLVERS)
 def test_resolvent_operator(seed, linear_solver):
   """Test that the resolvent operator is correctly computed with regularization."""
   rng = np.random.default_rng(seed)
@@ -502,7 +551,7 @@ def test_resolvent_operator(seed, linear_solver):
 
 
 @pytest.mark.parametrize('seed', 1042 + np.arange(10))
-@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('linear_solver', _DIRECT_SOLVERS)
 def test_newton_step_converges_to_central_path(seed, linear_solver):
   """Test that taking a few Newton steps converges for a fixed mu."""
   rng = np.random.default_rng(seed)
@@ -607,7 +656,7 @@ def _solve_for_tau_alternative(
 
 
 @pytest.mark.parametrize('seed', 1142 + np.arange(10))
-@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('linear_solver', _DIRECT_SOLVERS)
 def test_equivalent_tau_solution(seed, linear_solver):
   """Test that solving for tau using different methods gives equivalent results."""
   rng = np.random.default_rng(seed)
@@ -747,14 +796,17 @@ def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
   m, n, z = 50, 30, 5
   a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
   p_zero = sparse.csc_matrix((n, n))
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_solution(solution, a, b, c, p_zero, z)
+  _assert_solution(solution, a, b, c, p_zero, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -765,14 +817,17 @@ def test_infeasible_lp(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 5
   a, b, c, _ = _gen_infeasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_infeasible(solution, a, b, z)
+  _assert_infeasible(solution, a, b, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -789,14 +844,17 @@ def test_unbounded_lp(equilibrate, seed, linear_solver, record_iterations):
   m, n, z = 50, 30, 5
   a, b, c, _ = _gen_unbounded(m, n, z, random_state=rng)
   p_zero = sparse.csc_matrix((n, n))
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_unbounded(solution, a, c, p_zero, z)
+  _assert_unbounded(solution, a, c, p_zero, z, **assert_tol)
 
 
 # =============================================================================
@@ -831,14 +889,17 @@ def test_solve_all_inequalities(equilibrate, seed, linear_solver, record_iterati
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 0
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_solution(solution, a, b, c, p, z)
+  _assert_solution(solution, a, b, c, p, z, **assert_tol)
 
 
 # =============================================================================
@@ -853,14 +914,17 @@ def test_infeasible_small(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_infeasible(solution, a, b, z)
+  _assert_infeasible(solution, a, b, z, **assert_tol)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
@@ -871,14 +935,17 @@ def test_unbounded_small(equilibrate, seed, linear_solver, record_iterations):
   rng = np.random.default_rng(seed)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  iterative = linear_solver in _ITERATIVE_SOLVERS
+  solve_tol = _ITERATIVE_SOLVE_TOL if iterative else {}
+  assert_tol = _ITERATIVE_TOL if iterative else {}
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
-      verbose=False,
+      verbose=False, **solve_tol,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
-  _assert_unbounded(solution, a, c, p, z)
+  _assert_unbounded(solution, a, c, p, z, **assert_tol)
 
 
 # =============================================================================
