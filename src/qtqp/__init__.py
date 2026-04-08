@@ -52,6 +52,7 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 class LinearSolver(enum.Enum):
   """Available linear solvers."""
 
+  ACCELERATE = direct.AccelerateSolver
   SCIPY = direct.ScipySolver
   SCIPY_DENSE = direct.ScipyDenseSolver
   CUPY_DENSE = direct.CupyDenseSolver
