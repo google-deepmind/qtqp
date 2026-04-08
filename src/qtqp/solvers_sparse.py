@@ -34,23 +34,31 @@ class MklPardisoSolver(LinearSolver):
 
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.mkl_solver.MKLPardisoSolver(
+      # Subclass to intercept the start of the analysis phase
+      class HackedMKLPardisoSolver(self.mkl_solver.MKLPardisoSolver):
+        def _analyze(self):
+          # pydiso uses 0-based C indexing: set_iparm(i, v) sets C iparm[i],
+          # which is Fortran iparm(i+1).  Intel recommends for symmetric
+          # indefinite IPM/saddle-point systems:
+          #   Fortran iparm(10) = 8: pivot perturbation 10^-8 (C index 9)
+          #     Default is 13 (10^-13); 8 is recommended for IPM systems.
+          #   Fortran iparm(11) = 1: scaling (C index 10)
+          #   Fortran iparm(13) = 1: weighted matching (C index 12)
+          #   Fortran iparm(24) = 1: two-level parallel factorization (C index 23)
+          # 1. Inject parameters. The Cython object is created, memory is
+          # allocated, but the heavy math hasn't started yet.
+          self.set_iparm(9, 8)   # pivot perturbation
+          self.set_iparm(10, 1)  # scaling
+          self.set_iparm(12, 1)  # matching
+          self.set_iparm(23, 1)  # two-level parallel factorization
+
+          # 2. Proceed with the actual analysis using the new parameters
+          super()._analyze()
+
+      # When this instantiates, it will automatically call our overridden _analyze
+      self.factorization = HackedMKLPardisoSolver(
           self._kkt, matrix_type="real_symmetric_indefinite"
       )
-      # pydiso uses 0-based C indexing: set_iparm(i, v) sets C iparm[i],
-      # which is Fortran iparm(i+1).  Intel recommends for symmetric
-      # indefinite IPM/saddle-point systems:
-      #   Fortran iparm(10) = 8: pivot perturbation 10^-8 (C index 9)
-      #     Default is 13 (10^-13); 8 is recommended for IPM systems.
-      #   Fortran iparm(11) = 1: scaling (C index 10)
-      #   Fortran iparm(13) = 1: weighted matching (C index 12)
-      #   Fortran iparm(24) = 1: two-level parallel factorization (C index 23)
-      # Note: these are set after __init__ (which calls analyze+factor),
-      # so they only take effect from the second factorization onward.
-      self.factorization.set_iparm(9, 8)   # pivot perturbation
-      self.factorization.set_iparm(10, 1)  # scaling
-      self.factorization.set_iparm(12, 1)  # matching
-      self.factorization.set_iparm(23, 1)  # two-level parallel factorization
     else:
       self.factorization.refactor(self._kkt)
 
