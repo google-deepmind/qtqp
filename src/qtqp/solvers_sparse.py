@@ -244,7 +244,10 @@ class MumpsSolver(LinearSolver):
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     self._b.array[:] = rhs
     self._ksp.solve(self._b, self._x)
-    np.copyto(self._sol, self._x.array)
+    # Some PETSc conda builds use complex scalars, so the solution
+    # vector may be complex128.  Take the real part.
+    x = self._x.array
+    np.copyto(self._sol, x.real if np.iscomplexobj(x) else x)
     return self._sol
 
   def format(self) -> Literal["csr"]:
