@@ -33,9 +33,16 @@ _SOLVERS = [
     # qtqp.LinearSolver.CUPY_DENSE,
 ]
 
-# Only run PARDISO on linux for now.
-if sys.platform.startswith('linux'):
-  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+try:
+  import pydiso.mkl_solver  # noqa: F401
+  if sys.platform.startswith('linux') or (
+      sys.platform == 'win32' and sys.version_info[:2] != (3, 10)
+  ):
+    _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+  else:
+    print('Skipping PARDISO tests on Windows Python 3.10')
+except (ImportError, ModuleNotFoundError) as e:
+  print(f'Skipping PARDISO tests: {e}')
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':

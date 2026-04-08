@@ -32,9 +32,9 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
-      # MKL Pardiso not available on MacOS and failing on Windows.
-      - name: Install MKL Pardiso (Ubuntu only)
-        if: matrix.os == 'ubuntu-latest'
+      # MKL Pardiso is not available on macOS.
+      - name: Install MKL Pardiso
+        if: matrix.os != 'macos-latest'
         shell: bash -l {0}
         run: conda install -y -c conda-forge pydiso
 
@@ -95,4 +95,3 @@ jobs:
           print-hash: true
           # repository-url: https://test.pypi.org/legacy/
           # skip-existing: true
-
