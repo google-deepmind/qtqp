@@ -262,6 +262,28 @@ class MumpsSolver(LinearSolver):
     self._x = None
 
 
+class AccelerateSolver(LinearSolver):
+  """Wrapper around macldlt for Apple Accelerate sparse LDL^T (macOS only)."""
+
+  def __init__(self):
+    import macldlt  # pylint: disable=g-import-not-at-top
+
+    self._macldlt = macldlt
+    self._solver = None
+
+  def factorize(self):
+    if self._solver is None:
+      self._solver = self._macldlt.LDLTSolver(self._kkt)
+    else:
+      self._solver.refactor(self._kkt.data)
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    return self._solver.solve(rhs)
+
+  def format(self) -> Literal["csc"]:
+    return "csc"
+
+
 class UmfpackSolver(LinearSolver):
   """Wrapper around UMFPACK (via scikit-umfpack) for LU factorization.
 

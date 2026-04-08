@@ -273,6 +273,7 @@ class DirectKktSolver:
 
 # Re-export all backend solver classes so that ``direct.ScipySolver`` etc.
 # continue to work without changing __init__.py or test imports.
+from .solvers_sparse import AccelerateSolver
 from .solvers_sparse import CholModSolver
 from .solvers_sparse import EigenSolver
 from .solvers_sparse import MklPardisoSolver

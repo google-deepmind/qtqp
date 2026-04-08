@@ -257,6 +257,15 @@ Cholmod is available in the scikit sparse package. To install
 conda install scikit-sparse -c conda-forge
 ```
 
+#### Accelerate: `qtqp.LinearSolver.ACCELERATE`
+
+Apple Accelerate sparse LDL^T factorization via
+[macldlt](https://github.com/bodono/macldlt) (macOS only). To install
+
+```bash
+python -m pip install macldlt
+```
+
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
 
 cuDSS uses a GPU accelerated sparse direct solver (requires a GPU). To install
