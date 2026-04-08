@@ -482,3 +482,164 @@ class CgNormalEqSolver:
 
   def free(self):
     pass
+
+
+class MinresSolver:
+  """KKT solver via MINRES with diagonal scaling and iterative refinement.
+
+  Solves the full (n+m)x(n+m) symmetric indefinite KKT system:
+      [H    A^T] [x]   [r1]
+      [A   -D  ] [y] = [r2]
+
+  Explicitly scales the system as (S @ KKT @ S) @ z = S @ rhs where
+  S = diag(1/sqrt(|diag(KKT)|)), then uses iterative refinement on the true
+  (unscaled) residual to achieve the target accuracy. MINRES in the scaled
+  space converges quickly due to the reduced condition number, while iterative
+  refinement ensures the unscaled residual meets the tolerance.
+  """
+
+  _MAX_REFINEMENT_STEPS = 10
+
+  def __init__(
+      self,
+      *,
+      a: sp.spmatrix,
+      p: sp.spmatrix,
+      z: int,
+      atol: float,
+      rtol: float,
+  ):
+    self.m, self.n = a.shape
+    self.z = z
+    self._p_diags = p.diagonal()
+    self._atol = atol
+    self._rtol = rtol
+
+    # Build KKT scaffold with NaN sentinels on diagonals.
+    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
+    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
+    self._kkt = sp.bmat(
+        [[p + n_nans, a.T], [a, m_nans]],
+        format="csc",
+        dtype=np.float64,
+    )
+    self._kkt_nan_idxs = np.isnan(self._kkt.data)
+
+    # Pre-allocate buffers.
+    dim = self.n + self.m
+    self._true_diags = np.empty(dim, dtype=np.float64)
+    self._scale = np.empty(dim, dtype=np.float64)  # S = 1/sqrt(|diag|)
+    self._kkt_rhs = np.empty(dim, dtype=np.float64)
+    self._scaled_rhs = np.empty(dim, dtype=np.float64)
+
+  def update(self, mu: float, s: np.ndarray, y: np.ndarray):
+    """Forms the KKT diagonals and scaling vector."""
+    # Diagonal magnitudes (before sign flip).
+    self._true_diags[:self.n] = self._p_diags + mu
+    self._true_diags[self.n:self.n + self.z] = mu
+    self._true_diags[self.n + self.z:] = s[self.z:] / y[self.z:] + mu
+
+    # Scaling: S = 1/sqrt(|diag|).
+    np.sqrt(self._true_diags, out=self._scale)
+    np.reciprocal(self._scale, out=self._scale)
+
+    # Flip sign of cone block and inject into KKT.
+    self._true_diags[self.n:] *= -1.0
+    self._kkt.data[self._kkt_nan_idxs] = self._true_diags
+
+    # Build the LinearOperator once per update (reused across refinement steps).
+    dim = self.n + self.m
+    self._A_op = scipy.sparse.linalg.LinearOperator(
+        (dim, dim), matvec=self._scaled_matvec
+    )
+
+  def _scaled_matvec(self, v: np.ndarray) -> np.ndarray:
+    """Computes (S @ KKT @ S) @ v."""
+    return self._scale * (self._kkt @ (self._scale * v))
+
+  def solve(
+      self, rhs: np.ndarray, warm_start: np.ndarray
+  ) -> tuple[np.ndarray, dict[str, Any]]:
+    """Solves the KKT system via MINRES with iterative refinement.
+
+    First solves the diagonally-scaled system with MINRES, then refines on the
+    true (unscaled) residual until it meets the tolerance. Each refinement step
+    re-solves the scaled system on the residual, so MINRES sees a small RHS and
+    converges quickly (typically in very few iterations).
+    """
+    n = self.n
+
+    # Negate second block of RHS (same convention as DirectKktSolver).
+    np.copyto(self._kkt_rhs, rhs)
+    self._kkt_rhs[n:] *= -1.0
+
+    # Tolerance on the true (unscaled) system.
+    rhs_norm = np.linalg.norm(self._kkt_rhs, np.inf)
+    tolerance = self._atol + self._rtol * rhs_norm
+
+    # Initial MINRES solve on scaled system.
+    sol = warm_start.copy()
+    total_solves = 0
+    status = "non-converged"
+
+    for step in range(self._MAX_REFINEMENT_STEPS):
+      # Compute true residual: r = rhs - KKT @ sol.
+      residual = self._kkt_rhs - self._kkt @ sol
+      residual_norm = np.linalg.norm(residual, np.inf)
+
+      if residual_norm < tolerance:
+        status = "converged"
+        break
+
+      # Check for stalling.
+      if step > 0 and residual_norm >= old_residual_norm:
+        logging.debug(
+            "MINRES refinement stalled at step %d. Old: %e, New: %e",
+            step, old_residual_norm, residual_norm,
+        )
+        status = "stalled"
+        break
+      old_residual_norm = residual_norm
+
+      # Scale the residual and solve the correction in the scaled space.
+      scaled_residual = self._scale * residual
+      scaled_x0 = np.zeros_like(scaled_residual)
+
+      # MINRES rtol for this refinement step.
+      scaled_rhs_norm = np.linalg.norm(scaled_residual, np.inf)
+      abs_tol = self._atol + self._rtol * scaled_rhs_norm
+      rtol = abs_tol / max(scaled_rhs_norm, 1e-30)
+
+      z_correction, info = scipy.sparse.linalg.minres(
+          self._A_op, scaled_residual, x0=scaled_x0, rtol=rtol,
+      )
+      total_solves += 1
+
+      # Unscale and apply correction.
+      sol += self._scale * z_correction
+
+    else:
+      logging.debug(
+          "MINRES refinement did not converge after %d steps. res=%e > tol=%e",
+          self._MAX_REFINEMENT_STEPS, residual_norm, tolerance,
+      )
+
+    if np.any(np.isnan(sol)):
+      raise ValueError("MINRES solver returned NaNs.")
+
+    logging.debug(
+        "MINRES solve: status=%s, solves=%d, res=%e",
+        status, total_solves, residual_norm,
+    )
+
+    return sol.copy(), {
+        "solves": total_solves,
+        "final_residual_norm": residual_norm,
+        "status": status,
+    }
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._kkt @ x
+
+  def free(self):
+    pass

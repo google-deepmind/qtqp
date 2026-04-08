@@ -67,6 +67,7 @@ class LinearSolver(enum.Enum):
   MINRES = indirect.ScipyMinresSolver
   MINRES_PETSC = indirect.PetscFieldSplitSolver
   CG = indirect.CgNormalEqSolver
+  MINRES_DIAG = indirect.MinresSolver
 
 
 class SolutionStatus(enum.Enum):
@@ -274,8 +275,8 @@ class QTQP:
     self._norm_b = _norm(self.b, np.inf)
     self._norm_c = _norm(self.c, np.inf)
 
-    if linear_solver.value is indirect.CgNormalEqSolver:
-      self._linear_solver = indirect.CgNormalEqSolver(
+    if linear_solver.value in (indirect.CgNormalEqSolver, indirect.MinresSolver):
+      self._linear_solver = linear_solver.value(
           a=a,
           p=p,
           z=self.z,

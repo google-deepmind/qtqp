@@ -30,6 +30,7 @@ _SOLVERS = [
     qtqp.LinearSolver.EIGEN,
     qtqp.LinearSolver.MINRES,
     qtqp.LinearSolver.CG,
+    qtqp.LinearSolver.MINRES_DIAG,
 ]
 
 # Iterative solvers need looser IPM and assertion tolerances.
@@ -37,6 +38,7 @@ _ITERATIVE_SOLVERS = {
     qtqp.LinearSolver.MINRES,
     qtqp.LinearSolver.CG,
     qtqp.LinearSolver.MINRES_PETSC,
+    qtqp.LinearSolver.MINRES_DIAG,
 }
 _ITERATIVE_TOL = dict(atol=1e-4, rtol=1e-4)
 _ITERATIVE_SOLVE_TOL = dict(
