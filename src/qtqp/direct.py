@@ -124,21 +124,27 @@ class DirectKktSolver:
     self._solver = solver
     self._solver.set_dims(n=self.n, m=self.m, z=self.z)
 
-    # Build the KKT scaffold once. NaN is used as a sentinel to mark the
-    # diagonal positions that must be overwritten each iteration (because they
-    # depend on mu, s, y). All off-diagonal and constant entries are fixed here.
-    # After construction, kkt_nan_idxs caches exactly which entries in the
-    # sparse data array are NaN, giving O(nnz_diag) updates instead of a full
-    # matrix rebuild.
-    n_nans = sp.diags(np.full(self.n, np.nan, dtype=np.float64), format="csc")
-    m_nans = sp.diags(np.full(self.m, np.nan, dtype=np.float64), format="csc")
+    # Build the KKT scaffold once. Placeholder ones on the diagonal ensure
+    # those positions exist in the sparse structure; they are overwritten each
+    # iteration with the actual values (which depend on mu, s, y).
+    n_ones = sp.eye(self.n, format="csc", dtype=np.float64)
+    m_ones = sp.eye(self.m, format="csc", dtype=np.float64)
 
     self._kkt = sp.bmat(
-        [[p + n_nans, a.T], [a, m_nans]],
+        [[p + n_ones, a.T], [a, m_ones]],
         format=self._solver.format(),
         dtype=np.float64,
     )
-    self._kkt_nan_idxs = np.isnan(self._kkt.data)  # Sentinel positions to update.
+    # Find the data-array index of each diagonal entry structurally.
+    # Works identically for CSC (col k, find row k) and CSR (row k, find col k).
+    self._kkt.sort_indices()
+    dim = self.n + self.m
+    self._kkt_diag_idxs = np.empty(dim, dtype=np.intp)
+    for k in range(dim):
+      start = self._kkt.indptr[k]
+      self._kkt_diag_idxs[k] = start + np.searchsorted(
+          self._kkt.indices[start:self._kkt.indptr[k + 1]], k
+      )
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)
@@ -176,7 +182,7 @@ class DirectKktSolver:
     # diag_correction * sol to the residual to account for the difference
     # between the regularized matrix (used for factorization and matvec) and
     # the true matrix (whose solution we seek), converging to the exact answer.
-    self._kkt.data[self._kkt_nan_idxs] = self._reg_diags
+    self._kkt.data[self._kkt_diag_idxs] = self._reg_diags
     self._solver.set_kkt(self._kkt)
     self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
