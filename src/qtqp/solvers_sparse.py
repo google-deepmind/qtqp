@@ -35,28 +35,18 @@ class MklPardisoSolver(LinearSolver):
   def factorize(self):
     kkt = self._kkt
     if self._solver is None:
-      solver = self._pymklpardiso.PardisoSolver(
-          self._pymklpardiso.MTYPE_REAL_SYM_INDEF
-      )
-      solver.set_pattern(
-          ia=kkt.indptr.astype(np.int64),
-          ja=kkt.indices.astype(np.int64),
-          n=kkt.shape[0],
-      )
       # Intel recommends for symmetric indefinite IPM/saddle-point systems:
       #   iparm[9]  = 8: pivot perturbation 10^-8 (default 13 ie 10^-13)
       #   iparm[10] = 1: scaling
       #   iparm[12] = 1: weighted matching
       #   iparm[23] = 1: two-level parallel factorization
-      solver.set_iparm(9, 8)
-      solver.set_iparm(10, 1)
-      solver.set_iparm(12, 1)
-      solver.set_iparm(23, 1)
-      solver.factor(kkt.data.astype(np.float64))
-      self._solver = solver
+      self._solver = self._pymklpardiso.PardisoSolver(
+          kkt,
+          mtype=self._pymklpardiso.MTYPE_REAL_SYM_INDEF,
+          iparms={9: 8, 10: 1, 12: 1, 23: 1},
+      )
     else:
-      self._solver.set_values(kkt.data.astype(np.float64))
-      self._solver.refactor()
+      self._solver.refactor(kkt.data.astype(np.float64))
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
