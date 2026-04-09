@@ -31,21 +31,26 @@ class MklPardisoSolver(LinearSolver):
 
     self._pymklpardiso = pymklpardiso
     self._solver: pymklpardiso.PardisoSolver | None = None
+    self._triu_kkt: sp.spmatrix | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    self._triu_kkt = sp.triu(kkt, format="csr")
 
   def factorize(self):
-    kkt = self._kkt
+    triu = self._triu_kkt
     if self._solver is None:
       # Initial analysis is pattern-only (cheap). On error recovery we
       # escalate to value-dependent analysis via iparm[10]/iparm[12].
       #   iparm[9]  = 8: pivot perturbation 10^-8 (default 13 ie 10^-13)
       #   iparm[23] = 1: two-level parallel factorization
       self._solver = self._pymklpardiso.PardisoSolver(
-          kkt,
+          triu,
           mtype=self._pymklpardiso.MTYPE_REAL_SYM_INDEF,
           iparms={9: 8, 23: 1},
       )
     else:
-      self._solver.refactor(kkt.data.astype(np.float64))
+      self._solver.refactor(triu.data)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
@@ -57,7 +62,7 @@ class MklPardisoSolver(LinearSolver):
       logging.warning("Re-analyzing with value-dependent scaling/matching.")
       self._solver.set_iparm(10, 1)
       self._solver.set_iparm(12, 1)
-      self._solver.factor(self._kkt.data.astype(np.float64))
+      self._solver.factor(self._triu_kkt.data)
       return self._solver.solve(rhs)
 
   def format(self) -> Literal["csr"]:
