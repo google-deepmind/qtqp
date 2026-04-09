@@ -35,15 +35,12 @@ class MklPardisoSolver(LinearSolver):
   def factorize(self):
     kkt = self._kkt
     if self._solver is None:
-      # Intel recommends for symmetric indefinite IPM/saddle-point systems:
-      #   iparm[9]  = 8: pivot perturbation 10^-8 (default 13 ie 10^-13)
-      #   iparm[10] = 1: scaling
-      #   iparm[12] = 1: weighted matching
-      #   iparm[23] = 1: two-level parallel factorization
+      # Initial analysis is pattern-only (cheap). On error recovery we
+      # escalate to value-dependent analysis via iparm[10]/iparm[12].
       self._solver = self._pymklpardiso.PardisoSolver(
           kkt,
           mtype=self._pymklpardiso.MTYPE_REAL_SYM_INDEF,
-          iparms={9: 8, 10: 1, 12: 1, 23: 1},
+          iparms={9: 8, 23: 1},
       )
     else:
       self._solver.refactor(kkt.data.astype(np.float64))
@@ -52,9 +49,12 @@ class MklPardisoSolver(LinearSolver):
     try:
       return self._solver.solve(rhs)
     except RuntimeError as e:
-      # On PARDISO errors (e.g. zero-pivot), re-analyze and re-factor.
+      # Escalate to value-dependent analysis (scaling + weighted matching)
+      # and re-analyze + re-factor from scratch.
       logging.warning("PARDISO error: %s", e)
-      logging.warning("Performing analysis and factorization steps again.")
+      logging.warning("Re-analyzing with value-dependent scaling/matching.")
+      self._solver.set_iparm(10, 1)
+      self._solver.set_iparm(12, 1)
       self._solver.factor(self._kkt.data.astype(np.float64))
       return self._solver.solve(rhs)
 
