@@ -218,11 +218,11 @@ conda install scikit-umfpack -c conda-forge
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
-Pardiso is available via the pydiso package (only available for Intel CPUs). To
-install
+Pardiso is available via the py-mkl-pardiso package (Linux and Windows, x86_64).
+To install
 
 ```bash
-conda install pydiso -c conda-forge
+pip install py-mkl-pardiso
 ```
 
 #### Eigen: `qtqp.LinearSolver.EIGEN`
