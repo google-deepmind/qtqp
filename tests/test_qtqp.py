@@ -35,12 +35,7 @@ _SOLVERS = [
 
 try:
   import pydiso.mkl_solver  # noqa: F401
-  if sys.platform.startswith('linux') or (
-      sys.platform == 'win32' and sys.version_info[:2] != (3, 10)
-  ):
-    _SOLVERS.append(qtqp.LinearSolver.PARDISO)
-  else:
-    print('Skipping PARDISO tests on Windows Python 3.10')
+  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 except (ImportError, ModuleNotFoundError) as e:
   print(f'Skipping PARDISO tests: {e}')
 
