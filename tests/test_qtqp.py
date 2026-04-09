@@ -34,8 +34,9 @@ _SOLVERS = [
 ]
 
 try:
-  import pydiso.mkl_solver  # noqa: F401
-  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
+  import pymklpardiso  # noqa: F401
+  if sys.platform.startswith('linux') or sys.platform == 'win32':
+    _SOLVERS.append(qtqp.LinearSolver.PARDISO)
 except (ImportError, ModuleNotFoundError) as e:
   print(f'Skipping PARDISO tests: {e}')
 
