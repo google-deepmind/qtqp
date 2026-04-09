@@ -24,56 +24,46 @@ from .direct import LinearSolver
 
 
 class MklPardisoSolver(LinearSolver):
-  """Wrapper around pydiso.mkl_solver.MKLPardisoSolver."""
+  """Wrapper around pymklpardiso.PardisoSolver."""
 
   def __init__(self):
-    import pydiso.mkl_solver  # pylint: disable=g-import-not-at-top
+    import pymklpardiso  # pylint: disable=g-import-not-at-top
 
-    self.mkl_solver = pydiso.mkl_solver
-    self.factorization: pydiso.mkl_solver.MKLPardisoSolver | None = None
+    self._pymklpardiso = pymklpardiso
+    self._solver: pymklpardiso.PardisoSolver | None = None
+    self._triu_kkt: sp.spmatrix | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    self._triu_kkt = sp.triu(kkt, format="csr")
 
   def factorize(self):
-    if self.factorization is None:
-      # Subclass to intercept the start of the analysis phase
-      class HackedMKLPardisoSolver(self.mkl_solver.MKLPardisoSolver):
-        def _analyze(self):
-          # pydiso uses 0-based C indexing: set_iparm(i, v) sets C iparm[i],
-          # which is Fortran iparm(i+1).  Intel recommends for symmetric
-          # indefinite IPM/saddle-point systems:
-          #   Fortran iparm(10) = 8: pivot perturbation 10^-8 (C index 9)
-          #     Default is 13 (10^-13); 8 is recommended for IPM systems.
-          #   Fortran iparm(11) = 1: scaling (C index 10)
-          #   Fortran iparm(13) = 1: weighted matching (C index 12)
-          #   Fortran iparm(24) = 1: two-level parallel factorization (C index 23)
-          # 1. Inject parameters. The Cython object is created, memory is
-          # allocated, but the heavy math hasn't started yet.
-          self.set_iparm(9, 8)   # pivot perturbation
-          self.set_iparm(10, 1)  # scaling
-          self.set_iparm(12, 1)  # matching
-          self.set_iparm(23, 1)  # two-level parallel factorization
-
-          # 2. Proceed with the actual analysis using the new parameters
-          super()._analyze()
-
-      # When this instantiates, it will automatically call our overridden _analyze
-      self.factorization = HackedMKLPardisoSolver(
-          self._kkt, matrix_type="real_symmetric_indefinite"
+    triu = self._triu_kkt
+    if self._solver is None:
+      # Initial analysis is pattern-only (cheap). On error recovery we
+      # escalate to value-dependent analysis via iparm[10]/iparm[12].
+      #   iparm[9]  = 8: pivot perturbation 10^-8 (default 13 ie 10^-13)
+      #   iparm[23] = 1: two-level parallel factorization
+      self._solver = self._pymklpardiso.PardisoSolver(
+          triu,
+          mtype=self._pymklpardiso.MTYPE_REAL_SYM_INDEF,
+          iparms={9: 8, 23: 1},
       )
     else:
-      self.factorization.refactor(self._kkt)
+      self._solver.refactor(triu.data)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     try:
-      return self.factorization.solve(rhs)
-    except self.mkl_solver.PardisoError as e:
-      # We tried loosening iparm(10) (pivot perturbation) on retry, but
-      # even 10^-2 still triggered zero-pivot errors on some unbounded
-      # problems.  A plain re-analyze + re-factor is more reliable.
-      logging.warning("PardisoError: %s", e)
-      logging.warning("Performing analysis and factorization steps again.")
-      self.factorization._analyze()  # pylint: disable=protected-access
-      self.factorization._factor()  # pylint: disable=protected-access
-      return self.factorization.solve(rhs)
+      return self._solver.solve(rhs)
+    except RuntimeError as e:
+      # Escalate to value-dependent analysis (scaling + weighted matching)
+      # and re-analyze + re-factor from scratch.
+      logging.warning("PARDISO error: %s", e)
+      logging.warning("Re-analyzing with value-dependent scaling/matching.")
+      self._solver.set_iparm(10, 1)
+      self._solver.set_iparm(12, 1)
+      self._solver.factor(self._triu_kkt.data)
+      return self._solver.solve(rhs)
 
   def format(self) -> Literal["csr"]:
     return "csr"
