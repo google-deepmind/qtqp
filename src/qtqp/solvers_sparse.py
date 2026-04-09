@@ -37,6 +37,8 @@ class MklPardisoSolver(LinearSolver):
     if self._solver is None:
       # Initial analysis is pattern-only (cheap). On error recovery we
       # escalate to value-dependent analysis via iparm[10]/iparm[12].
+      #   iparm[9]  = 8: pivot perturbation 10^-8 (default 13 ie 10^-13)
+      #   iparm[23] = 1: two-level parallel factorization
       self._solver = self._pymklpardiso.PardisoSolver(
           kkt,
           mtype=self._pymklpardiso.MTYPE_REAL_SYM_INDEF,
