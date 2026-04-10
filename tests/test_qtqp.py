@@ -651,7 +651,9 @@ def test_equivalent_tau_solution(seed, linear_solver):
   tau_2 = _solve_for_tau(
       n, solver.q, p, kinv_r, solver.kinv_q, mu, mu_target, r_tau
   )
-  tau_qtqp = solver._solve_for_tau(p, kinv_r, mu, mu_target, r_tau, tau)  # pylint: disable=protected-access
+  tau_qtqp, _ = solver._solve_for_tau(  # pylint: disable=protected-access
+      p, kinv_r, mu, mu_target, r_tau, tau
+  )
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
   # With exact direct solves the quadratic formula path fires, so the QTQP
   # result should match the reference quadratic root.
