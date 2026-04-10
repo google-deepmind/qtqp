@@ -51,7 +51,7 @@ class CuDssSolver(LinearSolver):
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Transfers KKT data to GPU; does not retain the CPU matrix."""
-    super().set_kkt(kkt)
+    self._kkt_diag = kkt.diagonal()
     if self._kkt_gpu is None:
       self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
       self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
