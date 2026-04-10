@@ -23,7 +23,7 @@ import scipy.sparse as sp
 from .direct import LinearSolver
 
 
-def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]):
+def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) -> sp.spmatrix:
   """Reconstruct a full symmetric matrix from stored upper-triangular entries."""
   diag = sp.diags(kkt.diagonal(), format=format)
   return (kkt + kkt.T - diag).asformat(format)
