@@ -148,18 +148,19 @@ class EigenSolver(LinearSolver):
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
     # Eigen itself supports either triangle, but nanoeigenpy's Python module
     # exposes only the default Lower-flavored SimplicialLDLT class, so adapt
-    # the shared upper-triangular KKT into the lower triangle here.
-    self._factor_kkt = kkt.T.tocsc()
+    # the shared upper-triangular KKT into the lower triangle here.  The base
+    # symmetric matvec works with either stored triangle, so we only keep the
+    # lower-triangular view.
+    super().set_kkt(kkt.T.tocsc())
 
   def factorize(self):
     if self._solver is None:
       self._solver = self.nanoeigenpy.SimplicialLDLT()
-      self._solver.analyzePattern(self._factor_kkt)
+      self._solver.analyzePattern(self._kkt)
 
-    self._solver.factorize(self._factor_kkt)
+    self._solver.factorize(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self._solver.solve(rhs)
