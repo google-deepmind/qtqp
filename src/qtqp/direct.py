@@ -47,8 +47,9 @@ class LinearSolver:
     pass
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Stores the KKT matrix; called by DirectKktSolver before factorize."""
+    """Stores the upper-triangular KKT matrix; called before factorize."""
     self._kkt = kkt
+    self._kkt_diag = kkt.diagonal()
 
   def factorize(self) -> None:
     """Factorizes the stored KKT matrix (with regularized diagonals).
@@ -64,7 +65,7 @@ class LinearSolver:
     raise NotImplementedError
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._kkt @ x
+    return self._kkt @ x + self._kkt.T @ x - self._kkt_diag * x
 
   def format(self) -> str:
     """Preferred sparse format for the KKT scaffold ('csc' or 'csr')."""
@@ -124,14 +125,16 @@ class DirectKktSolver:
     self._solver = solver
     self._solver.set_dims(n=self.n, m=self.m, z=self.z)
 
-    # Build the KKT scaffold once. Placeholder ones on the diagonal ensure
-    # those positions exist in the sparse structure; they are overwritten each
-    # iteration with the actual values (which depend on mu, s, y).
+    # Build the upper-triangular KKT scaffold once. Placeholder ones on the
+    # diagonal ensure those positions exist in the sparse structure; they are
+    # overwritten each iteration with the actual values (which depend on mu,
+    # s, y).
     n_ones = sp.eye(self.n, format="csc", dtype=np.float64)
     m_ones = sp.eye(self.m, format="csc", dtype=np.float64)
+    p_triu = sp.triu(p, format="csc")
 
     self._kkt = sp.bmat(
-        [[p + n_ones, a.T], [a, m_ones]],
+        [[p_triu + n_ones, a.T], [None, m_ones]],
         format=self._solver.format(),
         dtype=np.float64,
     )

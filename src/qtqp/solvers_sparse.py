@@ -23,6 +23,12 @@ import scipy.sparse as sp
 from .direct import LinearSolver
 
 
+def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]):
+  """Reconstruct a full symmetric matrix from stored upper-triangular entries."""
+  diag = sp.diags(kkt.diagonal(), format=format)
+  return (kkt + kkt.T - diag).asformat(format)
+
+
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pymklpardiso.PardisoSolver."""
 
@@ -31,11 +37,10 @@ class MklPardisoSolver(LinearSolver):
 
     self._pymklpardiso = pymklpardiso
     self._solver: pymklpardiso.PardisoSolver | None = None
-    self._triu_kkt: sp.spmatrix | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    self._triu_kkt = sp.triu(kkt, format="csr")
+    self._triu_kkt = kkt
 
   def factorize(self):
     triu = self._triu_kkt
@@ -97,8 +102,12 @@ class ScipySolver(LinearSolver):
   def __init__(self):
     self.factorization = None
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+
   def factorize(self):
-    self.factorization = sp.linalg.factorized(self._kkt)
+    self.factorization = sp.linalg.factorized(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
@@ -174,13 +183,14 @@ class MumpsSolver(LinearSolver):
     kkt = self._kkt
 
     if self._mat is None:
-      # First call: build PETSc Mat from CSR, configure KSP + MUMPS.
-      # createAIJWithArrays shares the scipy data buffer, so
+      # First call: build a symmetric PETSc Mat from upper-triangular CSR,
+      # configure KSP + MUMPS, and reuse it across iterations.
+      # createSBAIJ shares the scipy data buffer, so
       # DirectKktSolver's in-place diagonal updates are visible to PETSc
       # without any copy.  On subsequent factorize calls we just bump the
       # state counter and refactorize.
-      self._mat = PETSc.Mat().createAIJWithArrays(
-          kkt.shape, (kkt.indptr, kkt.indices, kkt.data)
+      self._mat = PETSc.Mat().createSBAIJ(
+          size=kkt.shape, bsize=1, csr=(kkt.indptr, kkt.indices, kkt.data)
       )
       self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
       self._mat.setOption(PETSc.Mat.Option.SPD, False)
@@ -190,7 +200,7 @@ class MumpsSolver(LinearSolver):
       self._ksp = PETSc.KSP().create()
       self._ksp.setType(PETSc.KSP.Type.PREONLY)
       self._pc = self._ksp.getPC()
-      self._pc.setType(PETSc.PC.Type.LU)
+      self._pc.setType(PETSc.PC.Type.CHOLESKY)
       self._pc.setFactorSolverType("mumps")
       self._ksp.setOperators(self._mat)
 
@@ -266,7 +276,7 @@ class AccelerateSolver(LinearSolver):
 
   def factorize(self):
     if self._solver is None:
-      self._solver = self._macldlt.LDLTSolver(self._kkt)
+      self._solver = self._macldlt.LDLTSolver(self._kkt, triangle="upper")
     else:
       self._solver.refactor(self._kkt.data)
 
@@ -293,14 +303,20 @@ class UmfpackSolver(LinearSolver):
     self._ctx = umfpack.UmfpackContext("di")
     self._symbolic_done = False
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+
   def factorize(self):
     if not self._symbolic_done:
-      self._ctx.symbolic(self._kkt)
+      self._ctx.symbolic(self._full_kkt)
       self._symbolic_done = True
-    self._ctx.numeric(self._kkt)
+    self._ctx.numeric(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self._ctx.solve(self._umfpack.UMFPACK_A, self._kkt, rhs, autoTranspose=True)
+    return self._ctx.solve(
+        self._umfpack.UMFPACK_A, self._full_kkt, rhs, autoTranspose=True
+    )
 
   def format(self) -> Literal["csc"]:
     return "csc"
