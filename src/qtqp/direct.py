@@ -30,6 +30,22 @@ import numpy as np
 import scipy.sparse as sp
 
 
+def diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
+  """Return the data-array index of each diagonal entry in a CSC/CSR matrix.
+
+  Works identically for CSC (col k, find row k) and CSR (row k, find col k).
+  """
+  mat.sort_indices()
+  dim = mat.shape[0]
+  idxs = np.empty(dim, dtype=np.intp)
+  for k in range(dim):
+    start = mat.indptr[k]
+    idxs[k] = start + np.searchsorted(
+        mat.indices[start:mat.indptr[k + 1]], k
+    )
+  return idxs
+
+
 class LinearSolver:
   """Base class for KKT linear system solvers.
 
@@ -138,16 +154,7 @@ class DirectKktSolver:
         format=self._solver.format(),
         dtype=np.float64,
     )
-    # Find the data-array index of each diagonal entry structurally.
-    # Works identically for CSC (col k, find row k) and CSR (row k, find col k).
-    self._kkt.sort_indices()
-    dim = self.n + self.m
-    self._kkt_diag_idxs = np.empty(dim, dtype=np.intp)
-    for k in range(dim):
-      start = self._kkt.indptr[k]
-      self._kkt_diag_idxs[k] = start + np.searchsorted(
-          self._kkt.indices[start:self._kkt.indptr[k + 1]], k
-      )
+    self._kkt_diag_idxs = diag_data_indices(self._kkt)
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)

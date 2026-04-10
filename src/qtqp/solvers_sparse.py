@@ -21,25 +21,13 @@ import numpy as np
 import scipy.sparse as sp
 
 from .direct import LinearSolver
+from .direct import diag_data_indices
 
 
 def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) -> sp.spmatrix:
   """Reconstruct a full symmetric matrix from stored upper-triangular entries."""
   diag = sp.diags(kkt.diagonal(), format=format)
   return (kkt + kkt.T - diag).asformat(format)
-
-
-def _diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
-  """Return the data-array index of each diagonal entry in a CSC/CSR matrix."""
-  mat.sort_indices()
-  dim = mat.shape[0]
-  idxs = np.empty(dim, dtype=np.intp)
-  for k in range(dim):
-    start = mat.indptr[k]
-    idxs[k] = start + np.searchsorted(
-        mat.indices[start:mat.indptr[k + 1]], k
-    )
-  return idxs
 
 
 class MklPardisoSolver(LinearSolver):
@@ -116,7 +104,7 @@ class ScipySolver(LinearSolver):
     super().set_kkt(kkt)
     if self._full_kkt is None:
       self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
-      self._full_diag_idxs = _diag_data_indices(self._full_kkt)
+      self._full_diag_idxs = diag_data_indices(self._full_kkt)
     else:
       self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
 
@@ -175,7 +163,7 @@ class EigenSolver(LinearSolver):
     # lower-triangular view.
     if self._lower_diag_idxs is None:
       super().set_kkt(kkt.T.tocsc())
-      self._lower_diag_idxs = _diag_data_indices(self._kkt)
+      self._lower_diag_idxs = diag_data_indices(self._kkt)
     else:
       diag = kkt.diagonal()
       self._kkt.data[self._lower_diag_idxs] = diag
@@ -348,7 +336,7 @@ class UmfpackSolver(LinearSolver):
     super().set_kkt(kkt)
     if self._full_kkt is None:
       self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
-      self._full_diag_idxs = _diag_data_indices(self._full_kkt)
+      self._full_diag_idxs = diag_data_indices(self._full_kkt)
     else:
       self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
 
