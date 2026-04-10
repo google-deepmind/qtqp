@@ -128,17 +128,37 @@ class CholModSolver(LinearSolver):
     import sksparse.cholmod  # pylint: disable=g-import-not-at-top
 
     self.cholmod = sksparse.cholmod
-    self.factorization: sksparse.cholmod.CholeskyFactor | None = None
+    # scikit-sparse >=0.5 has CholeskyFactor with lower= support;
+    # older versions only read the lower triangle via cholesky().
+    self._new_api = hasattr(sksparse.cholmod, "CholeskyFactor")
+    self.factorization = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    if self._new_api:
+      super().set_kkt(kkt)
+    else:
+      # Old API reads lower triangle only; transpose upper to lower.
+      super().set_kkt(kkt.T.tocsc())
 
   def factorize(self):
-    if self.factorization is None:
-      self.factorization = self.cholmod.CholeskyFactor(
-          self._kkt, supernodal_mode="simplicial", lower=False
-      )
-    self.factorization.factorize(self._kkt, ldl=True)
+    if self._new_api:
+      if self.factorization is None:
+        self.factorization = self.cholmod.CholeskyFactor(
+            self._kkt, supernodal_mode="simplicial", lower=False
+        )
+      self.factorization.factorize(self._kkt, ldl=True)
+    else:
+      if self.factorization is None:
+        self.factorization = self.cholmod.cholesky(
+            self._kkt, mode="simplicial"
+        )
+      else:
+        self.factorization.cholesky_inplace(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization.solve(rhs)
+    if self._new_api:
+      return self.factorization.solve(rhs)
+    return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
