@@ -42,7 +42,7 @@ import scipy.sparse as sp
 
 from . import direct
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
