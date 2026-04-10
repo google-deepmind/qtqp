@@ -63,9 +63,24 @@ class LinearSolver:
     pass
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Stores the upper-triangular KKT matrix; called before factorize."""
+    """Stores the upper-triangular KKT matrix; called once at init time.
+
+    Subclasses that override this should call super().set_kkt(kkt) to ensure
+    the base-class _kkt, _kkt_diag, and _kkt_diag_idxs are populated.
+    """
     self._kkt = kkt
     self._kkt_diag = kkt.diagonal()
+    self._kkt_diag_idxs = diag_data_indices(kkt)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    """Updates the KKT diagonal in place; called each iteration before factorize.
+
+    The default writes the diagonal into the stored sparse matrix and updates
+    _kkt_diag.  Backends with private copies (dense, GPU, LU-from-upper)
+    override this to update their own storage.
+    """
+    self._kkt.data[self._kkt_diag_idxs] = diag
+    np.copyto(self._kkt_diag, diag)
 
   def factorize(self) -> None:
     """Factorizes the stored KKT matrix (with regularized diagonals).
@@ -154,7 +169,7 @@ class DirectKktSolver:
         format=self._solver.format(),
         dtype=np.float64,
     )
-    self._kkt_diag_idxs = diag_data_indices(self._kkt)
+    self._solver.set_kkt(self._kkt)
 
     # Pre-allocate reusable buffers to avoid per-call allocations.
     self._true_diags = np.empty(self.n + self.m, dtype=np.float64)
@@ -192,8 +207,7 @@ class DirectKktSolver:
     # diag_correction * sol to the residual to account for the difference
     # between the regularized matrix (used for factorization and matvec) and
     # the true matrix (whose solution we seek), converging to the exact answer.
-    self._kkt.data[self._kkt_diag_idxs] = self._reg_diags
-    self._solver.set_kkt(self._kkt)
+    self._solver.update_diag(self._reg_diags)
     self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 

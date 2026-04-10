@@ -83,17 +83,18 @@ class ScipyDenseSolver(LinearSolver):
     self._g = np.empty(n, dtype=np.float64)
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    n, m = self._n, self._m
-    if self._A is None:
-      kkt_dense = kkt.toarray()
-      self._A = np.ascontiguousarray(kkt_dense[:n, n:].T, dtype=np.float64)
-      P_block = kkt_dense[:n, :n]
-      P_block = P_block + P_block.T - np.diag(np.diag(P_block))
-      np.fill_diagonal(P_block, 0.0)
-      self._P_offdiag = np.asfortranarray(P_block)
-    diag = kkt.diagonal()
-    np.copyto(self._R_x, diag[:n])
-    np.negative(diag[n:], out=self._R_y)
+    super().set_kkt(kkt)
+    n = self._n
+    kkt_dense = kkt.toarray()
+    self._A = np.ascontiguousarray(kkt_dense[:n, n:].T, dtype=np.float64)
+    P_block = kkt_dense[:n, :n]
+    P_block = P_block + P_block.T - np.diag(np.diag(P_block))
+    np.fill_diagonal(P_block, 0.0)
+    self._P_offdiag = np.asfortranarray(P_block)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    np.copyto(self._R_x, diag[:self._n])
+    np.negative(diag[self._n:], out=self._R_y)
 
   def factorize(self) -> None:
     # G = P_offdiag + diag(R_x) + A' diag(1/R_y) A
