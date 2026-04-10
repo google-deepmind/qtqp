@@ -407,8 +407,13 @@ def test_upper_triangular_kkt_matvec_matches_full():
   )
   linear_solver.update(mu=mu, s=s, y=y)
 
+  # The reference KKT below uses unregularized diagonals, so verify
+  # that regularization did not alter any diagonal entry.
+  diag_x = p.diagonal() + mu
   diag_y = np.full(m, mu, dtype=np.float64)
   diag_y[z:] = s[z:] / y[z:] + mu
+  min_reg = 1e-8
+  assert np.all(diag_x >= min_reg) and np.all(diag_y >= min_reg)
   kkt_full = sparse.bmat(
       [
           [p + sparse.diags(np.full(n, mu)), a.T],
