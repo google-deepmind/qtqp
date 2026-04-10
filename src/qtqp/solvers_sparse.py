@@ -29,6 +29,19 @@ def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) 
   return (kkt + kkt.T - diag).asformat(format)
 
 
+def _diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
+  """Return the data-array index of each diagonal entry in a CSC/CSR matrix."""
+  mat.sort_indices()
+  dim = mat.shape[0]
+  idxs = np.empty(dim, dtype=np.intp)
+  for k in range(dim):
+    start = mat.indptr[k]
+    idxs[k] = start + np.searchsorted(
+        mat.indices[start:mat.indptr[k + 1]], k
+    )
+  return idxs
+
+
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pymklpardiso.PardisoSolver."""
 
@@ -101,7 +114,11 @@ class ScipySolver(LinearSolver):
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+    if self._full_kkt is None:
+      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+      self._full_diag_idxs = _diag_data_indices(self._full_kkt)
+    else:
+      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
@@ -148,6 +165,7 @@ class EigenSolver(LinearSolver):
 
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
+    self._lower_diag_idxs: np.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     # Eigen itself supports either triangle, but nanoeigenpy's Python module
@@ -155,7 +173,13 @@ class EigenSolver(LinearSolver):
     # the shared upper-triangular KKT into the lower triangle here.  The base
     # symmetric matvec works with either stored triangle, so we only keep the
     # lower-triangular view.
-    super().set_kkt(kkt.T.tocsc())
+    if self._lower_diag_idxs is None:
+      super().set_kkt(kkt.T.tocsc())
+      self._lower_diag_idxs = _diag_data_indices(self._kkt)
+    else:
+      diag = kkt.diagonal()
+      self._kkt.data[self._lower_diag_idxs] = diag
+      self._kkt_diag = diag
 
   def factorize(self):
     if self._solver is None:
@@ -318,10 +342,15 @@ class UmfpackSolver(LinearSolver):
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
     self._symbolic_done = False
+    self._full_kkt: sp.spmatrix | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+    if self._full_kkt is None:
+      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+      self._full_diag_idxs = _diag_data_indices(self._full_kkt)
+    else:
+      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
