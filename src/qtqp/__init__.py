@@ -557,10 +557,10 @@ class QTQP:
         mu_target,
         r_tau,
         tau,
-        self._q_lin_sys_stats,
+        getattr(self, "_q_lin_sys_stats", None),
         lin_sys_stats,
     )
-    if self._collect_stats:
+    if getattr(self, "_collect_stats", False):
       stats_key = "tau_step_stats"
       lin_sys_stats[stats_key] = tau_stats
 
@@ -572,10 +572,17 @@ class QTQP:
   def _should_use_exact_tau_root(self, *lin_sys_stats: Dict[str, Any]) -> bool:
     """Returns whether the exact quadratic tau root is trustworthy."""
     for stats in lin_sys_stats:
+      if not stats:
+        continue
+      residual = stats.get("relative_residual_norm", 0.0)
+      if not np.isfinite(residual):
+        return False
       if stats.get("status") != "converged":
-        return False
-      if stats.get("relative_residual_norm", np.inf) > 1e-10:
-        return False
+        # Iterative refinement commonly reports "stalled" with a perfectly
+        # usable direct-solve result. Reserve fallback for genuinely broken
+        # solves rather than routine non-convergence of refinement.
+        if residual > 1e-6:
+          return False
     return True
 
   def _solve_for_tau(
