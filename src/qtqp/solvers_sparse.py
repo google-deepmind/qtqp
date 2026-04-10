@@ -38,12 +38,8 @@ class MklPardisoSolver(LinearSolver):
     self._pymklpardiso = pymklpardiso
     self._solver: pymklpardiso.PardisoSolver | None = None
 
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
-    self._triu_kkt = kkt
-
   def factorize(self):
-    triu = self._triu_kkt
+    triu = self._kkt
     if self._solver is None:
       # Initial analysis is pattern-only (cheap). On error recovery we
       # escalate to value-dependent analysis via iparm[10]/iparm[12].
@@ -67,7 +63,7 @@ class MklPardisoSolver(LinearSolver):
       logging.warning("Re-analyzing with value-dependent scaling/matching.")
       self._solver.set_iparm(10, 1)
       self._solver.set_iparm(12, 1)
-      self._solver.factor(self._triu_kkt.data)
+      self._solver.factor(self._kkt.data)
       return self._solver.solve(rhs)
 
   def format(self) -> Literal["csr"]:
@@ -188,9 +184,6 @@ class MumpsSolver(LinearSolver):
     self._ksp = None
     self._b = None
     self._x = None
-
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
 
   def factorize(self):
     PETSc = self._PETSc
