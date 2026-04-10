@@ -132,14 +132,13 @@ class CholModSolver(LinearSolver):
 
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.cholmod.cholesky(
-          self._kkt, mode="simplicial", lower=False
+      self.factorization = self.cholmod.CholeskyFactor(
+          self._kkt, supernodal_mode="simplicial", lower=False
       )
-    else:
-      self.factorization.cholesky_inplace(self._kkt, lower=False)
+    self.factorization.factorize(self._kkt, ldl=True)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization(rhs)
+    return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
