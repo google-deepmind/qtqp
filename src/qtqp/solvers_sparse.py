@@ -98,15 +98,15 @@ class ScipySolver(LinearSolver):
 
   def __init__(self):
     self.factorization = None
-    self._full_kkt: sp.spmatrix | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    if self._full_kkt is None:
-      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
-      self._full_diag_idxs = diag_data_indices(self._full_kkt)
-    else:
-      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
+    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+    self._full_diag_idxs = diag_data_indices(self._full_kkt)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    super().update_diag(diag)
+    self._full_kkt.data[self._full_diag_idxs] = diag
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
@@ -152,7 +152,6 @@ class EigenSolver(LinearSolver):
 
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
-    self._lower_diag_idxs: np.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     # Eigen itself supports either triangle, but nanoeigenpy's Python module
@@ -160,13 +159,11 @@ class EigenSolver(LinearSolver):
     # the shared upper-triangular KKT into the lower triangle here.  The base
     # symmetric matvec works with either stored triangle, so we only keep the
     # lower-triangular view.
-    if self._lower_diag_idxs is None:
-      super().set_kkt(kkt.T.tocsc())
-      self._lower_diag_idxs = diag_data_indices(self._kkt)
-    else:
-      diag = kkt.diagonal()
-      self._kkt.data[self._lower_diag_idxs] = diag
-      self._kkt_diag = diag
+    super().set_kkt(kkt.T.tocsc())
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    self._kkt.data[self._kkt_diag_idxs] = diag
+    np.copyto(self._kkt_diag, diag)
 
   def factorize(self):
     if self._solver is None:
@@ -329,15 +326,15 @@ class UmfpackSolver(LinearSolver):
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
     self._symbolic_done = False
-    self._full_kkt: sp.spmatrix | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    if self._full_kkt is None:
-      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
-      self._full_diag_idxs = diag_data_indices(self._full_kkt)
-    else:
-      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
+    self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+    self._full_diag_idxs = diag_data_indices(self._full_kkt)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    super().update_diag(diag)
+    self._full_kkt.data[self._full_diag_idxs] = diag
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x

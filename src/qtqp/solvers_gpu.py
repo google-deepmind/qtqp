@@ -50,14 +50,15 @@ class CuDssSolver(LinearSolver):
     self._rhs_gpu: cupy.ndarray | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    """Transfers KKT data to GPU; does not retain the CPU matrix."""
+    """Transfers KKT to GPU; called once at init time."""
     super().set_kkt(kkt)
-    if self._kkt_gpu is None:
-      self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
-      self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
-    else:
-      self._kkt_gpu.data.set(kkt.data)
-      self._kkt_diag_gpu.set(self._kkt_diag)
+    self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
+    self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    super().update_diag(diag)
+    self._kkt_gpu.data.set(self._kkt.data)
+    self._kkt_diag_gpu.set(self._kkt_diag)
 
   def factorize(self):
     cp = self._cp
@@ -145,17 +146,17 @@ class CupyDenseSolver(LinearSolver):
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     cp = self._cp
-    n, m = self._n, self._m
-    if self._A_gpu is None:
-      kkt_dense = kkt.toarray()
-      self._A_gpu = cp.asarray(kkt_dense[:n, n:].T, dtype=cp.float64)
-      P_block = kkt_dense[:n, :n]
-      P_block = P_block + P_block.T - np.diag(np.diag(P_block))
-      np.fill_diagonal(P_block, 0.0)
-      self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
-    diag = kkt.diagonal()
-    self._R_x_gpu.set(diag[:n])
-    self._R_y_gpu.set(-diag[n:])
+    n = self._n
+    kkt_dense = kkt.toarray()
+    self._A_gpu = cp.asarray(kkt_dense[:n, n:].T, dtype=cp.float64)
+    P_block = kkt_dense[:n, :n]
+    P_block = P_block + P_block.T - np.diag(np.diag(P_block))
+    np.fill_diagonal(P_block, 0.0)
+    self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
+
+  def update_diag(self, diag: np.ndarray) -> None:
+    self._R_x_gpu.set(diag[:self._n])
+    self._R_y_gpu.set(-diag[self._n:])
 
   def factorize(self) -> None:
     cp = self._cp
