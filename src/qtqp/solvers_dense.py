@@ -86,8 +86,9 @@ class ScipyDenseSolver(LinearSolver):
     n, m = self._n, self._m
     if self._A is None:
       kkt_dense = kkt.toarray()
-      self._A = np.ascontiguousarray(kkt_dense[n:, :n], dtype=np.float64)
-      P_block = kkt_dense[:n, :n].copy()
+      self._A = np.ascontiguousarray(kkt_dense[:n, n:].T, dtype=np.float64)
+      P_block = kkt_dense[:n, :n]
+      P_block = P_block + P_block.T - np.diag(np.diag(P_block))
       np.fill_diagonal(P_block, 0.0)
       self._P_offdiag = np.asfortranarray(P_block)
     diag = kkt.diagonal()

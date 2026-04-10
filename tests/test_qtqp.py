@@ -28,10 +28,20 @@ _SOLVERS = [
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
-    # Requires GPU:
-    # qtqp.LinearSolver.CUDSS,
-    # qtqp.LinearSolver.CUPY_DENSE,
 ]
+
+
+class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
+  """Minimal solver used only to exercise the base symmetric-triangle matvec."""
+
+  def factorize(self):
+    pass
+
+  def solve(self, rhs):
+    raise NotImplementedError("Test-only solver; not intended for solve().")
+
+  def format(self):
+    return 'csc'
 
 try:
   import pymklpardiso  # noqa: F401
@@ -50,6 +60,21 @@ try:
   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
 except (ImportError, ModuleNotFoundError) as e:
   print(f'Skipping MUMPS tests: {e}')
+
+try:
+  import cupy  # noqa: F401
+  if cupy.cuda.runtime.getDeviceCount() > 0:
+    _SOLVERS.append(qtqp.LinearSolver.CUPY_DENSE)
+except Exception as e:  # pylint: disable=broad-exception-caught
+  print(f'Skipping CUPY_DENSE tests: {e}')
+
+try:
+  import cupy  # noqa: F401
+  import nvmath  # noqa: F401
+  if cupy.cuda.runtime.getDeviceCount() > 0:
+    _SOLVERS.append(qtqp.LinearSolver.CUDSS)
+except Exception as e:  # pylint: disable=broad-exception-caught
+  print(f'Skipping CUDSS tests: {e}')
 
 
 def _gen_feasible(m, n, z, random_state=None):
@@ -356,6 +381,54 @@ def test_direct_linear_solver(seed, linear_solver):
   )
   np.testing.assert_allclose(
       -a @ sol[:n] + (d + mu) * sol[n:], b, atol=1e-10, rtol=1e-10
+  )
+
+
+def test_upper_triangular_kkt_matvec_matches_full():
+  """Upper-triangular KKT storage must reproduce the full symmetric matvec."""
+  rng = np.random.default_rng(2026)
+  m, n, z = 20, 12, 4
+  a, _, _, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+  vec = rng.normal(size=n + m)
+
+  linear_solver = qtqp.direct.DirectKktSolver(
+      a=a,
+      p=p,
+      z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=2,
+      atol=1e-12,
+      rtol=1e-12,
+      solver=_TriangularMatvecSolver(),
+  )
+  linear_solver.update(mu=mu, s=s, y=y)
+
+  # The reference KKT below uses unregularized diagonals, so verify
+  # that regularization did not alter any diagonal entry.
+  diag_x = p.diagonal() + mu
+  diag_y = np.full(m, mu, dtype=np.float64)
+  diag_y[z:] = s[z:] / y[z:] + mu
+  min_reg = 1e-8
+  assert np.all(diag_x >= min_reg) and np.all(diag_y >= min_reg)
+  kkt_full = sparse.bmat(
+      [
+          [p + sparse.diags(np.full(n, mu)), a.T],
+          [a, -sparse.diags(diag_y)],
+      ],
+      format='csc',
+      dtype=np.float64,
+  )
+
+  assert (linear_solver._kkt - sparse.triu(linear_solver._kkt)).nnz == 0  # pylint: disable=protected-access
+  np.testing.assert_allclose(
+      linear_solver._solver @ vec,  # pylint: disable=protected-access
+      kkt_full @ vec,
+      rtol=1e-10,
+      atol=1e-10,
   )
 
 

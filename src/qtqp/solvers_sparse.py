@@ -21,6 +21,13 @@ import numpy as np
 import scipy.sparse as sp
 
 from .direct import LinearSolver
+from .direct import diag_data_indices
+
+
+def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) -> sp.spmatrix:
+  """Reconstruct a full symmetric matrix from stored upper-triangular entries."""
+  diag = sp.diags(kkt.diagonal(), format=format)
+  return (kkt + kkt.T - diag).asformat(format)
 
 
 class MklPardisoSolver(LinearSolver):
@@ -31,14 +38,9 @@ class MklPardisoSolver(LinearSolver):
 
     self._pymklpardiso = pymklpardiso
     self._solver: pymklpardiso.PardisoSolver | None = None
-    self._triu_kkt: sp.spmatrix | None = None
-
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
-    self._triu_kkt = sp.triu(kkt, format="csr")
 
   def factorize(self):
-    triu = self._triu_kkt
+    triu = self._kkt
     if self._solver is None:
       # Initial analysis is pattern-only (cheap). On error recovery we
       # escalate to value-dependent analysis via iparm[10]/iparm[12].
@@ -62,7 +64,7 @@ class MklPardisoSolver(LinearSolver):
       logging.warning("Re-analyzing with value-dependent scaling/matching.")
       self._solver.set_iparm(10, 1)
       self._solver.set_iparm(12, 1)
-      self._solver.factor(self._triu_kkt.data)
+      self._solver.factor(self._kkt.data)
       return self._solver.solve(rhs)
 
   def format(self) -> Literal["csr"]:
@@ -80,9 +82,9 @@ class QdldlSolver(LinearSolver):
 
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.qdldl.Solver(self._kkt)
+      self.factorization = self.qdldl.Solver(self._kkt, upper=True)
     else:
-      self.factorization.update(self._kkt)
+      self.factorization.update(self._kkt, upper=True)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization.solve(rhs)
@@ -96,9 +98,21 @@ class ScipySolver(LinearSolver):
 
   def __init__(self):
     self.factorization = None
+    self._full_kkt: sp.spmatrix | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    if self._full_kkt is None:
+      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+      self._full_diag_idxs = diag_data_indices(self._full_kkt)
+    else:
+      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._full_kkt @ x
 
   def factorize(self):
-    self.factorization = sp.linalg.factorized(self._kkt)
+    self.factorization = sp.linalg.factorized(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
@@ -118,12 +132,13 @@ class CholModSolver(LinearSolver):
 
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.cholmod.cholesky(self._kkt, mode="simplicial")
-    else:
-      self.factorization.cholesky_inplace(self._kkt)
+      self.factorization = self.cholmod.CholeskyFactor(
+          self._kkt, supernodal_mode="simplicial", lower=False
+      )
+    self.factorization.factorize(self._kkt, ldl=True)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization(rhs)
+    return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
@@ -137,6 +152,21 @@ class EigenSolver(LinearSolver):
 
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
+    self._lower_diag_idxs: np.ndarray | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    # Eigen itself supports either triangle, but nanoeigenpy's Python module
+    # exposes only the default Lower-flavored SimplicialLDLT class, so adapt
+    # the shared upper-triangular KKT into the lower triangle here.  The base
+    # symmetric matvec works with either stored triangle, so we only keep the
+    # lower-triangular view.
+    if self._lower_diag_idxs is None:
+      super().set_kkt(kkt.T.tocsc())
+      self._lower_diag_idxs = diag_data_indices(self._kkt)
+    else:
+      diag = kkt.diagonal()
+      self._kkt.data[self._lower_diag_idxs] = diag
+      self._kkt_diag = diag
 
   def factorize(self):
     if self._solver is None:
@@ -174,7 +204,9 @@ class MumpsSolver(LinearSolver):
     kkt = self._kkt
 
     if self._mat is None:
-      # First call: build PETSc Mat from CSR, configure KSP + MUMPS.
+      # First call: build a PETSc AIJ matrix from the stored upper triangle,
+      # mark it symmetric, and tell PETSc/MUMPS to ignore the absent lower
+      # triangle structurally.
       # createAIJWithArrays shares the scipy data buffer, so
       # DirectKktSolver's in-place diagonal updates are visible to PETSc
       # without any copy.  On subsequent factorize calls we just bump the
@@ -184,13 +216,18 @@ class MumpsSolver(LinearSolver):
       )
       self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
       self._mat.setOption(PETSc.Mat.Option.SPD, False)
+      self._mat.setOption(PETSc.Mat.Option.IGNORE_LOWER_TRIANGULAR, True)
       self._mat.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATIONS, False)
       self._mat.assemble()
 
       self._ksp = PETSc.KSP().create()
       self._ksp.setType(PETSc.KSP.Type.PREONLY)
       self._pc = self._ksp.getPC()
-      self._pc.setType(PETSc.PC.Type.LU)
+      # PETSc exposes MUMPS's symmetric-indefinite LDL^T path through the
+      # "cholesky" factor interface. That name is a misnomer here: because
+      # MAT_SPD remains false above, MUMPS treats the matrix as general
+      # symmetric (quasidefinite KKT), not SPD.
+      self._pc.setType(PETSc.PC.Type.CHOLESKY)
       self._pc.setFactorSolverType("mumps")
       self._ksp.setOperators(self._mat)
 
@@ -266,7 +303,7 @@ class AccelerateSolver(LinearSolver):
 
   def factorize(self):
     if self._solver is None:
-      self._solver = self._macldlt.LDLTSolver(self._kkt)
+      self._solver = self._macldlt.LDLTSolver(self._kkt, triangle="upper")
     else:
       self._solver.refactor(self._kkt.data)
 
@@ -292,15 +329,29 @@ class UmfpackSolver(LinearSolver):
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
     self._symbolic_done = False
+    self._full_kkt: sp.spmatrix | None = None
+
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    if self._full_kkt is None:
+      self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
+      self._full_diag_idxs = diag_data_indices(self._full_kkt)
+    else:
+      self._full_kkt.data[self._full_diag_idxs] = kkt.diagonal()
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    return self._full_kkt @ x
 
   def factorize(self):
     if not self._symbolic_done:
-      self._ctx.symbolic(self._kkt)
+      self._ctx.symbolic(self._full_kkt)
       self._symbolic_done = True
-    self._ctx.numeric(self._kkt)
+    self._ctx.numeric(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self._ctx.solve(self._umfpack.UMFPACK_A, self._kkt, rhs, autoTranspose=True)
+    return self._ctx.solve(
+        self._umfpack.UMFPACK_A, self._full_kkt, rhs, autoTranspose=True
+    )
 
   def format(self) -> Literal["csc"]:
     return "csc"
