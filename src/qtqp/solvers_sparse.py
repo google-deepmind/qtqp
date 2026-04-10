@@ -83,11 +83,15 @@ class QdldlSolver(LinearSolver):
     self.qdldl = qdldl
     self.factorization: qdldl.Solver | None = None
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    self._factor_kkt = kkt.T.tocsc()
+
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.qdldl.Solver(self._kkt)
+      self.factorization = self.qdldl.Solver(self._factor_kkt)
     else:
-      self.factorization.update(self._kkt)
+      self.factorization.update(self._factor_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization.solve(rhs)
@@ -127,11 +131,20 @@ class CholModSolver(LinearSolver):
     self.cholmod = sksparse.cholmod
     self.factorization: sksparse.cholmod.CholeskyFactor | None = None
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    # CHOLMOD reads the lower triangle of a symmetric sparse matrix, so use a
+    # CSC lower-triangular view for factorization while retaining the shared
+    # upper-triangular KKT for residual matvecs.
+    self._factor_kkt = kkt.T.tocsc()
+
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.cholmod.cholesky(self._kkt, mode="simplicial")
+      self.factorization = self.cholmod.cholesky(
+          self._factor_kkt, mode="simplicial"
+      )
     else:
-      self.factorization.cholesky_inplace(self._kkt)
+      self.factorization.cholesky_inplace(self._factor_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
@@ -149,12 +162,18 @@ class EigenSolver(LinearSolver):
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
 
+  def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
+    # The nanoeigenpy binding follows Eigen's lower-triangular selfadjoint
+    # convention, so pass a CSC lower-triangular view into analyze/factorize.
+    self._factor_kkt = kkt.T.tocsc()
+
   def factorize(self):
     if self._solver is None:
       self._solver = self.nanoeigenpy.SimplicialLDLT()
-      self._solver.analyzePattern(self._kkt)
+      self._solver.analyzePattern(self._factor_kkt)
 
-    self._solver.factorize(self._kkt)
+    self._solver.factorize(self._factor_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self._solver.solve(rhs)
