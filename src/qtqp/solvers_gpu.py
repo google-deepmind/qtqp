@@ -54,11 +54,12 @@ class CuDssSolver(LinearSolver):
     super().set_kkt(kkt)
     self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
     self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
+    self._kkt_diag_idxs_gpu = self._cp.asarray(self._kkt_diag_idxs)
 
   def update_diag(self, diag: np.ndarray) -> None:
-    super().update_diag(diag)
-    self._kkt_gpu.data.set(self._kkt.data)
-    self._kkt_diag_gpu.set(self._kkt_diag)
+    diag_gpu = self._cp.asarray(diag)
+    self._kkt_gpu.data[self._kkt_diag_idxs_gpu] = diag_gpu
+    self._cp.copyto(self._kkt_diag_gpu, diag_gpu)
 
   def factorize(self):
     cp = self._cp
