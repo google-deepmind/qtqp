@@ -3,8 +3,8 @@
 [![Build Status](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml/badge.svg)](https://github.com/google-deepmind/qtqp/actions/workflows/ci.yml)
 
 The cutie QP solver is a primal-dual interior point method for solving
-convex quadratic programs (QPs), implemented in pure python. It solves
-primal QP problem:
+convex quadratic programs (QPs), implemented in pure python. It solves the
+primal QP:
 
 ```
     min. (1/2) x.T @ p @ x + c.T @ x
@@ -21,8 +21,8 @@ With dual:
          y[z:] >= 0
 ```
 
-With data `a, b, c, p, z` and variables `x, y, s`. It will return a primal-dual
-solution should one exist, or a certificate of primal or dual infeasibility
+with data `a, b, c, p, z` and variables `x, y, s`. It returns a primal-dual
+solution when one exists, or a certificate of primal or dual infeasibility
 otherwise.
 
 ## Installation
@@ -59,7 +59,8 @@ To run the tests, inside the qtqp directory:
 python -m pytest .
 ```
 
-Note tests will fail for linear solvers that are not installed on your system.
+Tests for optional linear solvers are skipped when the corresponding
+dependencies are not installed.
 
 ## Quick start
 
@@ -86,7 +87,7 @@ print(f'{sol.y=}')
 print(f'{sol.s=}')
 ```
 
-You should see something like
+You should see output similar to
 
 ```
 | QTQP v0.0.3: m=3, n=2, z=1, nnz(A)=4, nnz(P)=4, linear_solver=SCIPY
@@ -197,71 +198,35 @@ that may be faster or more reliable for your problem. The enum
 `qtqp.LinearSolver` contains values corresponding to the following backend
 solvers:
 
-#### Dense Cholesky: `qtqp.LinearSolver.SCIPY_DENSE`
+Recommended starting points:
 
-Uses Schur-complement (Gram) reduction to eliminate y from the KKT system,
-producing an n×n SPD Gram matrix `G = P + diag(R_x) + A' diag(1/R_y) A`
-factorized via Cholesky (LAPACK `dpotrf`/`dpotrs`). Reduces factorization
-cost from O((n+m)^3) to O(n^3), a large win when m >> n (typical for QPs).
+| System / problem type | Recommended solver |
+| --- | --- |
+| Linux / Windows | `qtqp.LinearSolver.PARDISO` |
+| macOS | `qtqp.LinearSolver.ACCELERATE` |
+| NVIDIA GPU available | `qtqp.LinearSolver.CUDSS` |
+| Dense data | `qtqp.LinearSolver.SCIPY_DENSE` |
+| Tiny problems (`n + m < 50`) | `qtqp.LinearSolver.UMFPACK` |
+
+#### scipy SuperLU: `qtqp.LinearSolver.SCIPY`
+
+Default sparse CPU backend using `scipy.sparse.linalg.factorized`.
 No additional dependencies required.
-
-#### UMFPACK: `qtqp.LinearSolver.UMFPACK`
-
-UMFPACK separates symbolic and numeric factorization phases, so symbolic
-analysis (column ordering) only runs once per solve even though the KKT matrix
-is refactored every iteration. Available via the scikit-umfpack package. To
-install
-
-```bash
-conda install scikit-umfpack -c conda-forge
-```
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
 
-Pardiso is available via the py-mkl-pardiso package (Linux and Windows, x86_64).
-To install
+Recommended sparse CPU backend on Linux and Windows. Available via the
+py-mkl-pardiso package (Linux and Windows, x86_64). To install
 
 ```bash
-pip install py-mkl-pardiso
-```
-
-#### Eigen: `qtqp.LinearSolver.EIGEN`
-
-Available via nanoeigenpy. To install
-
-```bash
-conda install nanoeigenpy -c conda-forge
-```
-
-#### MUMPS: `qtqp.LinearSolver.MUMPS`
-
-Available via petsc4py. To install
-
-```bash
-conda install petsc4py -c conda-forge
-```
-
-#### QDLDL: `qtqp.LinearSolver.QDLDL`
-
-To install
-
-```bash
-python -m pip install qdldl
-```
-
-#### CHOLMOD: `qtqp.LinearSolver.CHOLMOD`
-
-Cholmod is available in the scikit sparse package (>= 0.5). To install
-
-```bash
-conda install suitesparse -c conda-forge
-pip install 'scikit-sparse>=0.5'
+python -m pip install py-mkl-pardiso
 ```
 
 #### Accelerate: `qtqp.LinearSolver.ACCELERATE`
 
 Apple Accelerate sparse LDL^T factorization via
-[macldlt](https://github.com/bodono/macldlt) (macOS only). To install
+[macldlt](https://github.com/bodono/macldlt) (macOS only). Recommended sparse
+CPU backend on macOS. To install
 
 ```bash
 python -m pip install macldlt
@@ -269,7 +234,7 @@ python -m pip install macldlt
 
 #### Nvidia cuDSS: `qtqp.LinearSolver.CUDSS`
 
-cuDSS uses a GPU accelerated sparse direct solver (requires a GPU). To install
+Recommended sparse GPU backend when an NVIDIA GPU is available. To install
 
 ```bash
 python -m pip install nvidia-cudss-cu12
@@ -277,10 +242,56 @@ python -m pip install nvmath-python[cu12]
 python -m pip install cupy-cuda12x
 ```
 
+#### Dense Cholesky: `qtqp.LinearSolver.SCIPY_DENSE`
+
+Recommended backend for dense data. Uses a dense Schur-complement / Cholesky
+factorization. No additional dependencies required.
+
+#### QDLDL: `qtqp.LinearSolver.QDLDL`
+
+Sparse LDL^T backend via `qdldl`. To install
+
+```bash
+python -m pip install qdldl
+```
+
+#### UMFPACK: `qtqp.LinearSolver.UMFPACK`
+
+Sparse LU backend via scikit-umfpack. To install
+
+```bash
+conda install scikit-umfpack -c conda-forge
+```
+
+#### CHOLMOD: `qtqp.LinearSolver.CHOLMOD`
+
+Sparse Cholesky / LDL^T backend via scikit-sparse. To install
+
+```bash
+conda install suitesparse -c conda-forge
+python -m pip install 'scikit-sparse>=0.5'
+```
+
+#### Eigen: `qtqp.LinearSolver.EIGEN`
+
+Sparse LDL^T backend via nanoeigenpy. To install
+
+```bash
+conda install nanoeigenpy -c conda-forge
+```
+
+#### MUMPS: `qtqp.LinearSolver.MUMPS`
+
+Sparse direct solver backend via petsc4py / MUMPS. To install
+
+```bash
+conda install petsc4py -c conda-forge
+```
+
 #### cupy dense GPU: `qtqp.LinearSolver.CUPY_DENSE`
 
-GPU counterpart of SCIPY_DENSE: same Gram/Schur-complement reduction with
-Cholesky factorization on GPU via cupy/cuSOLVER (requires a GPU). To install
+GPU counterpart of `SCIPY_DENSE`: dense Schur-complement / Cholesky on GPU via
+cupy/cuSOLVER. To install
 
 ```bash
 python -m pip install cupy-cuda12x
@@ -323,4 +334,3 @@ either express or implied. See the licenses for the specific language governing
 permissions and limitations under those licenses.
 
 This is not an official Google product.
-
