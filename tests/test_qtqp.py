@@ -32,13 +32,13 @@ _SOLVERS = [
 
 
 class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
-  """Minimal solver used to exercise the base symmetric-triangle matvec."""
+  """Minimal solver used only to exercise the base symmetric-triangle matvec."""
 
   def factorize(self):
     pass
 
   def solve(self, rhs):
-    return rhs
+    raise NotImplementedError("Test-only solver; not intended for solve().")
 
   def format(self):
     return 'csc'
