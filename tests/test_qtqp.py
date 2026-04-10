@@ -28,9 +28,6 @@ _SOLVERS = [
     qtqp.LinearSolver.QDLDL,
     qtqp.LinearSolver.CHOLMOD,
     qtqp.LinearSolver.EIGEN,
-    # Requires GPU:
-    # qtqp.LinearSolver.CUDSS,
-    # qtqp.LinearSolver.CUPY_DENSE,
 ]
 
 
@@ -63,6 +60,21 @@ try:
   _SOLVERS.append(qtqp.LinearSolver.MUMPS)
 except (ImportError, ModuleNotFoundError) as e:
   print(f'Skipping MUMPS tests: {e}')
+
+try:
+  import cupy  # noqa: F401
+  if cupy.cuda.runtime.getDeviceCount() > 0:
+    _SOLVERS.append(qtqp.LinearSolver.CUPY_DENSE)
+except Exception as e:  # pylint: disable=broad-exception-caught
+  print(f'Skipping CUPY_DENSE tests: {e}')
+
+try:
+  import cupy  # noqa: F401
+  import nvmath  # noqa: F401
+  if cupy.cuda.runtime.getDeviceCount() > 0:
+    _SOLVERS.append(qtqp.LinearSolver.CUDSS)
+except Exception as e:  # pylint: disable=broad-exception-caught
+  print(f'Skipping CUDSS tests: {e}')
 
 
 def _gen_feasible(m, n, z, random_state=None):
