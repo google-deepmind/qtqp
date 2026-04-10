@@ -244,9 +244,8 @@ python -m pip install cupy-cuda12x
 
 #### Dense Cholesky: `qtqp.LinearSolver.SCIPY_DENSE`
 
-Dense Schur-complement / Cholesky backend. This can be faster for dense data or
-very small problems, but it is not always faster than the sparse backends. No
-additional dependencies required.
+Recommended backend for dense data. Uses a dense Schur-complement / Cholesky
+factorization. No additional dependencies required.
 
 #### QDLDL: `qtqp.LinearSolver.QDLDL`
 
