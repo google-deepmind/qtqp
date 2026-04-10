@@ -65,8 +65,9 @@ class LinearSolver:
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     """Stores the upper-triangular KKT matrix; called once at init time.
 
-    Subclasses that override this should call super().set_kkt(kkt) to ensure
-    the base-class _kkt, _kkt_diag, and _kkt_diag_idxs are populated.
+    Subclasses that rely on the base sparse storage or the default
+    update_diag/__matmul__ helpers should call super().set_kkt(kkt) so
+    _kkt, _kkt_diag, and _kkt_diag_idxs are populated.
     """
     self._kkt = kkt
     self._kkt_diag = kkt.diagonal()
