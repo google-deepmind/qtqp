@@ -65,11 +65,16 @@ class CuDssSolver(LinearSolver):
       sparse_system_type = (
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
       )
+      sparse_system_view = (
+          self.nvmath.sparse.advanced.DirectSolverMatrixViewType.UPPER
+      )
       # Turn off annoying logs by default.
       logger = logging.getLogger("null")
       logger.disabled = True
       options = self.nvmath.sparse.advanced.DirectSolverOptions(
-          sparse_system_type=sparse_system_type, logger=logger
+          sparse_system_type=sparse_system_type,
+          sparse_system_view=sparse_system_view,
+          logger=logger,
       )
       n = self._kkt_gpu.shape[1]
       self._x_gpu = cp.empty(n, dtype=cp.float64)
