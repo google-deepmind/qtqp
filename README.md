@@ -219,7 +219,7 @@ Recommended sparse CPU backend on Linux and Windows. Available via the
 py-mkl-pardiso package (Linux and Windows, x86_64). To install
 
 ```bash
-pip install py-mkl-pardiso
+python -m pip install py-mkl-pardiso
 ```
 
 #### Accelerate: `qtqp.LinearSolver.ACCELERATE`
@@ -270,7 +270,7 @@ Sparse Cholesky / LDL^T backend via scikit-sparse. To install
 
 ```bash
 conda install suitesparse -c conda-forge
-pip install 'scikit-sparse>=0.5'
+python -m pip install 'scikit-sparse>=0.5'
 ```
 
 #### Eigen: `qtqp.LinearSolver.EIGEN`
