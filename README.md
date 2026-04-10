@@ -205,7 +205,8 @@ Recommended starting points:
 | Linux / Windows | `qtqp.LinearSolver.PARDISO` |
 | macOS | `qtqp.LinearSolver.ACCELERATE` |
 | NVIDIA GPU available | `qtqp.LinearSolver.CUDSS` |
-| Dense data, or very small problems (`n + m < 50`) | `qtqp.LinearSolver.SCIPY_DENSE` may be faster, but this is not guaranteed |
+| Dense data | `qtqp.LinearSolver.SCIPY_DENSE` |
+| Tiny problems (`n + m < 100`) | `qtqp.LinearSolver.QDLDL` |
 
 #### scipy SuperLU: `qtqp.LinearSolver.SCIPY`
 
