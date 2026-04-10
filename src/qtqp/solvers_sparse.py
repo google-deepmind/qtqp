@@ -97,8 +97,10 @@ class ScipySolver(LinearSolver):
 
   def __init__(self):
     self.factorization = None
+    self._full_kkt: sp.spmatrix | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
@@ -318,6 +320,7 @@ class UmfpackSolver(LinearSolver):
     self._symbolic_done = False
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
