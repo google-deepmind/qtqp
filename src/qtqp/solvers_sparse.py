@@ -188,17 +188,19 @@ class MumpsSolver(LinearSolver):
     kkt = self._kkt
 
     if self._mat is None:
-      # First call: build a symmetric PETSc Mat from upper-triangular CSR,
-      # configure KSP + MUMPS, and reuse it across iterations.
-      # createSBAIJ shares the scipy data buffer, so
+      # First call: build a PETSc AIJ matrix from the stored upper triangle,
+      # mark it symmetric, and tell PETSc/MUMPS to ignore the absent lower
+      # triangle structurally.
+      # createAIJWithArrays shares the scipy data buffer, so
       # DirectKktSolver's in-place diagonal updates are visible to PETSc
       # without any copy.  On subsequent factorize calls we just bump the
       # state counter and refactorize.
-      self._mat = PETSc.Mat().createSBAIJ(
-          size=kkt.shape, bsize=1, csr=(kkt.indptr, kkt.indices, kkt.data)
+      self._mat = PETSc.Mat().createAIJWithArrays(
+          kkt.shape, (kkt.indptr, kkt.indices, kkt.data)
       )
       self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
       self._mat.setOption(PETSc.Mat.Option.SPD, False)
+      self._mat.setOption(PETSc.Mat.Option.IGNORE_LOWER_TRIANGULAR, True)
       self._mat.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATIONS, False)
       self._mat.assemble()
 
