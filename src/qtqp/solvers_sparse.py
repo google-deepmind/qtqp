@@ -83,15 +83,11 @@ class QdldlSolver(LinearSolver):
     self.qdldl = qdldl
     self.factorization: qdldl.Solver | None = None
 
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
-    self._factor_kkt = kkt
-
   def factorize(self):
     if self.factorization is None:
-      self.factorization = self.qdldl.Solver(self._factor_kkt, upper=True)
+      self.factorization = self.qdldl.Solver(self._kkt, upper=True)
     else:
-      self.factorization.update(self._factor_kkt, upper=True)
+      self.factorization.update(self._kkt, upper=True)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization.solve(rhs)
@@ -131,17 +127,13 @@ class CholModSolver(LinearSolver):
     self.cholmod = sksparse.cholmod
     self.factorization: sksparse.cholmod.CholeskyFactor | None = None
 
-  def set_kkt(self, kkt: sp.spmatrix) -> None:
-    super().set_kkt(kkt)
-    self._factor_kkt = kkt
-
   def factorize(self):
     if self.factorization is None:
       self.factorization = self.cholmod.cholesky(
-          self._factor_kkt, mode="simplicial", lower=False
+          self._kkt, mode="simplicial", lower=False
       )
     else:
-      self.factorization.cholesky_inplace(self._factor_kkt, lower=False)
+      self.factorization.cholesky_inplace(self._kkt, lower=False)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization(rhs)
