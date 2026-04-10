@@ -305,6 +305,7 @@ class QTQP:
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
+      self._q_lin_sys_stats = q_lin_sys_stats
       stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
       # --- Step 2: Predictor (Affine) Step ---
@@ -544,16 +545,44 @@ class QTQP:
         warm_start=r_anchor,
     )
 
-    # Solve for the homogeneous tau component via linearized Newton step.
+    # Solve for the homogeneous tau component. Only trust the exact quadratic
+    # root when both KKT solves were highly accurate; otherwise use a damped
+    # local residual-reduction step that is less sensitive to coefficient noise.
     r_tau = (mu - mu_target) * tau_anchor
-    tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau, tau)
+    tau_plus = self._solve_for_tau(
+        p,
+        kinv_r,
+        mu,
+        mu_target,
+        r_tau,
+        tau,
+        self._q_lin_sys_stats,
+        lin_sys_stats,
+    )
 
     # Reconstruct full (x, y) step from KKT solution components
     xy_plus = kinv_r - self.kinv_q * tau_plus
     x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, tau) -> np.ndarray:
+  def _should_use_exact_tau_root(self, *lin_sys_stats: Dict[str, Any]) -> bool:
+    """Returns whether the exact quadratic tau root is trustworthy.
+
+    The quadratic coefficients are built from inexact KKT solves. When either
+    solve has a loose or stalled residual, solving the noisy quadratic exactly
+    can produce large nonphysical tau jumps. Restrict the exact root to cases
+    where both linear solves converged to high relative accuracy.
+    """
+    for stats in lin_sys_stats:
+      if stats.get("status") != "converged":
+        return False
+      if stats.get("relative_residual_norm", np.inf) > 1e-10:
+        return False
+    return True
+
+  def _solve_for_tau(
+      self, p, kinv_r, mu, mu_target, r_tau, tau, q_lin_sys_stats, r_lin_sys_stats
+  ) -> np.ndarray:
     """Computes tau+ from the tau equation of the homogeneous embedding.
 
     The parametric KKT solution is:
@@ -562,13 +591,10 @@ class QTQP:
     Substituting into the homogeneous embedding's tau equation gives:
         f(tau) = t_a * tau^2 + t_b * tau + t_c = 0
 
-    We first try the quadratic formula for the positive root, which is exact
-    when the KKT solve is accurate. If that fails (negative discriminant,
-    near-zero leading coefficient, or invalid root — typically caused by
-    approximate KKT solves from iterative solvers), we fall back to a single
-    Newton step: tau+ = tau - f(tau)/f'(tau). This is less accurate but
-    robust to coefficient errors since it avoids the discriminant. The tau
-    step is clamped to keep tau strictly positive.
+    We only trust the exact quadratic root when the linear solves used to form
+    the coefficients were both highly accurate. Otherwise, the exact root can
+    overreact to coefficient noise. In that case we take a damped local step
+    that reduces |f(tau)| while keeping tau positive.
     """
     n = self.n
     q, kinv_q = self.q, self.kinv_q
@@ -584,22 +610,51 @@ class QTQP:
       t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Try the exact quadratic formula first.
-    if abs(t_a) > _EPS:
+    def f(tau_val: float) -> float:
+      return t_a * tau_val**2 + t_b * tau_val + t_c
+
+    def fp(tau_val: float) -> float:
+      return 2 * t_a * tau_val + t_b
+
+    tau_val = tau[0]
+    use_exact_root = self._should_use_exact_tau_root(
+        q_lin_sys_stats, r_lin_sys_stats
+    )
+
+    # Try the exact quadratic formula only when the underlying KKT solves were
+    # accurate enough that the quadratic coefficients should be trustworthy.
+    if use_exact_root and abs(t_a) > _EPS:
       discriminant = t_b**2 - 4 * t_a * t_c
       if discriminant >= 0.0:
         tau_sol = (-t_b + np.sqrt(discriminant)) / (2 * t_a)
         if np.isfinite(tau_sol) and tau_sol > 0.0:
           return np.array([tau_sol])
 
-    # Fallback: Newton step from current tau, robust to coefficient errors.
-    tau_val = tau[0]
-    f_val = t_a * tau_val**2 + t_b * tau_val + t_c
-    fp_val = 2 * t_a * tau_val + t_b
+    # Fallback: damped local step from the current tau. This is intentionally
+    # conservative: noisy coefficients should only nudge tau if they produce a
+    # meaningful reduction in the scalar residual model.
+    f_val = f(tau_val)
+    fp_val = fp(tau_val)
+    if not np.isfinite(f_val) or not np.isfinite(fp_val):
+      return tau.copy()
     if abs(fp_val) < _EPS:
       return tau.copy()
-    tau_plus = tau_val - f_val / fp_val
-    return np.array([tau_plus])
+
+    # Clip the Newton step so tau cannot jump too far on a noisy model.
+    step = -f_val / fp_val
+    max_step = 0.5 * max(1.0, abs(tau_val))
+    step = np.clip(step, -max_step, max_step)
+    phi = abs(f_val)
+    tau_floor = 1e-15
+
+    for _ in range(8):
+      tau_trial = max(tau_floor, tau_val + step)
+      phi_trial = abs(f(tau_trial))
+      if np.isfinite(phi_trial) and phi_trial < phi:
+        return np.array([tau_trial])
+      step *= 0.5
+
+    return tau.copy()
 
   def _normalize(self, x, y, tau, s):
     """Normalizes iterates to match the homogeneous embedding central path norm.

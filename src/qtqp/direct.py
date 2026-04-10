@@ -238,7 +238,8 @@ class DirectKktSolver:
     # Use pre-allocated buffer to avoid a copy allocation on every call.
     np.copyto(self._kkt_rhs, rhs)
     self._kkt_rhs[self.n :] *= -1.0
-    tolerance = self._atol + self._rtol * np.linalg.norm(self._kkt_rhs, np.inf)
+    rhs_norm = np.linalg.norm(self._kkt_rhs, np.inf)
+    tolerance = self._atol + self._rtol * rhs_norm
 
     # Initial sol and residual.
     # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
@@ -293,6 +294,9 @@ class DirectKktSolver:
     return sol, {
         "solves": solves,
         "final_residual_norm": residual_norm,
+        "rhs_norm": rhs_norm,
+        "relative_residual_norm": residual_norm / max(rhs_norm, np.finfo(float).eps),
+        "tolerance": tolerance,
         "status": status,
     }
 
