@@ -33,6 +33,19 @@ _SOLVERS = [
     # qtqp.LinearSolver.CUPY_DENSE,
 ]
 
+
+class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
+  """Minimal solver used to exercise the base symmetric-triangle matvec."""
+
+  def factorize(self):
+    pass
+
+  def solve(self, rhs):
+    return rhs
+
+  def format(self):
+    return 'csc'
+
 try:
   import pymklpardiso  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)
@@ -378,7 +391,7 @@ def test_upper_triangular_kkt_matvec_matches_full():
       max_iterative_refinement_steps=2,
       atol=1e-12,
       rtol=1e-12,
-      solver=qtqp.direct.ScipySolver(),
+      solver=_TriangularMatvecSolver(),
   )
   linear_solver.update(mu=mu, s=s, y=y)
 
