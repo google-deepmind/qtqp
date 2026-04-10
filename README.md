@@ -251,10 +251,11 @@ python -m pip install qdldl
 
 #### CHOLMOD: `qtqp.LinearSolver.CHOLMOD`
 
-Cholmod is available in the scikit sparse package. To install
+Cholmod is available in the scikit sparse package (>= 0.5). To install
 
 ```bash
-conda install scikit-sparse -c conda-forge
+conda install suitesparse -c conda-forge
+pip install 'scikit-sparse>=0.5'
 ```
 
 #### Accelerate: `qtqp.LinearSolver.ACCELERATE`
