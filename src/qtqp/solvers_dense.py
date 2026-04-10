@@ -83,6 +83,7 @@ class ScipyDenseSolver(LinearSolver):
     self._g = np.empty(n, dtype=np.float64)
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
     n = self._n
     kkt_dense = kkt.toarray()
     self._A = np.ascontiguousarray(kkt_dense[:n, n:].T, dtype=np.float64)

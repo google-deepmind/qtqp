@@ -146,6 +146,7 @@ class CupyDenseSolver(LinearSolver):
     self._L = None  # Lower-triangular Cholesky factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    super().set_kkt(kkt)
     cp = self._cp
     n = self._n
     kkt_dense = kkt.toarray()
