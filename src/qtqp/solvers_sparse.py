@@ -181,23 +181,21 @@ class MumpsSolver(LinearSolver):
     self._x = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
-    self._full_kkt = _full_symmetric_from_upper(kkt, "csr")
-
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._full_kkt @ x
+    super().set_kkt(kkt)
 
   def factorize(self):
     PETSc = self._PETSc
-    kkt = self._full_kkt
+    kkt = self._kkt
 
     if self._mat is None:
-      # First call: build PETSc Mat from full CSR, configure KSP + MUMPS.
-      # createAIJWithArrays shares the scipy data buffer, so
+      # First call: build a symmetric PETSc Mat from upper-triangular CSR,
+      # configure KSP + MUMPS, and reuse it across iterations.
+      # createSBAIJ shares the scipy data buffer, so
       # DirectKktSolver's in-place diagonal updates are visible to PETSc
       # without any copy.  On subsequent factorize calls we just bump the
       # state counter and refactorize.
-      self._mat = PETSc.Mat().createAIJWithArrays(
-          kkt.shape, (kkt.indptr, kkt.indices, kkt.data)
+      self._mat = PETSc.Mat().createSBAIJ(
+          size=kkt.shape, bsize=1, csr=(kkt.indptr, kkt.indices, kkt.data)
       )
       self._mat.setOption(PETSc.Mat.Option.SYMMETRIC, True)
       self._mat.setOption(PETSc.Mat.Option.SPD, False)
@@ -207,7 +205,11 @@ class MumpsSolver(LinearSolver):
       self._ksp = PETSc.KSP().create()
       self._ksp.setType(PETSc.KSP.Type.PREONLY)
       self._pc = self._ksp.getPC()
-      self._pc.setType(PETSc.PC.Type.LU)
+      # PETSc exposes MUMPS's symmetric-indefinite LDL^T path through the
+      # "cholesky" factor interface. That name is a misnomer here: because
+      # MAT_SPD remains false above, MUMPS treats the matrix as general
+      # symmetric (quasidefinite KKT), not SPD.
+      self._pc.setType(PETSc.PC.Type.CHOLESKY)
       self._pc.setFactorSolverType("mumps")
       self._ksp.setOperators(self._mat)
 
