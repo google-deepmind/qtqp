@@ -69,6 +69,7 @@ class LinearSolver:
     the base-class _kkt, _kkt_diag, and _kkt_diag_idxs are populated.
     """
     self._kkt = kkt
+    self._kkt_T = kkt.T
     self._kkt_diag = kkt.diagonal()
     self._kkt_diag_idxs = diag_data_indices(kkt)
 
@@ -97,7 +98,7 @@ class LinearSolver:
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     res = self._kkt @ x
-    res += self._kkt.T @ x
+    res += self._kkt_T @ x
     res -= self._kkt_diag * x
     return res
 
