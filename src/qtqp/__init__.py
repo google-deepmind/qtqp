@@ -357,7 +357,7 @@ class QTQP:
     for self.it in range(max_iter):
       stats_i = {}
 
-      self._normalize(x, y, tau, s)
+      x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
       mu = (y @ s) / (self.m - self.z)
@@ -548,30 +548,24 @@ class QTQP:
       self, mu_curr, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s
   ) -> float:
     """Computes the centering parameter sigma using Mehrotra's heuristic."""
-    # Compute complementarity of the affine step (y_aff @ s_aff) via scalar
-    # expansion to avoid allocating temporary arrays.
-    # y_aff @ s_aff = sum((y + alpha*dy) * (s + alpha*ds))
-    #               = y@s + alpha*(y@ds + s@dy) + alpha^2*(dy@ds)
-    y_aff_s_aff = (
-        y @ s
-        + alpha * (y @ d_s + s @ d_y)
-        + (alpha**2) * (d_y @ d_s)
-    )
+    # Projected complementarity after affine step
+    x_aff = x + alpha * d_x
+    y_aff = y + alpha * d_y
+    tau_aff = tau + alpha * d_tau
+    s_aff = s + alpha * d_s
 
-    # Compute ||(x_aff, y_aff, tau_aff)||^2 via scalar expansion to avoid
-    # large array allocations.
-    # x_aff @ x_aff = x@x + 2*alpha*(x@dx) + alpha^2*(dx@dx)
-    # (Same for y and tau).
-    xyt_norm_sq = (
-        (x @ x + y @ y + tau[0] ** 2)
-        + 2 * alpha * (x @ d_x + y @ d_y + tau[0] * d_tau[0])
-        + (alpha**2) * (d_x @ d_x + d_y @ d_y + d_tau[0] ** 2)
-    )
-
+    # Compute mu_aff directly without calling _normalize to avoid 4 extra
+    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
+    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
+    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
     scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
-    mu_aff = scale_sq * y_aff_s_aff / (self.m - self.z)
+    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
-    # sigma = (mu_aff / mu)^3: Mehrotra's heuristic.
+    # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
+    # drives mu close to zero, sigma is small (aggressive, little centering).
+    # If mu_aff ≈ mu (affine step didn't help much), sigma ≈ 1 (full centering).
+    # The cubic exponent amplifies the contrast, pushing sigma toward 0 or 1.
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
     return np.clip(sigma, 0.0, 1.0)
 
@@ -603,11 +597,9 @@ class QTQP:
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
-    # Reconstruct full (x, y) solution by combining the parametric KKT components:
-    #   [x+; y+] = kinv_r - kinv_q * tau+
-    # Perform this in-place on kinv_r to avoid another large allocation.
-    kinv_r -= self.kinv_q * tau_plus
-    x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
+    # Reconstruct full (x, y) step from KKT solution components
+    xy_plus = kinv_r - self.kinv_q * tau_plus
+    x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau_val) -> np.ndarray:
@@ -644,18 +636,23 @@ class QTQP:
 
     return np.array([max(0.0, tau_sol)])
 
-  def _normalize(self, x, y, tau, s) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  def _normalize(self, x, y, tau, s):
     """Normalizes iterates to match the homogeneous embedding central path norm.
 
-    Operates in-place on the iterate arrays.
+    The homogeneous embedding lifts the QP into a projective space. Only ratios
+    like x/tau and y/tau matter — tau is the homogeneous variable, and the final
+    solution is recovered as (x/tau, y/tau, s/tau).
+
+    We enforce the norm of the central path, which ensures convergence to
+    non-trivial solution, ie:
+        ||(x, y, tau)||^2 = m - z + 1
+    The right-hand side counts complementarity pairs: (m - z) from the
+    inequality constraints plus 1 for the tau-kappa pair of the embedding.
+
     """
-    xyt_norm = np.sqrt(x @ x + y @ y + tau[0] ** 2)
+    xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
-    x *= scale
-    y *= scale
-    tau *= scale
-    s *= scale
-    return x, y, tau, s
+    return x * scale, y * scale, tau * scale, s * scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
