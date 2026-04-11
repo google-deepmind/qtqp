@@ -34,6 +34,7 @@
 import dataclasses
 import enum
 import logging
+import os
 import timeit
 from typing import Any, Dict, List
 
@@ -387,6 +388,14 @@ class QTQP:
 
       # --- Termination Check---
       status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats)
+      if os.getenv("QTQP_DEBUG_TAU"):
+        print(
+            "TAU_TRACE"
+            f" iter={self.it}"
+            f" tau={tau[0]:.16e}"
+            f" mu={mu:.16e}"
+            f" status={status.value}"
+        )
       self._log_iteration(stats_i)
       if collect_stats:
         stats.append(stats_i)
