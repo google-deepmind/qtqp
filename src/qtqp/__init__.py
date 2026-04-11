@@ -346,6 +346,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
+    self._r_newton = np.zeros_like(self.q)  # Pre-allocated Newton RHS
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -357,7 +358,7 @@ class QTQP:
     for self.it in range(max_iter):
       stats_i = {}
 
-      x, y, tau, s = self._normalize(x, y, tau, s)
+      self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
       mu = (y @ s) / (self.m - self.z)
@@ -548,54 +549,41 @@ class QTQP:
       self, mu_curr, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s
   ) -> float:
     """Computes the centering parameter sigma using Mehrotra's heuristic."""
-    # Projected complementarity after affine step
-    x_aff = x + alpha * d_x
-    y_aff = y + alpha * d_y
-    tau_aff = tau + alpha * d_tau
-    s_aff = s + alpha * d_s
+    # Compute complementarity of the affine step (y_aff @ s_aff) via scalar
+    # expansion to avoid allocating temporary arrays.
+    # y_aff @ s_aff = sum((y + alpha*dy) * (s + alpha*ds))
+    #               = y@s + alpha*(y@ds + s@dy) + alpha^2*(dy@ds)
+    y_aff_s_aff = (
+        y @ s
+        + alpha * (y @ d_s + s @ d_y)
+        + (alpha**2) * (d_y @ d_s)
+    )
 
-    # Compute mu_aff directly without calling _normalize to avoid 4 extra
-    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
-    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
-    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
+    # Compute ||(x_aff, y_aff, tau_aff)||^2 via scalar expansion to avoid
+    # large array allocations.
+    # x_aff @ x_aff = x@x + 2*alpha*(x@dx) + alpha^2*(dx@dx)
+    # (Same for y and tau).
+    xyt_norm_sq = (
+        (x @ x + y @ y + tau[0] ** 2)
+        + 2 * alpha * (x @ d_x + y @ d_y + tau[0] * d_tau[0])
+        + (alpha**2) * (d_x @ d_x + d_y @ d_y + d_tau[0] ** 2)
+    )
+
     scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
-    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
+    mu_aff = scale_sq * y_aff_s_aff / (self.m - self.z)
 
-    # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
-    # drives mu close to zero, sigma is small (aggressive, little centering).
-    # If mu_aff ≈ mu (affine step didn't help much), sigma ≈ 1 (full centering).
-    # The cubic exponent amplifies the contrast, pushing sigma toward 0 or 1.
+    # sigma = (mu_aff / mu)^3: Mehrotra's heuristic.
     sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
-    """Computes a Newton search direction by solving the augmented KKT system.
-
-    The KKT system K @ [x+; y+] = r - q * tau+ is linear in tau+, giving the
-    parametric solution:
-        [x+; y+] = K^{-1}(r) - K^{-1}(q) * tau+  =  kinv_r - kinv_q * tau+
-    tau+ is then pinned by substituting this back into the tau equation of the
-    homogeneous embedding (see _solve_for_tau).
-
-    Args:
-      p: The quadratic cost matrix.
-      mu: Current barrier parameter.
-      mu_target: Complementarity target for this step (0 for predictor,
-        sigma*mu for corrector).
-      r_anchor: The current [x; y] iterate (as a single vector), used to
-        form the Newton RHS via r = (mu - mu_target) * r_anchor + ...
-      tau_anchor: The current tau iterate.
-      y: Current dual variables.
-      s: Current slack variables.
-      tau: Current homogeneous variable (used as fallback if tau solve fails).
-      correction: Optional Mehrotra second-order correction added to the
-        complementarity block of the RHS.
-    """
-    # Prepare RHS for the linear system (in-place to avoid r_cone allocation).
-    r = (mu - mu_target) * r_anchor
+    """Computes a Newton search direction by solving the augmented KKT system."""
+    # Build RHS for the augmented KKT system in the pre-allocated buffer.
+    r = self._r_newton
+    np.copyto(r, r_anchor)
+    r *= (mu - mu_target)
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -609,41 +597,33 @@ class QTQP:
 
     # Solve the 1D quadratic equation for the homogeneous tau component
     try:
-      r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+      r_tau_val = (mu - mu_target) * tau_anchor[0]
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau_val)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
-    # Reconstruct full (x, y) step from KKT solution components
-    xy_plus = kinv_r - self.kinv_q * tau_plus
-    x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
+    # Reconstruct full (x, y) solution by combining the parametric KKT components:
+    #   [x+; y+] = kinv_r - kinv_q * tau+
+    # Perform this in-place on kinv_r to avoid another large allocation.
+    kinv_r -= self.kinv_q * tau_plus
+    x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
-    """Solves for tau+ using the homogeneous embedding's tau equation.
-
-    The parametric KKT solution is:
-        [x+; y+] = kinv_r - kinv_q * tau+
-
-    Substituting this into the tau equation of the homogeneous embedding yields:
-        t_a * tau+^2 + t_b * tau+ + t_c = 0
-
-    The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
-    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
-    the positive root since tau >= 0 is required for the embedding to represent
-    a feasible point (tau=0 corresponds to a certificate of infeasibility or
-    unboundedness, which is handled separately at termination).
-    """
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau_val) -> np.ndarray:
+    """Solves for tau+ using the homogeneous embedding's tau equation."""
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
     t_a = mu + kinv_q @ q
-    t_b = -r_tau[0] - kinv_r @ q
+    t_b = -r_tau_val - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
+      # Memory access for the sparse matrix P is the bottleneck here.
+      # np.stack enables a single pass over P's data and indices, which
+      # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
@@ -665,23 +645,17 @@ class QTQP:
 
     return np.array([max(0.0, tau_sol)])
 
-  def _normalize(self, x, y, tau, s):
+  def _normalize(self, x, y, tau, s) -> None:
     """Normalizes iterates to match the homogeneous embedding central path norm.
 
-    The homogeneous embedding lifts the QP into a projective space. Only ratios
-    like x/tau and y/tau matter — tau is the homogeneous variable, and the final
-    solution is recovered as (x/tau, y/tau, s/tau).
-
-    We enforce the norm of the central path, which ensures convergence to
-    non-trivial solution, ie:
-        ||(x, y, tau)||^2 = m - z + 1
-    The right-hand side counts complementarity pairs: (m - z) from the
-    inequality constraints plus 1 for the tau-kappa pair of the embedding.
-
+    Operates in-place on the iterate arrays.
     """
-    xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
+    xyt_norm = np.sqrt(x @ x + y @ y + tau[0] ** 2)
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
-    return x * scale, y * scale, tau * scale, s * scale
+    x *= scale
+    y *= scale
+    tau *= scale
+    s *= scale
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""

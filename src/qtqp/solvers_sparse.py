@@ -94,7 +94,7 @@ class QdldlSolver(LinearSolver):
 
 
 class ScipySolver(LinearSolver):
-  """Wrapper around scipy.linalg.factorized."""
+  """Wrapper around scipy.sparse.linalg.splu with symmetric mode."""
 
   def __init__(self):
     self.factorization = None
@@ -112,10 +112,14 @@ class ScipySolver(LinearSolver):
     return self._full_kkt @ x
 
   def factorize(self):
-    self.factorization = sp.linalg.factorized(self._full_kkt)
+    self.factorization = sp.linalg.splu(
+        self._full_kkt,
+        permc_spec="MMD_AT_PLUS_A",
+        options={"SymmetricMode": True},
+    )
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization(rhs)
+    return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
@@ -133,7 +137,7 @@ class CholModSolver(LinearSolver):
   def factorize(self):
     if self.factorization is None:
       self.factorization = self.cholmod.CholeskyFactor(
-          self._kkt, supernodal_mode="simplicial", lower=False
+          self._kkt, supernodal_mode="auto", lower=False
       )
     self.factorization.factorize(self._kkt, ldl=True)
 
@@ -325,6 +329,7 @@ class UmfpackSolver(LinearSolver):
 
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
+    self._ctx.control[umfpack.UMFPACK_STRATEGY] = umfpack.UMFPACK_STRATEGY_SYMMETRIC
     self._symbolic_done = False
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
