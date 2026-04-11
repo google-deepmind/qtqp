@@ -115,7 +115,6 @@ class ScipySolver(LinearSolver):
     self.factorization = sp.linalg.splu(
         self._full_kkt,
         permc_spec="MMD_AT_PLUS_A",
-        options={"SymmetricMode": True},
     )
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
@@ -329,7 +328,6 @@ class UmfpackSolver(LinearSolver):
 
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
-    self._ctx.control[umfpack.UMFPACK_STRATEGY] = umfpack.UMFPACK_STRATEGY_SYMMETRIC
     self._symbolic_done = False
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
