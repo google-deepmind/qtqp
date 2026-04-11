@@ -76,8 +76,9 @@ def test_auto_prefers_linux_windows_primary_backend(monkeypatch):
   assert attempts == [
       qtqp.LinearSolver.PARDISO,
       qtqp.LinearSolver.CHOLMOD,
-      qtqp.LinearSolver.EIGEN,
       qtqp.LinearSolver.QDLDL,
+      qtqp.LinearSolver.EIGEN,
+      qtqp.LinearSolver.MUMPS,
       qtqp.LinearSolver.UMFPACK,
       qtqp.LinearSolver.SCIPY,
   ]
@@ -117,8 +118,9 @@ def test_auto_prefers_macos_primary_backend(monkeypatch):
   assert attempts == [
       qtqp.LinearSolver.ACCELERATE,
       qtqp.LinearSolver.CHOLMOD,
-      qtqp.LinearSolver.EIGEN,
       qtqp.LinearSolver.QDLDL,
+      qtqp.LinearSolver.EIGEN,
+      qtqp.LinearSolver.MUMPS,
       qtqp.LinearSolver.UMFPACK,
       qtqp.LinearSolver.SCIPY,
   ]
@@ -137,8 +139,9 @@ def test_auto_caches_resolved_backend(monkeypatch):
     if linear_solver in (
         qtqp.LinearSolver.PARDISO,
         qtqp.LinearSolver.CHOLMOD,
-        qtqp.LinearSolver.EIGEN,
         qtqp.LinearSolver.QDLDL,
+        qtqp.LinearSolver.EIGEN,
+        qtqp.LinearSolver.MUMPS,
         qtqp.LinearSolver.UMFPACK,
     ):
       raise ImportError(f"{linear_solver.name} unavailable")
@@ -162,8 +165,9 @@ def test_auto_caches_resolved_backend(monkeypatch):
   assert attempts == [
       qtqp.LinearSolver.PARDISO,
       qtqp.LinearSolver.CHOLMOD,
-      qtqp.LinearSolver.EIGEN,
       qtqp.LinearSolver.QDLDL,
+      qtqp.LinearSolver.EIGEN,
+      qtqp.LinearSolver.MUMPS,
       qtqp.LinearSolver.UMFPACK,
       qtqp.LinearSolver.SCIPY,
       qtqp.LinearSolver.SCIPY,

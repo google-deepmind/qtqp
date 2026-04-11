@@ -90,11 +90,11 @@ def _auto_linear_solver_order() -> list[LinearSolver]:
   """
   fallbacks = [
       LinearSolver.CHOLMOD,
-      LinearSolver.EIGEN,
       LinearSolver.QDLDL,
+      LinearSolver.EIGEN,
+      LinearSolver.MUMPS,
       LinearSolver.UMFPACK,
       LinearSolver.SCIPY,
-      LinearSolver.MUMPS,
   ]
 
   if sys.platform == "darwin":
