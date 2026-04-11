@@ -114,7 +114,6 @@ def _resolve_linear_solver(
   if cached is not None:
     return cached, _instantiate_linear_solver(cached)
 
-  failures = []
   for candidate in _auto_linear_solver_order():
     try:
       backend = _instantiate_linear_solver(candidate)
@@ -122,12 +121,8 @@ def _resolve_linear_solver(
       return candidate, backend
     except _AUTO_UNAVAILABLE_ERRORS as e:
       logging.debug("AUTO skipped %s: %s", candidate.name, e)
-      failures.append(f"{candidate.name}: {e}")
 
-  raise RuntimeError(
-      "AUTO could not initialize any linear solver backend. "
-      + "; ".join(failures)
-  )
+  raise RuntimeError("AUTO could not initialize any linear solver backend.")
 
 
 class SolutionStatus(enum.Enum):
