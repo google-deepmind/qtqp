@@ -216,13 +216,12 @@ class QTQP:
         raise TypeError("QP matrix 'p' must be in CSC format.")
       if p.shape != (self.n, self.n):
         raise ValueError(
-            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
+            f"p must have shape ({self.n}, {self.n}, got {p.shape})"
         )
       self.p = p
 
     # Homogeneous embedding rhs: q = [c; b].
     self.q = np.concatenate([self.c, self.b])
-    self._r_newton = np.zeros_like(self.q)  # Pre-allocated Newton RHS
 
   def solve(
       self,
@@ -323,9 +322,8 @@ class QTQP:
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
-    # Update q and buffers if they changed due to equilibration.
+    # Update q if it changed due to equilibration.
     self.q = np.concatenate([c, b])
-    self._r_newton = np.zeros_like(self.q)
 
     # Precompute constant norms used in termination checks. _check_termination
     # unequilibrates iterates and compares against the original self.b / self.c,
@@ -644,9 +642,6 @@ class QTQP:
     t_b = -r_tau[0] - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
-      # Memory access for the sparse matrix P is the bottleneck here.
-      # np.stack enables a single pass over P's data and indices, which
-      # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
