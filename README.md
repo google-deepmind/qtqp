@@ -33,6 +33,12 @@ QTQP is available via pip:
 python -m pip install qtqp
 ```
 
+On supported platforms this also installs the recommended sparse CPU backend
+automatically:
+
+- Linux / Windows `x86_64`: `py-mkl-pardiso`
+- macOS `arm64`: `macldlt`
+
 To install from source, first clone the repository:
 
 ```bash
@@ -151,7 +157,7 @@ solve(
     max_iterative_refinement_steps: int = 50,
     linear_solver_atol: float = 1e-12,
     linear_solver_rtol: float = 1e-12,
-    linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.SCIPY,
+    linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.AUTO,
     verbose: bool = True,
     equilibrate: bool = True,
     collect_stats: bool = False,
@@ -192,9 +198,11 @@ This method will return a `qtqp.Solution` object, with fields:
 
 The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
 to the `solve` method via the `linear_solver` argument. By default
-`linear_solver=qtqp.LinearSolver.SCIPY` which uses scipy's SuperLU via
-`scipy.sparse.linalg.factorized`. QTQP supports several other linear solvers
-that may be faster or more reliable for your problem. The enum
+`linear_solver=qtqp.LinearSolver.AUTO`. AUTO resolves to
+`qtqp.LinearSolver.PARDISO` first on Linux / Windows and to
+`qtqp.LinearSolver.ACCELERATE` first on macOS, then falls back through the
+other sparse CPU backends before finally using `qtqp.LinearSolver.SCIPY`.
+The enum
 `qtqp.LinearSolver` contains values corresponding to the following backend
 solvers:
 
@@ -202,15 +210,27 @@ Recommended starting points:
 
 | System / problem type | Recommended solver |
 | --- | --- |
+| Default choice | `qtqp.LinearSolver.AUTO` |
 | Linux / Windows | `qtqp.LinearSolver.PARDISO` |
 | macOS | `qtqp.LinearSolver.ACCELERATE` |
 | NVIDIA GPU available | `qtqp.LinearSolver.CUDSS` |
 | Dense data | `qtqp.LinearSolver.SCIPY_DENSE` |
 | Tiny problems (`n + m < 50`) | `qtqp.LinearSolver.UMFPACK` |
 
+#### Automatic selection: `qtqp.LinearSolver.AUTO`
+
+Runtime selection for sparse CPU backends.
+
+- Linux / Windows preference order starts with `PARDISO`.
+- macOS preference order starts with `ACCELERATE`.
+- The default install brings in `py-mkl-pardiso` on Linux / Windows `x86_64`
+  and `macldlt` on macOS `arm64`.
+- If the preferred backend is unavailable, QTQP tries the remaining sparse CPU
+  backends and finally falls back to `SCIPY`.
+
 #### scipy SuperLU: `qtqp.LinearSolver.SCIPY`
 
-Default sparse CPU backend using `scipy.sparse.linalg.factorized`.
+Baseline sparse CPU backend using `scipy.sparse.linalg.factorized`.
 No additional dependencies required.
 
 #### MKL Pardiso: `qtqp.LinearSolver.PARDISO`
@@ -226,7 +246,8 @@ python -m pip install py-mkl-pardiso
 
 Apple Accelerate sparse LDL^T factorization via
 [macldlt](https://github.com/bodono/macldlt) (macOS only). Recommended sparse
-CPU backend on macOS. To install
+CPU backend on macOS. Published wheels are currently Apple Silicon only. To
+install
 
 ```bash
 python -m pip install macldlt
