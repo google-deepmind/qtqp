@@ -572,11 +572,30 @@ class QTQP:
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
   ):
-    """Computes a Newton search direction by solving the augmented KKT system."""
-    # Build RHS for the augmented KKT system in the pre-allocated buffer.
-    r = self._r_newton
-    np.copyto(r, r_anchor)
-    r *= (mu - mu_target)
+    """Computes a Newton search direction by solving the augmented KKT system.
+
+    The KKT system K @ [x+; y+] = r - q * tau+ is linear in tau+, giving the
+    parametric solution:
+        [x+; y+] = K^{-1}(r) - K^{-1}(q) * tau+  =  kinv_r - kinv_q * tau+
+    tau+ is then pinned by substituting this back into the tau equation of the
+    homogeneous embedding (see _solve_for_tau).
+
+    Args:
+      p: The quadratic cost matrix.
+      mu: Current barrier parameter.
+      mu_target: Complementarity target for this step (0 for predictor,
+        sigma*mu for corrector).
+      r_anchor: The current [x; y] iterate (as a single vector), used to
+        form the Newton RHS via r = (mu - mu_target) * r_anchor + ...
+      tau_anchor: The current tau iterate.
+      y: Current dual variables.
+      s: Current slack variables.
+      tau: Current homogeneous variable (used as fallback if tau solve fails).
+      correction: Optional Mehrotra second-order correction added to the
+        complementarity block of the RHS.
+    """
+    # Prepare RHS for the linear system (in-place to avoid r_cone allocation).
+    r = (mu - mu_target) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -590,8 +609,8 @@ class QTQP:
 
     # Solve the 1D quadratic equation for the homogeneous tau component
     try:
-      r_tau_val = (mu - mu_target) * tau_anchor[0]
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau_val)
+      r_tau = (mu - mu_target) * tau_anchor
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
     except ValueError as e:
       # Fallback if quadratic solve fails numerically (rare but possible)
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
@@ -602,14 +621,27 @@ class QTQP:
     x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau_val) -> np.ndarray:
-    """Solves for tau+ using the homogeneous embedding's tau equation."""
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
+    """Solves for tau+ using the homogeneous embedding's tau equation.
+
+    The parametric KKT solution is:
+        [x+; y+] = kinv_r - kinv_q * tau+
+
+    Substituting this into the tau equation of the homogeneous embedding yields:
+        t_a * tau+^2 + t_b * tau+ + t_c = 0
+
+    The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
+    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
+    the positive root since tau >= 0 is required for the embedding to represent
+    a feasible point (tau=0 corresponds to a certificate of infeasibility or
+    unboundedness, which is handled separately at termination).
+    """
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
     t_a = mu + kinv_q @ q
-    t_b = -r_tau_val - kinv_r @ q
+    t_b = -r_tau[0] - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
       # Memory access for the sparse matrix P is the bottleneck here.

@@ -94,7 +94,7 @@ class QdldlSolver(LinearSolver):
 
 
 class ScipySolver(LinearSolver):
-  """Wrapper around scipy.sparse.linalg.splu with symmetric mode."""
+  """Wrapper around scipy.linalg.factorized."""
 
   def __init__(self):
     self.factorization = None
@@ -112,13 +112,10 @@ class ScipySolver(LinearSolver):
     return self._full_kkt @ x
 
   def factorize(self):
-    self.factorization = sp.linalg.splu(
-        self._full_kkt,
-        permc_spec="MMD_AT_PLUS_A",
-    )
+    self.factorization = sp.linalg.factorized(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
-    return self.factorization.solve(rhs)
+    return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
     return "csc"
