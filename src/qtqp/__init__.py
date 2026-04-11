@@ -67,6 +67,10 @@ class LinearSolver(enum.Enum):
   MUMPS = direct.MumpsSolver
 
 
+_AUTO_SOLVER_CACHE: dict[str, LinearSolver] = {}
+_AUTO_UNAVAILABLE_ERRORS = (ImportError, OSError)
+
+
 def _instantiate_linear_solver(linear_solver: LinearSolver) -> direct.LinearSolver:
   """Instantiate a concrete linear solver backend."""
   if linear_solver is LinearSolver.AUTO:
@@ -106,17 +110,23 @@ def _resolve_linear_solver(
   if linear_solver is not LinearSolver.AUTO:
     return linear_solver, _instantiate_linear_solver(linear_solver)
 
-  errors = []
+  cached = _AUTO_SOLVER_CACHE.get(sys.platform)
+  if cached is not None:
+    return cached, _instantiate_linear_solver(cached)
+
+  failures = []
   for candidate in _auto_linear_solver_order():
     try:
-      return candidate, _instantiate_linear_solver(candidate)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      logging.info("AUTO skipped %s: %s", candidate.name, e)
-      errors.append(f"{candidate.name}: {e}")
+      backend = _instantiate_linear_solver(candidate)
+      _AUTO_SOLVER_CACHE[sys.platform] = candidate
+      return candidate, backend
+    except _AUTO_UNAVAILABLE_ERRORS as e:
+      logging.debug("AUTO skipped %s: %s", candidate.name, e)
+      failures.append(f"{candidate.name}: {e}")
 
   raise RuntimeError(
       "AUTO could not initialize any linear solver backend. "
-      + "; ".join(errors)
+      + "; ".join(failures)
   )
 
 
