@@ -137,7 +137,7 @@ class CholModSolver(LinearSolver):
   def factorize(self):
     if self.factorization is None:
       self.factorization = self.cholmod.CholeskyFactor(
-          self._kkt, supernodal_mode="auto", lower=False
+          self._kkt, supernodal_mode="simplicial", lower=False
       )
     self.factorization.factorize(self._kkt, ldl=True)
 

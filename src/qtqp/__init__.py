@@ -220,6 +220,10 @@ class QTQP:
         )
       self.p = p
 
+    # Homogeneous embedding rhs: q = [c; b].
+    self.q = np.concatenate([self.c, self.b])
+    self._r_newton = np.zeros_like(self.q)  # Pre-allocated Newton RHS
+
   def solve(
       self,
       *,
@@ -319,13 +323,9 @@ class QTQP:
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
-    # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
-    # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
-    # K is the augmented KKT matrix, so the full Newton RHS has the form r - q *
-    # tau+. Solving kinv_q = K^{-1} q once per iteration lets us write the
-    # parametric solution as: [x+; y+] = kinv_r - kinv_q * tau+ and reuse kinv_q
-    # in both the predictor and corrector steps.
+    # Update q and buffers if they changed due to equilibration.
     self.q = np.concatenate([c, b])
+    self._r_newton = np.zeros_like(self.q)
 
     # Precompute constant norms used in termination checks. _check_termination
     # unequilibrates iterates and compares against the original self.b / self.c,
@@ -346,7 +346,6 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    self._r_newton = np.zeros_like(self.q)  # Pre-allocated Newton RHS
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -645,7 +644,7 @@ class QTQP:
 
     return np.array([max(0.0, tau_sol)])
 
-  def _normalize(self, x, y, tau, s) -> None:
+  def _normalize(self, x, y, tau, s) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Normalizes iterates to match the homogeneous embedding central path norm.
 
     Operates in-place on the iterate arrays.
@@ -656,6 +655,7 @@ class QTQP:
     y *= scale
     tau *= scale
     s *= scale
+    return x, y, tau, s
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
