@@ -81,22 +81,22 @@ def _auto_linear_solver_order() -> list[LinearSolver]:
     * Linux / Windows -> PARDISO
     * macOS -> ACCELERATE
 
-  The remaining sparse CPU fallbacks are a conservative provisional order until
-  benchmark data is available.
+  The remaining sparse CPU fallbacks are shared across platforms and ordered
+  from the current feasible-instance benchmark in the python312 environment.
   """
-  platform_first = (
-      [LinearSolver.ACCELERATE]
-      if sys.platform == "darwin"
-      else [LinearSolver.PARDISO]
-  )
-  return platform_first + [
-      LinearSolver.QDLDL,
-      LinearSolver.UMFPACK,
+  fallbacks = [
       LinearSolver.CHOLMOD,
       LinearSolver.EIGEN,
-      LinearSolver.MUMPS,
+      LinearSolver.QDLDL,
+      LinearSolver.UMFPACK,
       LinearSolver.SCIPY,
+      LinearSolver.MUMPS,
   ]
+
+  if sys.platform == "darwin":
+    return [LinearSolver.ACCELERATE] + fallbacks
+
+  return [LinearSolver.PARDISO] + fallbacks
 
 
 def _resolve_linear_solver(

@@ -72,7 +72,14 @@ def test_auto_prefers_linux_windows_primary_backend(monkeypatch):
 
   resolved, backend = qtqp._resolve_linear_solver(qtqp.LinearSolver.AUTO)
 
-  assert attempts[0] is qtqp.LinearSolver.PARDISO
+  assert attempts == [
+      qtqp.LinearSolver.PARDISO,
+      qtqp.LinearSolver.CHOLMOD,
+      qtqp.LinearSolver.EIGEN,
+      qtqp.LinearSolver.QDLDL,
+      qtqp.LinearSolver.UMFPACK,
+      qtqp.LinearSolver.SCIPY,
+  ]
   assert resolved is qtqp.LinearSolver.SCIPY
   assert backend is scipy_backend
 
@@ -105,7 +112,14 @@ def test_auto_prefers_macos_primary_backend(monkeypatch):
 
   resolved, backend = qtqp._resolve_linear_solver(qtqp.LinearSolver.AUTO)
 
-  assert attempts[0] is qtqp.LinearSolver.ACCELERATE
+  assert attempts == [
+      qtqp.LinearSolver.ACCELERATE,
+      qtqp.LinearSolver.CHOLMOD,
+      qtqp.LinearSolver.EIGEN,
+      qtqp.LinearSolver.QDLDL,
+      qtqp.LinearSolver.UMFPACK,
+      qtqp.LinearSolver.SCIPY,
+  ]
   assert resolved is qtqp.LinearSolver.SCIPY
   assert backend is scipy_backend
 
