@@ -34,6 +34,7 @@
 import dataclasses
 import enum
 import logging
+import sys
 import timeit
 from typing import Any, Dict, List
 
@@ -52,6 +53,7 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 class LinearSolver(enum.Enum):
   """Available linear solvers."""
 
+  AUTO = "auto"
   ACCELERATE = direct.AccelerateSolver
   SCIPY = direct.ScipySolver
   SCIPY_DENSE = direct.ScipyDenseSolver
@@ -63,6 +65,59 @@ class LinearSolver(enum.Enum):
   CUDSS = direct.CuDssSolver
   EIGEN = direct.EigenSolver
   MUMPS = direct.MumpsSolver
+
+
+def _instantiate_linear_solver(linear_solver: LinearSolver) -> direct.LinearSolver:
+  """Instantiate a concrete linear solver backend."""
+  if linear_solver is LinearSolver.AUTO:
+    raise ValueError("AUTO must be resolved before instantiating a backend.")
+  return linear_solver.value()
+
+
+def _auto_linear_solver_order() -> list[LinearSolver]:
+  """Return AUTO backend candidates in priority order.
+
+  The first platform-specific choice is intentional:
+    * Linux / Windows -> PARDISO
+    * macOS -> ACCELERATE
+
+  The remaining sparse CPU fallbacks are a conservative provisional order until
+  benchmark data is available.
+  """
+  platform_first = (
+      [LinearSolver.ACCELERATE]
+      if sys.platform == "darwin"
+      else [LinearSolver.PARDISO]
+  )
+  return platform_first + [
+      LinearSolver.QDLDL,
+      LinearSolver.UMFPACK,
+      LinearSolver.CHOLMOD,
+      LinearSolver.EIGEN,
+      LinearSolver.MUMPS,
+      LinearSolver.SCIPY,
+  ]
+
+
+def _resolve_linear_solver(
+    linear_solver: LinearSolver,
+) -> tuple[LinearSolver, direct.LinearSolver]:
+  """Resolve a requested solver enum to a concrete backend instance."""
+  if linear_solver is not LinearSolver.AUTO:
+    return linear_solver, _instantiate_linear_solver(linear_solver)
+
+  errors = []
+  for candidate in _auto_linear_solver_order():
+    try:
+      return candidate, _instantiate_linear_solver(candidate)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.info("AUTO skipped %s: %s", candidate.name, e)
+      errors.append(f"{candidate.name}: {e}")
+
+  raise RuntimeError(
+      "AUTO could not initialize any linear solver backend. "
+      + "; ".join(errors)
+  )
 
 
 class SolutionStatus(enum.Enum):
@@ -173,7 +228,7 @@ class QTQP:
       max_iterative_refinement_steps: int = 50,
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
-      linear_solver: LinearSolver = LinearSolver.SCIPY,
+      linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
       equilibrate: bool = True,
       collect_stats: bool = False,
@@ -223,6 +278,9 @@ class QTQP:
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
 
+    resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
+        linear_solver
+    )
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
@@ -232,7 +290,7 @@ class QTQP:
       print(
           f"| QTQP v{__version__}:"
           f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
-          f" nnz(P)={self.p.nnz}, linear_solver={linear_solver.name}"
+          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name}"
       )
 
     # --- Initialization ---
@@ -278,7 +336,7 @@ class QTQP:
         max_iterative_refinement_steps=max_iterative_refinement_steps,
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
-        solver=linear_solver.value(),
+        solver=linear_solver_backend,
     )
 
     stats = []

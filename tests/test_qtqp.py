@@ -43,6 +43,72 @@ class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
   def format(self):
     return 'csc'
 
+
+def test_auto_prefers_linux_windows_primary_backend(monkeypatch):
+  """AUTO should try PARDISO first on non-macOS platforms."""
+  attempts = []
+  scipy_backend = qtqp.direct.ScipySolver()
+
+  def fake_instantiate(linear_solver):
+    attempts.append(linear_solver)
+    if linear_solver is qtqp.LinearSolver.PARDISO:
+      raise ImportError("pymklpardiso not installed")
+    if linear_solver is qtqp.LinearSolver.QDLDL:
+      raise ImportError("qdldl not installed")
+    if linear_solver is qtqp.LinearSolver.UMFPACK:
+      raise ImportError("umfpack not installed")
+    if linear_solver is qtqp.LinearSolver.CHOLMOD:
+      raise ImportError("cholmod not installed")
+    if linear_solver is qtqp.LinearSolver.EIGEN:
+      raise ImportError("nanoeigenpy not installed")
+    if linear_solver is qtqp.LinearSolver.MUMPS:
+      raise ImportError("petsc4py not installed")
+    if linear_solver is qtqp.LinearSolver.SCIPY:
+      return scipy_backend
+    raise AssertionError(f"Unexpected AUTO candidate: {linear_solver}")
+
+  monkeypatch.setattr(qtqp.sys, 'platform', 'linux')
+  monkeypatch.setattr(qtqp, '_instantiate_linear_solver', fake_instantiate)
+
+  resolved, backend = qtqp._resolve_linear_solver(qtqp.LinearSolver.AUTO)
+
+  assert attempts[0] is qtqp.LinearSolver.PARDISO
+  assert resolved is qtqp.LinearSolver.SCIPY
+  assert backend is scipy_backend
+
+
+def test_auto_prefers_macos_primary_backend(monkeypatch):
+  """AUTO should try ACCELERATE first on macOS."""
+  attempts = []
+  scipy_backend = qtqp.direct.ScipySolver()
+
+  def fake_instantiate(linear_solver):
+    attempts.append(linear_solver)
+    if linear_solver is qtqp.LinearSolver.ACCELERATE:
+      raise ImportError("macldlt not installed")
+    if linear_solver is qtqp.LinearSolver.QDLDL:
+      raise ImportError("qdldl not installed")
+    if linear_solver is qtqp.LinearSolver.UMFPACK:
+      raise ImportError("umfpack not installed")
+    if linear_solver is qtqp.LinearSolver.CHOLMOD:
+      raise ImportError("cholmod not installed")
+    if linear_solver is qtqp.LinearSolver.EIGEN:
+      raise ImportError("nanoeigenpy not installed")
+    if linear_solver is qtqp.LinearSolver.MUMPS:
+      raise ImportError("petsc4py not installed")
+    if linear_solver is qtqp.LinearSolver.SCIPY:
+      return scipy_backend
+    raise AssertionError(f"Unexpected AUTO candidate: {linear_solver}")
+
+  monkeypatch.setattr(qtqp.sys, 'platform', 'darwin')
+  monkeypatch.setattr(qtqp, '_instantiate_linear_solver', fake_instantiate)
+
+  resolved, backend = qtqp._resolve_linear_solver(qtqp.LinearSolver.AUTO)
+
+  assert attempts[0] is qtqp.LinearSolver.ACCELERATE
+  assert resolved is qtqp.LinearSolver.SCIPY
+  assert backend is scipy_backend
+
 try:
   import pymklpardiso  # noqa: F401
   _SOLVERS.append(qtqp.LinearSolver.PARDISO)

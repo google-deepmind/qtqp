@@ -21,6 +21,10 @@ dependencies = [
 test = [
     "pytest",
 ]
+fast = [
+    "py-mkl-pardiso; platform_system != 'Darwin' and platform_machine == 'x86_64'",
+    "macldlt; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
 
 [tool.setuptools]
 license-files = []
