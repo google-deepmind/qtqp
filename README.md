@@ -33,12 +33,11 @@ QTQP is available via pip:
 python -m pip install qtqp
 ```
 
-To keep the base install lean but pull in the recommended platform-specific CPU
-backend, install the optional `fast` extra:
+On supported platforms this also installs the recommended sparse CPU backend
+automatically:
 
-```bash
-python -m pip install "qtqp[fast]"
-```
+- Linux / Windows `x86_64`: `py-mkl-pardiso`
+- macOS `arm64`: `macldlt`
 
 To install from source, first clone the repository:
 
@@ -58,12 +57,6 @@ Finally, install the package:
 
 ```bash
 python -m pip install .
-```
-
-Or include the recommended optional CPU backend:
-
-```bash
-python -m pip install ".[fast]"
 ```
 
 To run the tests, inside the qtqp directory:
@@ -230,10 +223,10 @@ Runtime selection for sparse CPU backends.
 
 - Linux / Windows preference order starts with `PARDISO`.
 - macOS preference order starts with `ACCELERATE`.
-- If the preferred optional package is unavailable, QTQP tries the remaining
-  sparse CPU backends and finally falls back to `SCIPY`.
-- `qtqp[fast]` installs `py-mkl-pardiso` on Linux / Windows `x86_64` and
-  `macldlt` on macOS `arm64`.
+- The default install brings in `py-mkl-pardiso` on Linux / Windows `x86_64`
+  and `macldlt` on macOS `arm64`.
+- If the preferred backend is unavailable, QTQP tries the remaining sparse CPU
+  backends and finally falls back to `SCIPY`.
 
 #### scipy SuperLU: `qtqp.LinearSolver.SCIPY`
 
