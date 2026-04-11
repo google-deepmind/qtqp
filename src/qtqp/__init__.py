@@ -216,7 +216,7 @@ class QTQP:
         raise TypeError("QP matrix 'p' must be in CSC format.")
       if p.shape != (self.n, self.n):
         raise ValueError(
-            f"p must have shape ({self.n}, {self.n}, got {p.shape})"
+            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
         )
       self.p = p
 
