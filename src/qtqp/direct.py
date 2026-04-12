@@ -195,7 +195,8 @@ class DirectKktSolver:
     """
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    self._true_diags[: self.n] = self._p_diags + mu
+    self._true_diags[: self.n] = self._p_diags
+    self._true_diags[: self.n] += mu
     self._true_diags[self.n : self.n + self.z] = mu
     self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
