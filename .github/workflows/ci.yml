@@ -36,7 +36,7 @@ jobs:
       - name: Install MKL Pardiso
         if: matrix.os != 'macos-latest'
         shell: bash -l {0}
-        run: pip install py-mkl-pardiso
+        run: pip install 'py-mkl-pardiso<0.0.4'
 
       # Petsc4py is not available on Windows
       - name: Install POSIX-only dependencies
