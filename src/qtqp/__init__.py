@@ -594,7 +594,7 @@ class QTQP:
       correction: Optional Mehrotra second-order correction added to the
         complementarity block of the RHS.
     """
-    # Prepare RHS for the linear system (in-place to avoid r_cone allocation).
+    # Prepare RHS for the linear system.
     r = (mu - mu_target) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
@@ -616,9 +616,11 @@ class QTQP:
       logging.warning("Tau solve failed, using previous tau. Error: %s", e)
       tau_plus = tau
 
-    # Reconstruct full (x, y) step from KKT solution components
-    xy_plus = kinv_r - self.kinv_q * tau_plus
-    x_plus, y_plus = xy_plus[: self.n], xy_plus[self.n :]
+    # Reconstruct full (x, y) solution by combining the parametric KKT components:
+    #   [x+; y+] = kinv_r - kinv_q * tau+
+    # Perform this in-place on kinv_r to avoid another large allocation.
+    kinv_r -= self.kinv_q * tau_plus
+    x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
@@ -644,6 +646,9 @@ class QTQP:
     t_b = -r_tau[0] - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
+      # Memory access for the sparse matrix P is the bottleneck here.
+      # np.stack enables a single pass over P's data and indices, which
+      # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
@@ -678,10 +683,15 @@ class QTQP:
     The right-hand side counts complementarity pairs: (m - z) from the
     inequality constraints plus 1 for the tau-kappa pair of the embedding.
 
+    Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = np.sqrt(x @ x + y @ y + tau @ tau)
+    xyt_norm = np.sqrt(x @ x + y @ y + tau[0] ** 2)
     scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
-    return x * scale, y * scale, tau * scale, s * scale
+    x *= scale
+    y *= scale
+    tau *= scale
+    s *= scale
+    return x, y, tau, s
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""

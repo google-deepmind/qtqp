@@ -96,7 +96,10 @@ class LinearSolver:
     raise NotImplementedError
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    return self._kkt @ x + self._kkt.T @ x - self._kkt_diag * x
+    res = self._kkt @ x
+    res += self._kkt.T @ x
+    res -= self._kkt_diag * x
+    return res
 
   def format(self) -> str:
     """Preferred sparse format for the KKT scaffold ('csc' or 'csr')."""
@@ -192,7 +195,8 @@ class DirectKktSolver:
     """
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    self._true_diags[: self.n] = self._p_diags + mu
+    self._true_diags[: self.n] = self._p_diags
+    self._true_diags[: self.n] += mu
     self._true_diags[self.n : self.n + self.z] = mu
     self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 

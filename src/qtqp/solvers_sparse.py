@@ -132,6 +132,10 @@ class CholModSolver(LinearSolver):
 
   def factorize(self):
     if self.factorization is None:
+      # Must use simplicial mode: the KKT matrix is indefinite (has negative
+      # eigenvalues from the -(D+mu*I) block), so we need LDL factorization.
+      # Supernodal mode only supports positive-definite Cholesky and will fail
+      # with CholmodNotPositiveDefiniteError on the indefinite KKT system.
       self.factorization = self.cholmod.CholeskyFactor(
           self._kkt, supernodal_mode="simplicial", lower=False
       )
@@ -325,6 +329,10 @@ class UmfpackSolver(LinearSolver):
 
     self._umfpack = umfpack
     self._ctx = umfpack.UmfpackContext("di")
+    # The KKT matrix is symmetric (indefinite), so tell UMFPACK to use the
+    # symmetric strategy (AMD ordering on A+A^T) for better fill-reducing
+    # ordering and faster factorization.
+    self._ctx.control[umfpack.UMFPACK_STRATEGY] = umfpack.UMFPACK_STRATEGY_SYMMETRIC
     self._symbolic_done = False
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:

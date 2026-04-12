@@ -215,7 +215,7 @@ Recommended starting points:
 | macOS | `qtqp.LinearSolver.ACCELERATE` |
 | NVIDIA GPU available | `qtqp.LinearSolver.CUDSS` |
 | Dense data | `qtqp.LinearSolver.SCIPY_DENSE` |
-| Tiny problems (`n + m < 50`) | `qtqp.LinearSolver.UMFPACK` |
+| Tiny problems (`n + m < 50`) | `qtqp.LinearSolver.QDLDL` |
 
 #### Automatic selection: `qtqp.LinearSolver.AUTO`
 
