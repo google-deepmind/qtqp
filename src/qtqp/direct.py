@@ -195,13 +195,9 @@ class DirectKktSolver:
     """
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    self._true_diags[: self.n] = self._p_diags
-    self._true_diags[: self.n] += mu
+    self._true_diags[: self.n] = self._p_diags + mu
     self._true_diags[self.n : self.n + self.z] = mu
-
-    cone_slice = slice(self.n + self.z, None)
-    np.divide(s[self.z :], y[self.z :], out=self._true_diags[cone_slice])
-    self._true_diags[cone_slice] += mu
+    self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)

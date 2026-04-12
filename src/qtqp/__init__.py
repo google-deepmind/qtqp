@@ -346,7 +346,6 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    self._r_newton = np.zeros_like(self.q)  # Pre-allocated Newton RHS
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -358,7 +357,7 @@ class QTQP:
     for self.it in range(max_iter):
       stats_i = {}
 
-      self._normalize(x, y, tau, s)
+      x, y, tau, s = self._normalize(x, y, tau, s)
 
       # Calculate current complementary slackness error (mu)
       mu = (y @ s) / (self.m - self.z)
@@ -549,28 +548,19 @@ class QTQP:
       self, mu_curr, x, y, tau, s, alpha, d_x, d_y, d_tau, d_s
   ) -> float:
     """Computes the centering parameter sigma using Mehrotra's heuristic."""
-    # Compute complementarity of the affine step (y_aff @ s_aff) via scalar
-    # expansion to avoid allocating temporary arrays.
-    # y_aff @ s_aff = sum((y + alpha*dy) * (s + alpha*ds))
-    #               = y@s + alpha*(y@ds + s@dy) + alpha^2*(dy@ds)
-    y_aff_s_aff = (
-        y @ s
-        + alpha * (y @ d_s + s @ d_y)
-        + (alpha**2) * (d_y @ d_s)
-    )
+    # Projected complementarity after affine step
+    x_aff = x + alpha * d_x
+    y_aff = y + alpha * d_y
+    tau_aff = tau + alpha * d_tau
+    s_aff = s + alpha * d_s
 
-    # Compute ||(x_aff, y_aff, tau_aff)||^2 via scalar expansion to avoid
-    # large array allocations.
-    # x_aff @ x_aff = x@x + 2*alpha*(x@dx) + alpha^2*(dx@dx)
-    # (Same for y and tau).
-    xyt_norm_sq = (
-        (x @ x + y @ y + tau[0] ** 2)
-        + 2 * alpha * (x @ d_x + y @ d_y + tau[0] * d_tau[0])
-        + (alpha**2) * (d_x @ d_x + d_y @ d_y + d_tau[0] ** 2)
-    )
-
+    # Compute mu_aff directly without calling _normalize to avoid 4 extra
+    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
+    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
+    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
     scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
-    mu_aff = scale_sq * y_aff_s_aff / (self.m - self.z)
+    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
     # drives mu close to zero, sigma is small (aggressive, little centering).
@@ -604,12 +594,8 @@ class QTQP:
       correction: Optional Mehrotra second-order correction added to the
         complementarity block of the RHS.
     """
-    # Build RHS for the augmented KKT system in the pre-allocated buffer.
-    r = getattr(self, '_r_newton', None)
-    if r is None:
-      r = np.empty_like(r_anchor)
-    np.copyto(r, r_anchor)
-    r *= (mu - mu_target)
+    # Prepare RHS for the linear system.
+    r = (mu - mu_target) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
