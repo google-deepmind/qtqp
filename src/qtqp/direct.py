@@ -249,9 +249,7 @@ class DirectKktSolver:
     # so residual = kkt_rhs - kkt_reg @ sol + diag_correction * sol.
     # self._solver @ sol computes kkt_reg @ sol (using the factorized matrix).
     sol = warm_start.copy()
-    residual = self._solver @ sol
-    np.subtract(self._kkt_rhs, residual, out=residual)
-    residual += self._diag_correction * sol
+    residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -261,9 +259,7 @@ class DirectKktSolver:
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
       sol += self._solver.solve(residual)
-      residual = self._solver @ sol
-      np.subtract(self._kkt_rhs, residual, out=residual)
-      residual += self._diag_correction * sol
+      residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.
