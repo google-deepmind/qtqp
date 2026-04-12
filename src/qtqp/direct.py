@@ -96,10 +96,7 @@ class LinearSolver:
     raise NotImplementedError
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    res = self._kkt @ x
-    res += self._kkt.T @ x
-    res -= self._kkt_diag * x
-    return res
+    return self._kkt @ x + self._kkt.T @ x - self._kkt_diag * x
 
   def format(self) -> str:
     """Preferred sparse format for the KKT scaffold ('csc' or 'csr')."""
@@ -195,13 +192,9 @@ class DirectKktSolver:
     """
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
-    self._true_diags[: self.n] = self._p_diags
-    self._true_diags[: self.n] += mu
+    self._true_diags[: self.n] = self._p_diags + mu
     self._true_diags[self.n : self.n + self.z] = mu
-
-    cone_slice = slice(self.n + self.z, None)
-    np.divide(s[self.z :], y[self.z :], out=self._true_diags[cone_slice])
-    self._true_diags[cone_slice] += mu
+    self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
@@ -253,9 +246,7 @@ class DirectKktSolver:
     # so residual = kkt_rhs - kkt_reg @ sol + diag_correction * sol.
     # self._solver @ sol computes kkt_reg @ sol (using the factorized matrix).
     sol = warm_start.copy()
-    residual = self._solver @ sol
-    np.subtract(self._kkt_rhs, residual, out=residual)
-    residual += self._diag_correction * sol
+    residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -265,9 +256,7 @@ class DirectKktSolver:
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
       sol += self._solver.solve(residual)
-      residual = self._solver @ sol
-      np.subtract(self._kkt_rhs, residual, out=residual)
-      residual += self._diag_correction * sol
+      residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence.
