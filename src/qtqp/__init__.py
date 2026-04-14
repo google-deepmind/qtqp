@@ -209,6 +209,8 @@ class QTQP:
           f"0 <= z < m={self.m}"
       )
 
+    self._presolve()
+
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
     else:
@@ -219,6 +221,64 @@ class QTQP:
             f"p must have shape ({self.n}, {self.n}, got {p.shape})"
         )
       self.p = p
+
+  def _presolve(self, inf_bound: float = 1e20):
+    """Remove trivially satisfied inequality constraints.
+
+    Drops rows i >= z where b[i] >= inf_bound, since those inequality
+    constraints (a[i] @ x <= b[i]) are trivially satisfied for any finite x.
+    Stores the original dimensions and a boolean mask so that _postsolve can
+    reconstruct the full-sized solution vectors.
+
+    Any remaining b entries that exceed inf_bound are capped to inf_bound to
+    prevent infinities from entering the KKT system.
+
+    Args:
+      inf_bound: Threshold above which a b entry is treated as infinite.
+    """
+    keep = np.ones(self.m, dtype=bool)
+    keep[self.z:] &= self.b[self.z:] < inf_bound
+    # Must retain at least one inequality constraint (z < m).
+    if keep.sum() <= self.z:
+      # Keep the first inequality row, capping its b value.
+      keep[self.z] = True
+    n_dropped = self.m - keep.sum()
+    if n_dropped == 0:
+      self._presolve_keep = None
+      return
+    self._presolve_keep = keep
+    self._presolve_m = self.m
+    self._presolve_b = self.b
+    self.a = self.a[keep]
+    self.b = np.minimum(self.b[keep], inf_bound)
+    self.m = keep.sum()
+
+  def _postsolve(self, x, y, s):
+    """Restore full-sized solution vectors after presolve.
+
+    Reinserts dropped inequality rows with y[i] = 0 (inactive dual) and
+    s[i] = b[i] - a[i] @ x (true slack, which is very large for the
+    dropped rows).
+
+    Args:
+      x: Primal solution (n,).
+      y: Dual solution (m_reduced,).
+      s: Slack solution (m_reduced,).
+
+    Returns:
+      Tuple of (y_full, s_full) with original dimensions restored.
+    """
+    if self._presolve_keep is None:
+      return y, s
+    keep = self._presolve_keep
+    m_full = self._presolve_m
+    y_full = np.zeros(m_full, dtype=y.dtype)
+    s_full = np.zeros(m_full, dtype=s.dtype)
+    y_full[keep] = y
+    s_full[keep] = s
+    # For dropped rows: y=0 (dual inactive), s=b (slack ≈ b since a@x is finite).
+    s_full[~keep] = self._presolve_b[~keep]
+    return y_full, s_full
 
   def solve(
       self,
@@ -461,20 +521,28 @@ class QTQP:
     match status:
       case SolutionStatus.SOLVED:
         self._log_footer("Solved")
-        return Solution(x / tau, y / tau, s / tau, stats, status)
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(x, y, s)
+        return Solution(x, y, s, stats, status)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
         x.fill(np.nan)
         s.fill(np.nan)
-        return Solution(x, y / abs(self.b @ y), s, stats, status)
+        y_scaled = y / abs(self.b @ y)
+        y_scaled, s = self._postsolve(x, y_scaled, s)
+        return Solution(x, y_scaled, s, stats, status)
       case SolutionStatus.UNBOUNDED:
         self._log_footer("Dual infeasible / primal unbounded")
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
-        return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+        x, s = x / abs_ctx, s / abs_ctx
+        y, s = self._postsolve(x, y, s)
+        return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge in {max_iter} iterations")
-        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(x, y, s)
+        return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
 
