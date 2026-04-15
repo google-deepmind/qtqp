@@ -431,6 +431,26 @@ class QTQP:
       self._log_footer("Solved (equality-only, direct)")
       return Solution(x, y, s, [], SolutionStatus.SOLVED)
 
+    # --- KKT-based initialization ---
+    # Solve the regularized KKT system once to get a better starting point
+    # than (x=0, y=1, s=1). This gives near-zero primal/dual residuals at
+    # the first iteration, significantly reducing the number of IPM steps.
+    mu_init = (y @ s) / (self.m - self.z)
+    self._linear_solver.update(mu=mu_init, s=s, y=y)
+    init_sol, _ = self._linear_solver.solve(
+        rhs=-self.q, warm_start=np.zeros_like(self.q),
+    )
+    x[:] = init_sol[: self.n]
+    y[:] = init_sol[self.n :]
+    s[:] = b - a @ x        # Primal feasibility: Ax + s = b.
+    s[: self.z] = 0.0       # Equality slack is always zero.
+    # Shift inequality components to be strictly positive for the IPM.
+    if self.m > self.z:
+      shift_y = max(-np.min(y[self.z :]), 0.0)
+      shift_s = max(-np.min(s[self.z :]), 0.0)
+      y[self.z :] += shift_y + 1.0
+      s[self.z :] += shift_s + 1.0
+
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     status = SolutionStatus.UNFINISHED
