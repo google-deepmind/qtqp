@@ -1255,8 +1255,11 @@ def test_resolve():
 
   assert sol1.status == qtqp.SolutionStatus.SOLVED
   assert sol2.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_allclose(sol1.x, sol2.x, atol=1e-4, rtol=1e-4)
-  np.testing.assert_allclose(sol1.y, sol2.y, atol=1e-4, rtol=1e-4)
+  _assert_solution(sol1, a, b, c, p, z)
+  _assert_solution(sol2, a, b, c, p, z)
+  obj1 = c @ sol1.x + 0.5 * sol1.x @ p @ sol1.x
+  obj2 = c @ sol2.x + 0.5 * sol2.x @ p @ sol2.x
+  np.testing.assert_allclose(obj1, obj2, atol=1e-5, rtol=1e-5)
 
 
 # =============================================================================

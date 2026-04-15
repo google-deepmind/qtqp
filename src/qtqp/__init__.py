@@ -400,26 +400,30 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    # --- Equality-only: solve KKT system directly (no IPM needed). ---
-    # When z == m all constraints are equalities (Ax = b, s = 0). The KKT
-    # optimality conditions form a single linear system:
-    #   [P  A'] [x]   [-c]
-    #   [A   0] [y] = [ b]
-    # We factorize with mu=0; the DirectKktSolver's min_static_regularization
-    # ensures a stable factorization while iterative refinement converges to
-    # the exact (unregularized) solution.
+    # --- KKT-based initialization ---
+    # Solve the augmented KKT system with mu=0:
+    #   [P        A'  ] [x]   [-c]
+    #   [A   -diag(h) ] [y] = [ b]
+    # where h = [0]*z (equalities) ++ [s/y = 1]*{m-z} (inequalities).
+    # This finds a point minimizing cost + squared infeasibility in one
+    # factorization. When z == m (all equalities), h = 0 everywhere and
+    # the system reduces to [[P, A'], [A, 0]] which gives the exact
+    # solution. When z < m, we shift inequality components of (y, s)
+    # into the strict interior of the cone before entering the IPM.
+    self._linear_solver.update(mu=0.0, s=s, y=y)
+    sol, _ = self._linear_solver.solve(
+        rhs=-self.q, warm_start=np.zeros_like(self.q),
+    )
+    x[:] = sol[: self.n]
+    y[:] = sol[self.n :]
+    s[:] = b - a @ x        # Primal feasibility: Ax + s = b.
+    s[: self.z] = 0.0       # Equality slack is always zero.
+
     if self.z == self.m:
-      self._linear_solver.update(
-          mu=0.0, s=np.zeros(self.m), y=np.zeros(self.m),
-      )
-      sol, _ = self._linear_solver.solve(
-          rhs=-self.q, warm_start=np.zeros_like(self.q),
-      )
+      # All constraints are equalities — the KKT solve is exact.
       self._linear_solver.free()
-      x, y, s = sol[: self.n], sol[self.n :], np.zeros(self.m)
       if self.equilibrate:
         x, y, s = self._unequilibrate_iterates(x, y, s)
-      # Validate: check residuals against the original (unequilibrated) data.
       pres = _norm(self.a @ x + s - self.b, np.inf)
       dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
       ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
@@ -431,25 +435,15 @@ class QTQP:
       self._log_footer("Solved (equality-only, direct)")
       return Solution(x, y, s, [], SolutionStatus.SOLVED)
 
-    # --- KKT-based initialization ---
-    # Solve the regularized KKT system once to get a better starting point
-    # than (x=0, y=1, s=1). This gives near-zero primal/dual residuals at
-    # the first iteration, significantly reducing the number of IPM steps.
-    mu_init = (y @ s) / (self.m - self.z)
-    self._linear_solver.update(mu=mu_init, s=s, y=y)
-    init_sol, _ = self._linear_solver.solve(
-        rhs=-self.q, warm_start=np.zeros_like(self.q),
-    )
-    x[:] = init_sol[: self.n]
-    y[:] = init_sol[self.n :]
-    s[:] = b - a @ x        # Primal feasibility: Ax + s = b.
-    s[: self.z] = 0.0       # Equality slack is always zero.
-    # Shift inequality components to be strictly positive for the IPM.
-    if self.m > self.z:
-      shift_y = max(-np.min(y[self.z :]), 0.0)
-      shift_s = max(-np.min(s[self.z :]), 0.0)
-      y[self.z :] += shift_y + 1.0
-      s[self.z :] += shift_s + 1.0
+    # Shift inequality components into the strict interior of the cone.
+    # alpha_p (alpha_d) measures how far s (y) is from the cone boundary;
+    # we only shift when not already sufficiently interior.
+    alpha_p = -np.min(s[self.z :])
+    alpha_d = -np.min(y[self.z :])
+    if alpha_p >= -1.0:
+      s[self.z :] += 1.0 + alpha_p
+    if alpha_d >= -1.0:
+      y[self.z :] += 1.0 + alpha_d
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
