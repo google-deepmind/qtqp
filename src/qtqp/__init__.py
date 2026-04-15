@@ -276,6 +276,61 @@ class QTQP:
     s_full[~keep] = self._presolve_b[~keep]
     return y_full, s_full
 
+  def _kkt_init(self, x, y, s, a, b):
+    """KKT-based initialization for the IPM starting point.
+
+    Solves the augmented KKT system with mu=0:
+      [P        A'  ] [x]   [-c]
+      [A   -diag(h) ] [y] = [ b]
+    where h = [0]*z (equalities) ++ [s/y = 1]*{m-z} (inequalities).
+
+    When z == m (all equalities), the system reduces to [[P, A'], [A, 0]]
+    and the solution is exact. When z < m, inequality components of (y, s)
+    are shifted into the strict interior of the cone.
+
+    Args:
+      x: Primal variables (n,), modified in-place.
+      y: Dual variables (m,), modified in-place.
+      s: Slacks (m,), modified in-place.
+      a: Constraint matrix (equilibrated if applicable).
+      b: RHS vector (equilibrated if applicable).
+
+    Returns:
+      A Solution if z == m (equality-only, solved directly), else None.
+    """
+    self._linear_solver.update(mu=0.0, s=s, y=y)
+    sol, _ = self._linear_solver.solve(
+        rhs=-self.q, warm_start=np.zeros_like(self.q),
+    )
+    x[:] = sol[: self.n]
+    y[:] = sol[self.n :]
+    s[:] = b - a @ x
+    s[: self.z] = 0.0
+
+    if self.z == self.m:
+      self._linear_solver.free()
+      if self.equilibrate:
+        x, y, s = self._unequilibrate_iterates(x, y, s)
+      pres = _norm(self.a @ x + s - self.b, np.inf)
+      dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
+      ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
+      dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
+      y, s = self._postsolve(x, y, s)
+      if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
+        self._log_footer("Failed: equality-only KKT solve")
+        return Solution(x, y, s, [], SolutionStatus.FAILED)
+      self._log_footer("Solved (equality-only, direct)")
+      return Solution(x, y, s, [], SolutionStatus.SOLVED)
+
+    # Shift inequality components into the strict interior of the cone.
+    alpha_p = -np.min(s[self.z :])
+    alpha_d = -np.min(y[self.z :])
+    if alpha_p >= -1.0:
+      s[self.z :] += 1.0 + alpha_p
+    if alpha_d >= -1.0:
+      y[self.z :] += 1.0 + alpha_d
+    return None
+
   def solve(
       self,
       *,
@@ -400,50 +455,9 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    # --- KKT-based initialization ---
-    # Solve the augmented KKT system with mu=0:
-    #   [P        A'  ] [x]   [-c]
-    #   [A   -diag(h) ] [y] = [ b]
-    # where h = [0]*z (equalities) ++ [s/y = 1]*{m-z} (inequalities).
-    # This finds a point minimizing cost + squared infeasibility in one
-    # factorization. When z == m (all equalities), h = 0 everywhere and
-    # the system reduces to [[P, A'], [A, 0]] which gives the exact
-    # solution. When z < m, we shift inequality components of (y, s)
-    # into the strict interior of the cone before entering the IPM.
-    self._linear_solver.update(mu=0.0, s=s, y=y)
-    sol, _ = self._linear_solver.solve(
-        rhs=-self.q, warm_start=np.zeros_like(self.q),
-    )
-    x[:] = sol[: self.n]
-    y[:] = sol[self.n :]
-    s[:] = b - a @ x        # Primal feasibility: Ax + s = b.
-    s[: self.z] = 0.0       # Equality slack is always zero.
-
-    if self.z == self.m:
-      # All constraints are equalities — the KKT solve is exact.
-      self._linear_solver.free()
-      if self.equilibrate:
-        x, y, s = self._unequilibrate_iterates(x, y, s)
-      pres = _norm(self.a @ x + s - self.b, np.inf)
-      dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
-      ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
-      dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
-      y, s = self._postsolve(x, y, s)
-      if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
-        self._log_footer("Failed: equality-only KKT solve")
-        return Solution(x, y, s, [], SolutionStatus.FAILED)
-      self._log_footer("Solved (equality-only, direct)")
-      return Solution(x, y, s, [], SolutionStatus.SOLVED)
-
-    # Shift inequality components into the strict interior of the cone.
-    # alpha_p (alpha_d) measures how far s (y) is from the cone boundary;
-    # we only shift when not already sufficiently interior.
-    alpha_p = -np.min(s[self.z :])
-    alpha_d = -np.min(y[self.z :])
-    if alpha_p >= -1.0:
-      s[self.z :] += 1.0 + alpha_p
-    if alpha_d >= -1.0:
-      y[self.z :] += 1.0 + alpha_d
+    init_result = self._kkt_init(x, y, s, a, b)
+    if init_result is not None:
+      return init_result
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
