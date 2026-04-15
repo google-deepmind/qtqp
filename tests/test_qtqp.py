@@ -486,6 +486,15 @@ def _gen_equality_only(m, n, random_state=None):
   return a, b, c, p
 
 
+def _append_dropped_inequalities(a, b, n_extra, random_state, rhs_value):
+  """Append inequalities that presolve should drop."""
+  rng = np.random.default_rng(random_state)
+  a_extra = sparse.csc_matrix(rng.normal(size=(n_extra, a.shape[1])))
+  a_full = sparse.vstack([a, a_extra], format='csc')
+  b_full = np.concatenate([b, np.full(n_extra, rhs_value)])
+  return a_full, b_full
+
+
 @pytest.mark.parametrize('equilibrate', [True, False])
 @pytest.mark.parametrize('seed', 1542 + np.arange(10))
 @pytest.mark.parametrize('mn', ((5, 10), (30, 50), (80, 100)))
@@ -542,15 +551,77 @@ def test_presolve_drops_all_inequalities():
   m = m_eq + m_ineq
   z = m_eq
   a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
-  # Append inequality rows with b = inf (will be dropped by presolve).
-  a_ineq = sparse.csc_matrix(rng.normal(size=(m_ineq, n)))
-  a = sparse.vstack([a, a_ineq], format='csc')
-  b = np.concatenate([b, np.full(m_ineq, 1e21)])
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=m_ineq, random_state=rng, rhs_value=1e21,
+  )
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
-  assert solution.status == qtqp.SolutionStatus.SOLVED
-  # Postsolve should restore original dimensions.
+  _assert_solution(solution, a, b, c, p, z)
   assert solution.y.shape == (m,)
   assert solution.s.shape == (m,)
+
+
+def test_presolve_restores_infeasible_certificate():
+  """Dropped rows must not corrupt the infeasible certificate."""
+  rng = np.random.default_rng(1842)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=1e21,
+  )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  _assert_infeasible(solution, a, b, z)
+
+
+def test_presolve_restores_unbounded_certificate():
+  """Dropped rows must not corrupt the kept-part unbounded certificate."""
+  rng = np.random.default_rng(1942)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  a_base = a
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=1e21,
+  )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.UNBOUNDED
+  np.testing.assert_array_equal(np.isnan(solution.y), True)
+  np.testing.assert_array_equal(np.isnan(solution.s[-3:]), True)
+  np.testing.assert_allclose(c @ solution.x, -1.0, atol=1e-8, rtol=1e-9)
+  np.testing.assert_array_less(-1e-9, np.min(solution.s[z:m], initial=0.0))
+  np.testing.assert_array_less(
+      np.linalg.norm(a_base @ solution.x + solution.s[:m], np.inf),
+      1e-8 + 1e-9 * np.linalg.norm(solution.x, np.inf),
+  )
+  np.testing.assert_array_less(
+      np.linalg.norm(p @ solution.x, np.inf),
+      1e-8 + 1e-9 * np.linalg.norm(solution.x, np.inf),
+  )
+
+
+def test_presolve_accepts_posinf_inequalities():
+  """Literal +inf inequality RHS should be dropped without entering the KKT."""
+  rng = np.random.default_rng(2042)
+  m_eq, n, z = 5, 20, 5
+  a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
+  baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  a_full, b_full = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=np.inf,
+  )
+  solution = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(solution.x, baseline.x, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.y[:z], baseline.y, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.s[:z], baseline.s, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.y[z:], 0.0, atol=0.0, rtol=0.0)
+  assert np.all(np.isposinf(solution.s[z:]))
+
+
+def test_raise_error_nonfinite_equality_rhs():
+  """Non-finite equality RHS should fail before the KKT solve."""
+  a = sparse.eye(3, format='csc')
+  b = np.array([1.0, np.inf, 3.0])
+  c = np.zeros(3)
+  with pytest.raises(ValueError, match='Equality RHS entries'):
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=3).solve()
 
 
 @pytest.mark.parametrize('linear_solver', _SOLVERS)

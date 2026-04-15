@@ -154,6 +154,16 @@ class Solution:
   status: SolutionStatus
 
 
+@dataclasses.dataclass(frozen=True)
+class _PresolveState:
+  """Data needed to restore rows dropped during presolve."""
+
+  keep: np.ndarray
+  a_dropped: sp.csc_matrix
+  b_full: np.ndarray
+  m_full: int
+
+
 class QTQP:
   """Primal-dual interior point method for solving quadratic programs (QPs).
 
@@ -225,55 +235,74 @@ class QTQP:
   def _presolve(self, inf_bound: float = 1e20):
     """Remove trivially satisfied inequality constraints.
 
-    Drops rows i >= z where b[i] >= inf_bound, since those inequality
-    constraints (a[i] @ x <= b[i]) are trivially satisfied for any finite x.
-    Stores the original dimensions and a boolean mask so that _postsolve can
-    reconstruct the full-sized solution vectors.
+    Drops inequality rows i >= z where b[i] is +inf or >= inf_bound, since
+    those constraints are trivially satisfied for any finite x.
 
-    Any remaining b entries that exceed inf_bound are capped to inf_bound to
-    prevent infinities from entering the KKT system.
+    Equality RHS entries must be finite. Inequality RHS entries may be finite,
+    +inf, or very large positive values (treated as +inf), but NaN and -inf are
+    rejected.
 
     Args:
       inf_bound: Threshold above which a b entry is treated as infinite.
     """
-    keep = np.ones(self.m, dtype=bool)
-    keep[self.z:] &= self.b[self.z:] < inf_bound
-    n_dropped = self.m - keep.sum()
-    if n_dropped == 0:
-      self._presolve_keep = None
+    self._presolve_state = None
+
+    if not np.all(np.isfinite(self.b[: self.z])):
+      raise ValueError("Equality RHS entries in 'b' must be finite.")
+
+    ineq_b = self.b[self.z :]
+    if np.any(np.isnan(ineq_b) | np.isneginf(ineq_b)):
+      raise ValueError(
+          "Inequality RHS entries in 'b' must be finite, +inf, or >= inf_bound."
+      )
+
+    drop = np.zeros(self.m, dtype=bool)
+    drop[self.z :] = np.isposinf(ineq_b) | (ineq_b >= inf_bound)
+    if not np.any(drop):
       return
-    self._presolve_keep = keep
-    self._presolve_m = self.m
-    self._presolve_b = self.b
+
+    keep = ~drop
+    self._presolve_state = _PresolveState(
+        keep=keep,
+        a_dropped=self.a[drop],
+        b_full=self.b.copy(),
+        m_full=self.m,
+    )
     self.a = self.a[keep]
-    self.b = np.minimum(self.b[keep], inf_bound)
-    self.m = keep.sum()
+    self.b = self.b[keep].copy()
+    self.m = int(keep.sum())
 
-  def _postsolve(self, x, y, s):
-    """Restore full-sized solution vectors after presolve.
-
-    Reinserts dropped inequality rows with y[i] = 0 (inactive dual) and
-    s[i] = b[i] - a[i] @ x (true slack, which is very large for the
-    dropped rows).
-
-    Args:
-      x: Primal solution (n,).
-      y: Dual solution (m_reduced,).
-      s: Slack solution (m_reduced,).
-
-    Returns:
-      Tuple of (y_full, s_full) with original dimensions restored.
-    """
-    if self._presolve_keep is None:
+  def _postsolve_primal(self, x, y, s):
+    """Restore dropped rows for primal iterates or solved outputs."""
+    if self._presolve_state is None:
       return y, s
-    keep = self._presolve_keep
-    m_full = self._presolve_m
-    y_full = np.zeros(m_full, dtype=y.dtype)
-    s_full = np.zeros(m_full, dtype=s.dtype)
+    keep = self._presolve_state.keep
+    y_full = np.zeros(self._presolve_state.m_full, dtype=y.dtype)
+    s_full = np.zeros(self._presolve_state.m_full, dtype=s.dtype)
     y_full[keep] = y
     s_full[keep] = s
-    # For dropped rows: y=0 (dual inactive), s=b (slack ≈ b since a@x is finite).
-    s_full[~keep] = self._presolve_b[~keep]
+    s_full[~keep] = (
+        self._presolve_state.b_full[~keep] - self._presolve_state.a_dropped @ x
+    )
+    return y_full, s_full
+
+  def _postsolve_infeasible(self, y, s):
+    """Restore dropped rows for a primal infeasibility certificate."""
+    if self._presolve_state is None:
+      return y, s
+    keep = self._presolve_state.keep
+    y_full = np.zeros(self._presolve_state.m_full, dtype=y.dtype)
+    s_full = np.full(self._presolve_state.m_full, np.nan, dtype=s.dtype)
+    y_full[keep] = y
+    return y_full, s_full
+
+  def _postsolve_unbounded(self, y, s):
+    """Restore dropped rows for a dual infeasibility certificate."""
+    if self._presolve_state is None:
+      return y, s
+    y_full = np.full(self._presolve_state.m_full, np.nan, dtype=y.dtype)
+    s_full = np.full(self._presolve_state.m_full, np.nan, dtype=s.dtype)
+    s_full[self._presolve_state.keep] = s
     return y_full, s_full
 
   def _kkt_init(self, x, y, s, a, b):
@@ -315,7 +344,7 @@ class QTQP:
       dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
       ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
       dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
-      y, s = self._postsolve(x, y, s)
+      y, s = self._postsolve_primal(x, y, s)
       if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
         self._log_footer("Failed: equality-only KKT solve")
         return Solution(x, y, s, [], SolutionStatus.FAILED)
@@ -577,26 +606,26 @@ class QTQP:
       case SolutionStatus.SOLVED:
         self._log_footer("Solved")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve(x, y, s)
+        y, s = self._postsolve_primal(x, y, s)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
         x.fill(np.nan)
         s.fill(np.nan)
         y_scaled = y / abs(self.b @ y)
-        y_scaled, s = self._postsolve(x, y_scaled, s)
+        y_scaled, s = self._postsolve_infeasible(y_scaled, s)
         return Solution(x, y_scaled, s, stats, status)
       case SolutionStatus.UNBOUNDED:
         self._log_footer("Dual infeasible / primal unbounded")
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
         x, s = x / abs_ctx, s / abs_ctx
-        y, s = self._postsolve(x, y, s)
+        y, s = self._postsolve_unbounded(y, s)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge in {max_iter} iterations")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve(x, y, s)
+        y, s = self._postsolve_primal(x, y, s)
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
