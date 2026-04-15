@@ -456,14 +456,171 @@ def test_unbounded_large(equilibrate, seed, linear_solver, record_iterations):
   _assert_unbounded(solution, a, c, p, z)
 
 
-def test_raise_error_no_positive_constraints():
-  """Test that an error is raised when z >= m."""
+def test_raise_error_z_greater_than_m():
+  """Test that an error is raised when z > m."""
   rng = np.random.default_rng(442)
-  m, n = 10, 10
-  z = m
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  m, n = 10, 20
+  a = sparse.random(m, n, density=0.1, format='csc', random_state=rng)
+  b = rng.normal(size=m)
+  c = rng.normal(size=n)
+  p = sparse.csc_matrix((n, n))
   with pytest.raises(ValueError):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve()
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=m + 1, p=p).solve()
+
+
+def _gen_equality_only(m, n, random_state=None):
+  """Generate a well-conditioned equality-only QP with known solution.
+
+  Constructs (P, A, b, c) such that the KKT system is non-singular and the
+  optimal (x*, y*) is known. Requires m <= n.
+  """
+  rng = np.random.default_rng(random_state)
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  q = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(q.T @ q * 0.01)
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  return a, b, c, p
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 1542 + np.arange(10))
+@pytest.mark.parametrize('mn', ((5, 10), (30, 50), (80, 100)))
+def test_equality_only_solve(equilibrate, seed, mn):
+  """Test equality-only QP (z == m) solved via direct KKT system."""
+  rng = np.random.default_rng(seed)
+  m, n = mn
+  z = m
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, equilibrate=equilibrate,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+@pytest.mark.parametrize('seed', 2042 + np.arange(5))
+def test_equality_only_lp(seed):
+  """Test equality-only LP (P=0, z=m) solved via direct KKT system.
+
+  Uses n == m (square A) so the KKT system is non-singular with P=0.
+  """
+  rng = np.random.default_rng(seed)
+  m, n, z = 10, 10, 10
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  b = a @ x_star
+  c = -(a.T @ y_star)
+  p = sparse.csc_matrix((n, n))
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=False)
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+def test_equality_only_singular():
+  """Test that a singular equality-only KKT system returns FAILED."""
+  n, m, z = 5, 3, 3
+  # All rows identical -> singular A.
+  a = sparse.csc_matrix(np.ones((m, n)))
+  b = np.array([1.0, 2.0, 3.0])  # Inconsistent for identical rows.
+  c = np.ones(n)
+  p = sparse.csc_matrix((n, n))
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.FAILED
+
+
+def test_presolve_drops_all_inequalities():
+  """Test presolve dropping all inequalities triggers direct solve."""
+  rng = np.random.default_rng(842)
+  m_eq, n = 5, 20
+  m_ineq = 5
+  m = m_eq + m_ineq
+  z = m_eq
+  a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
+  # Append inequality rows with b = inf (will be dropped by presolve).
+  a_ineq = sparse.csc_matrix(rng.normal(size=(m_ineq, n)))
+  a = sparse.vstack([a, a_ineq], format='csc')
+  b = np.concatenate([b, np.full(m_ineq, 1e21)])
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  # Postsolve should restore original dimensions.
+  assert solution.y.shape == (m,)
+  assert solution.s.shape == (m,)
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('seed', 3042 + np.arange(5))
+def test_equality_only_all_backends(linear_solver, seed):
+  """Test equality-only QP with every linear solver backend."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 20, 40, 20
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, linear_solver=linear_solver,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+def test_equality_only_recovers_known_solution():
+  """Test that the direct solve recovers the ground-truth (x*, y*)."""
+  rng = np.random.default_rng(7742)
+  m, n, z = 10, 20, 10
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  q = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(q.T @ q * 0.01)
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(solution.x, x_star, atol=1e-6)
+  np.testing.assert_allclose(solution.y, y_star, atol=1e-6)
+  np.testing.assert_allclose(solution.s, np.zeros(m), atol=1e-10)
+
+
+def test_equality_only_verbose(capsys):
+  """Test that equality-only path prints header and footer."""
+  rng = np.random.default_rng(8842)
+  m, n, z = 5, 10, 5
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  captured = capsys.readouterr().out
+  assert 'QTQP v' in captured
+  assert 'z=5' in captured
+  assert 'equality-only' in captured
+
+
+def test_equality_only_sparse_p():
+  """Test equality-only QP where P is sparse (not dense-generated)."""
+  rng = np.random.default_rng(9942)
+  m, n, z = 15, 30, 15
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a = sparse.random(
+      m, n, density=0.5, format='csc',
+      data_rvs=lambda s: rng.normal(size=s), random_state=rng,
+  )
+  p = sparse.random(
+      n, n, density=0.05, format='csc',
+      data_rvs=lambda s: rng.normal(size=s), random_state=rng,
+  )
+  p = (p.T @ p) * 0.01  # Make PSD.
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  solution = qtqp.QTQP(
+      a=sparse.csc_matrix(a), b=b, c=c, z=z, p=sparse.csc_matrix(p),
+  ).solve(verbose=False)
+  _assert_solution(solution, sparse.csc_matrix(a), b, c, sparse.csc_matrix(p), z)
+  assert solution.stats == []
 
 
 def test_raise_error_negative_invalid_shapes():

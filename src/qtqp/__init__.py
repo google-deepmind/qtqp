@@ -203,10 +203,10 @@ class QTQP:
     if self.c.shape != (self.n,):
       raise ValueError(f"c must have shape ({self.n},), got {self.c.shape}")
 
-    if self.z < 0 or self.z >= self.m:
+    if self.z < 0 or self.z > self.m:
       raise ValueError(
           f"Number of equality constraints z={self.z} must satisfy "
-          f"0 <= z < m={self.m}"
+          f"0 <= z <= m={self.m}"
       )
 
     self._presolve()
@@ -238,10 +238,6 @@ class QTQP:
     """
     keep = np.ones(self.m, dtype=bool)
     keep[self.z:] &= self.b[self.z:] < inf_bound
-    # Must retain at least one inequality constraint (z < m).
-    if keep.sum() <= self.z:
-      # Keep the first inequality row, capping its b value.
-      keep[self.z] = True
     n_dropped = self.m - keep.sum()
     if n_dropped == 0:
       self._presolve_keep = None
@@ -403,6 +399,37 @@ class QTQP:
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
     )
+
+    # --- Equality-only: solve KKT system directly (no IPM needed). ---
+    # When z == m all constraints are equalities (Ax = b, s = 0). The KKT
+    # optimality conditions form a single linear system:
+    #   [P  A'] [x]   [-c]
+    #   [A   0] [y] = [ b]
+    # We factorize with mu=0; the DirectKktSolver's min_static_regularization
+    # ensures a stable factorization while iterative refinement converges to
+    # the exact (unregularized) solution.
+    if self.z == self.m:
+      self._linear_solver.update(
+          mu=0.0, s=np.zeros(self.m), y=np.zeros(self.m),
+      )
+      sol, _ = self._linear_solver.solve(
+          rhs=-self.q, warm_start=np.zeros_like(self.q),
+      )
+      self._linear_solver.free()
+      x, y, s = sol[: self.n], sol[self.n :], np.zeros(self.m)
+      if self.equilibrate:
+        x, y, s = self._unequilibrate_iterates(x, y, s)
+      # Validate: check residuals against the original (unequilibrated) data.
+      pres = _norm(self.a @ x + s - self.b, np.inf)
+      dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
+      ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
+      dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
+      y, s = self._postsolve(x, y, s)
+      if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
+        self._log_footer("Failed: equality-only KKT solve")
+        return Solution(x, y, s, [], SolutionStatus.FAILED)
+      self._log_footer("Solved (equality-only, direct)")
+      return Solution(x, y, s, [], SolutionStatus.SOLVED)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
