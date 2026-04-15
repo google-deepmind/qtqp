@@ -164,6 +164,17 @@ class _PresolveState:
   m_full: int
 
 
+@dataclasses.dataclass(frozen=True)
+class _InitializationResiduals:
+  """Residual summary for the KKT-based initialization point."""
+
+  pres: float
+  dres: float
+  ptol: float
+  dtol: float
+  is_finite: bool
+
+
 class QTQP:
   """Primal-dual interior point method for solving quadratic programs (QPs).
 
@@ -305,7 +316,7 @@ class QTQP:
     s_full[self._presolve_state.keep] = s
     return y_full, s_full
 
-  def _kkt_init(self, x, y, s, a, b):
+  def _init_variables(self, x, y, s, a, b):
     """KKT-based initialization for the IPM starting point.
 
     Solves the augmented KKT system with mu=0:
@@ -313,9 +324,8 @@ class QTQP:
       [A   -diag(h) ] [y] = [ b]
     where h = [0]*z (equalities) ++ [s/y = 1]*{m-z} (inequalities).
 
-    When z == m (all equalities), the system reduces to [[P, A'], [A, 0]]
-    and the solution is exact. When z < m, inequality components of (y, s)
-    are shifted into the strict interior of the cone.
+    The raw KKT point is not necessarily strictly interior, so inequality
+    components of (y, s) are shifted after the solve.
 
     Args:
       x: Primal variables (n,), modified in-place.
@@ -324,8 +334,6 @@ class QTQP:
       a: Constraint matrix (equilibrated if applicable).
       b: RHS vector (equilibrated if applicable).
 
-    Returns:
-      A Solution if z == m (equality-only, solved directly), else None.
     """
     self._linear_solver.update(mu=0.0, s=s, y=y)
     sol, _ = self._linear_solver.solve(
@@ -336,29 +344,59 @@ class QTQP:
     s[:] = b - a @ x
     s[: self.z] = 0.0
 
-    if self.z == self.m:
-      self._linear_solver.free()
-      if self.equilibrate:
-        x, y, s = self._unequilibrate_iterates(x, y, s)
-      pres = _norm(self.a @ x + s - self.b, np.inf)
-      dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
-      ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
-      dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
-      y, s = self._postsolve_primal(x, y, s)
-      if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
-        self._log_footer("Failed: equality-only KKT solve")
-        return Solution(x, y, s, [], SolutionStatus.FAILED)
-      self._log_footer("Solved (equality-only, direct)")
-      return Solution(x, y, s, [], SolutionStatus.SOLVED)
-
     # Shift inequality components into the strict interior of the cone.
-    alpha_p = -np.min(s[self.z :])
-    alpha_d = -np.min(y[self.z :])
-    if alpha_p >= -1.0:
-      s[self.z :] += 1.0 + alpha_p
-    if alpha_d >= -1.0:
-      y[self.z :] += 1.0 + alpha_d
-    return None
+    if self.z < self.m:
+      alpha_p = -np.min(s[self.z :])
+      alpha_d = -np.min(y[self.z :])
+      if alpha_p >= -1.0:
+        s[self.z :] += 1.0 + alpha_p
+      if alpha_d >= -1.0:
+        y[self.z :] += 1.0 + alpha_d
+
+  def _initialization_residuals(self, x, y, s) -> _InitializationResiduals:
+    """Compute and log residuals for the initialized primal-dual point."""
+    pres = _norm(self.a @ x + s - self.b, np.inf)
+    dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
+    ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
+    dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
+    residuals = _InitializationResiduals(
+        pres=pres,
+        dres=dres,
+        ptol=ptol,
+        dtol=dtol,
+        is_finite=(
+            np.all(np.isfinite(x))
+            and np.all(np.isfinite(y))
+            and np.all(np.isfinite(s))
+        ),
+    )
+    logging.debug(
+        "KKT init residuals: pres=%e (tol=%e), dres=%e (tol=%e), finite=%s",
+        residuals.pres,
+        residuals.ptol,
+        residuals.dres,
+        residuals.dtol,
+        residuals.is_finite,
+    )
+    return residuals
+
+  def _finish_equality_only_solve(
+      self, x, y, s, residuals: _InitializationResiduals
+  ) -> Solution:
+    """Finalize an equality-only solve from the initialized KKT point."""
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+    y, s = self._postsolve_primal(x, y, s)
+    self._linear_solver.free()
+    if (
+        not residuals.is_finite
+        or residuals.pres > residuals.ptol
+        or residuals.dres > residuals.dtol
+    ):
+      self._log_footer("Failed: equality-only KKT solve")
+      return Solution(x, y, s, [], SolutionStatus.FAILED)
+    self._log_footer("Solved (equality-only, direct)")
+    return Solution(x, y, s, [], SolutionStatus.SOLVED)
 
   def solve(
       self,
@@ -484,9 +522,17 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    init_result = self._kkt_init(x, y, s, a, b)
-    if init_result is not None:
-      return init_result
+    self._init_variables(x, y, s, a, b)
+    if self.z == self.m:
+      x_init, y_init, s_init = (x, y, s)
+      if self.equilibrate:
+        x_init, y_init, s_init = self._unequilibrate_iterates(x, y, s)
+      init_residuals = self._initialization_residuals(x_init, y_init, s_init)
+      return self._finish_equality_only_solve(x, y, s, init_residuals)
+    if self.equilibrate:
+      self._initialization_residuals(*self._unequilibrate_iterates(x, y, s))
+    else:
+      self._initialization_residuals(x, y, s)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
