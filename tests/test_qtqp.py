@@ -1134,6 +1134,8 @@ def _make_tau_gating_solver(converged):
   solver.kinv_q = np.zeros(4)
 
   class FakeLinearSolver:
+    min_static_regularization = 1e-8
+
     def solve(self, rhs, warm_start):
       del rhs, warm_start
       return np.zeros(4), {
@@ -1187,6 +1189,27 @@ def test_newton_step_uses_linearized_when_not_converged():
   np.testing.assert_allclose(tau_new, 2.0)
   assert lin_sys_stats['tau_method'] == 'linearized'
   assert calls == {'quadratic': 0, 'linearized': 1}
+
+
+def test_newton_step_uses_quadratic_when_mu_below_reg():
+  """Non-converged KKT solve should still use quadratic when mu < reg.
+
+  The linearized fallback is unstable in that regime because the factored
+  KKT has been regularized above the true diagonal, so the first-order
+  linearization of kinv_r carries reg-scale noise it cannot reject.
+  """
+  solver, calls = _make_tau_gating_solver(converged=False)
+  solver._linear_solver.min_static_regularization = 1.0  # pylint: disable=protected-access
+  # _run_newton_step passes mu=1.0; push mu below reg=1.0 to hit the branch.
+  _, _, tau_new, lin_sys_stats = solver._newton_step(  # pylint: disable=protected-access
+      p=sparse.csc_matrix((2, 2)), mu=1e-3, mu_target=0.0,
+      r_anchor=np.zeros(4), tau_anchor=1.0,
+      x=np.zeros(2), y=np.ones(2), s=np.ones(2),
+      tau=1.0, correction=None,
+  )
+  np.testing.assert_allclose(tau_new, 1.0)
+  assert lin_sys_stats['tau_method'] == 'quadratic'
+  assert calls == {'quadratic': 1, 'linearized': 0}
 
 
 def _always_raise_tau(self, *args, **kwargs):
