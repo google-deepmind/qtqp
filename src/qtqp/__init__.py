@@ -706,15 +706,8 @@ class QTQP:
 
     # Tau solve: exact quadratic when KKT solve converged, linearized
     # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
-    # Exception: once mu drops below the static regularization floor, the
-    # linearized fallback is itself unstable -- the factored KKT uses the
-    # regularized diagonal, and the O(reg) gap iterative refinement must
-    # cancel becomes comparable to or larger than mu, so kinv_r carries
-    # reg-scale noise that the first-order linearization cannot reject.
-    # In that regime we trust the quadratic's structural clamps instead.
     tau_plus = None
-    reg = self._linear_solver.min_static_regularization
-    if lin_sys_stats["converged"] or mu < reg:
+    if lin_sys_stats["converged"]:
       try:
         r_tau = (mu - mu_target) * tau_anchor
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
