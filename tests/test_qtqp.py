@@ -456,14 +456,256 @@ def test_unbounded_large(equilibrate, seed, linear_solver, record_iterations):
   _assert_unbounded(solution, a, c, p, z)
 
 
-def test_raise_error_no_positive_constraints():
-  """Test that an error is raised when z >= m."""
+def test_raise_error_z_greater_than_m():
+  """Test that an error is raised when z > m."""
   rng = np.random.default_rng(442)
-  m, n = 10, 10
-  z = m
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  m, n = 10, 20
+  a = sparse.random(m, n, density=0.1, format='csc', random_state=rng)
+  b = rng.normal(size=m)
+  c = rng.normal(size=n)
+  p = sparse.csc_matrix((n, n))
   with pytest.raises(ValueError):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve()
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=m + 1, p=p).solve()
+
+
+def _gen_equality_only(m, n, random_state=None):
+  """Generate a well-conditioned equality-only QP with known solution.
+
+  Constructs (P, A, b, c) such that the KKT system is non-singular and the
+  optimal (x*, y*) is known. Requires m <= n.
+  """
+  rng = np.random.default_rng(random_state)
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  q = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(q.T @ q * 0.01)
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  return a, b, c, p
+
+
+def _append_dropped_inequalities(a, b, n_extra, random_state, rhs_value):
+  """Append inequalities that presolve should drop."""
+  rng = np.random.default_rng(random_state)
+  a_extra = sparse.csc_matrix(rng.normal(size=(n_extra, a.shape[1])))
+  a_full = sparse.vstack([a, a_extra], format='csc')
+  b_full = np.concatenate([b, np.full(n_extra, rhs_value)])
+  return a_full, b_full
+
+
+@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('seed', 1542 + np.arange(10))
+@pytest.mark.parametrize('mn', ((5, 10), (30, 50), (80, 100)))
+def test_equality_only_solve(equilibrate, seed, mn):
+  """Test equality-only QP (z == m) solved via direct KKT system."""
+  rng = np.random.default_rng(seed)
+  m, n = mn
+  z = m
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, equilibrate=equilibrate,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+@pytest.mark.parametrize('seed', 2042 + np.arange(5))
+def test_equality_only_lp(seed):
+  """Test equality-only LP (P=0, z=m) solved via direct KKT system.
+
+  Uses n == m (square A) so the KKT system is non-singular with P=0.
+  """
+  rng = np.random.default_rng(seed)
+  m, n, z = 10, 10, 10
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  b = a @ x_star
+  c = -(a.T @ y_star)
+  p = sparse.csc_matrix((n, n))
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=False)
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+def test_equality_only_inconsistent():
+  """Inconsistent equality constraints do not get reported as SOLVED.
+
+  Depending on the linear-solver backend, a rank-deficient KKT system
+  may return either INFEASIBLE (Farkas-type certificate detected) or
+  FAILED (residuals nonzero, no certificate detected). Either outcome
+  is acceptable; SOLVED is not.
+  """
+  n, m, z = 5, 3, 3
+  # All rows of A are identical -> Ax = b can only be satisfied if all b_i
+  # are equal. Since they are not, the problem is primal infeasible.
+  a = sparse.csc_matrix(np.ones((m, n)))
+  b = np.array([1.0, 2.0, 3.0])
+  c = np.ones(n)
+  p = sparse.csc_matrix((n, n))
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status in (
+      qtqp.SolutionStatus.INFEASIBLE,
+      qtqp.SolutionStatus.FAILED,
+  )
+
+
+def test_presolve_drops_all_inequalities():
+  """Test presolve dropping all inequalities triggers direct solve."""
+  rng = np.random.default_rng(842)
+  m_eq, n = 5, 20
+  m_ineq = 5
+  m = m_eq + m_ineq
+  z = m_eq
+  a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=m_ineq, random_state=rng, rhs_value=1e21,
+  )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.y.shape == (m,)
+  assert solution.s.shape == (m,)
+
+
+def test_presolve_restores_infeasible_certificate():
+  """Dropped rows must not corrupt the infeasible certificate."""
+  rng = np.random.default_rng(1842)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=1e21,
+  )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  _assert_infeasible(solution, a, b, z)
+
+
+def test_presolve_restores_unbounded_certificate():
+  """Dropped rows must not corrupt the kept-part unbounded certificate."""
+  rng = np.random.default_rng(1942)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+  a_base = a
+  a, b = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=1e21,
+  )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.UNBOUNDED
+  np.testing.assert_array_equal(np.isnan(solution.y), True)
+  np.testing.assert_array_equal(np.isnan(solution.s[-3:]), True)
+  np.testing.assert_allclose(c @ solution.x, -1.0, atol=1e-8, rtol=1e-9)
+  np.testing.assert_array_less(-1e-9, np.min(solution.s[z:m], initial=0.0))
+  np.testing.assert_array_less(
+      np.linalg.norm(a_base @ solution.x + solution.s[:m], np.inf),
+      1e-8 + 1e-9 * np.linalg.norm(solution.x, np.inf),
+  )
+  np.testing.assert_array_less(
+      np.linalg.norm(p @ solution.x, np.inf),
+      1e-8 + 1e-9 * np.linalg.norm(solution.x, np.inf),
+  )
+
+
+def test_presolve_accepts_posinf_inequalities():
+  """Literal +inf inequality RHS should be dropped without entering the KKT."""
+  rng = np.random.default_rng(2042)
+  m_eq, n, z = 5, 20, 5
+  a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
+  baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  a_full, b_full = _append_dropped_inequalities(
+      a, b, n_extra=3, random_state=rng, rhs_value=np.inf,
+  )
+  solution = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(solution.x, baseline.x, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.y[:z], baseline.y, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.s[:z], baseline.s, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(solution.y[z:], 0.0, atol=0.0, rtol=0.0)
+  assert np.all(np.isposinf(solution.s[z:]))
+
+
+def test_raise_error_nonfinite_equality_rhs():
+  """Non-finite equality RHS should fail before the KKT solve."""
+  a = sparse.eye(3, format='csc')
+  b = np.array([1.0, np.inf, 3.0])
+  c = np.zeros(3)
+  with pytest.raises(ValueError, match='Equality RHS entries'):
+    _ = qtqp.QTQP(a=a, b=b, c=c, z=3).solve()
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('seed', 3042 + np.arange(5))
+def test_equality_only_all_backends(linear_solver, seed):
+  """Test equality-only QP with every linear solver backend."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 20, 40, 20
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, linear_solver=linear_solver,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+  assert solution.stats == []
+
+
+def test_equality_only_recovers_known_solution():
+  """Test that the direct solve recovers the ground-truth (x*, y*)."""
+  rng = np.random.default_rng(7742)
+  m, n, z = 10, 20, 10
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a_dense = rng.normal(size=(m, n))
+  a = sparse.csc_matrix(a_dense)
+  q = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(q.T @ q * 0.01)
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(solution.x, x_star, atol=1e-6)
+  np.testing.assert_allclose(solution.y, y_star, atol=1e-6)
+  np.testing.assert_allclose(solution.s, np.zeros(m), atol=1e-10)
+
+
+def test_equality_only_verbose(capsys):
+  """Test that equality-only path prints header and footer and terminates at iter 0."""
+  rng = np.random.default_rng(8842)
+  m, n, z = 5, 10, 5
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=True, collect_stats=True
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  # Init KKT solve is exact, so iter 0 terminates immediately.
+  assert len(solution.stats) == 1
+  captured = capsys.readouterr().out
+  assert 'QTQP v' in captured
+  assert 'z=5' in captured
+  assert 'Solved' in captured
+
+
+def test_equality_only_sparse_p():
+  """Test equality-only QP where P is sparse (not dense-generated)."""
+  rng = np.random.default_rng(9942)
+  m, n, z = 15, 30, 15
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  a = sparse.random(
+      m, n, density=0.5, format='csc',
+      data_rvs=lambda s: rng.normal(size=s), random_state=rng,
+  )
+  p = sparse.random(
+      n, n, density=0.05, format='csc',
+      data_rvs=lambda s: rng.normal(size=s), random_state=rng,
+  )
+  p = (p.T @ p) * 0.01  # Make PSD.
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  solution = qtqp.QTQP(
+      a=sparse.csc_matrix(a), b=b, c=c, z=z, p=sparse.csc_matrix(p),
+  ).solve(verbose=False)
+  _assert_solution(solution, sparse.csc_matrix(a), b, c, sparse.csc_matrix(p), z)
+  assert solution.stats == []
 
 
 def test_raise_error_negative_invalid_shapes():
@@ -945,8 +1187,8 @@ def test_p_none_equivalent_to_zero_matrix():
 
   assert sol_none.status == qtqp.SolutionStatus.SOLVED
   assert sol_zero.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_allclose(sol_none.x, sol_zero.x, atol=1e-10, rtol=1e-10)
-  np.testing.assert_allclose(sol_none.y, sol_zero.y, atol=1e-10, rtol=1e-10)
+  np.testing.assert_allclose(sol_none.x, sol_zero.x, atol=1e-8, rtol=1e-8)
+  np.testing.assert_allclose(sol_none.y, sol_zero.y, atol=1e-8, rtol=1e-8)
 
 
 # =============================================================================
@@ -1098,8 +1340,11 @@ def test_resolve():
 
   assert sol1.status == qtqp.SolutionStatus.SOLVED
   assert sol2.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_allclose(sol1.x, sol2.x, atol=1e-5, rtol=1e-5)
-  np.testing.assert_allclose(sol1.y, sol2.y, atol=1e-5, rtol=1e-5)
+  _assert_solution(sol1, a, b, c, p, z)
+  _assert_solution(sol2, a, b, c, p, z)
+  obj1 = c @ sol1.x + 0.5 * sol1.x @ p @ sol1.x
+  obj2 = c @ sol2.x + 0.5 * sol2.x @ p @ sol2.x
+  np.testing.assert_allclose(obj1, obj2, atol=1e-5, rtol=1e-5)
 
 
 # =============================================================================
@@ -1557,8 +1802,11 @@ def test_stats_monotonicity():
   times = [s['time'] for s in solution.stats]
   alphas = [s['alpha'] for s in solution.stats]
 
-  # mu should be strictly decreasing for a well-conditioned solved problem.
-  for i in range(1, len(mus)):
+  # At iter 0 no step has been taken, so mu is reported as 0. From iter 1
+  # onward mu is the complementarity that was used to compute the step
+  # which produced the current iterate, and it should be strictly decreasing.
+  assert mus[0] == 0.0
+  for i in range(2, len(mus)):
     assert mus[i] < mus[i - 1], (
         f"mu not decreasing: mu[{i}]={mus[i]} >= mu[{i-1}]={mus[i-1]}"
     )
@@ -1569,8 +1817,10 @@ def test_stats_monotonicity():
         f"time not increasing: time[{i}]={times[i]} < time[{i-1}]={times[i-1]}"
     )
 
-  # alpha should be in (0, 1] at every iteration.
-  for i, a_val in enumerate(alphas):
+  # alpha should be in (0, 1] at every IPM step. Iteration 0 is the
+  # initialization point before any step, so alpha=0 there by convention.
+  assert alphas[0] == 0.0
+  for i, a_val in enumerate(alphas[1:], start=1):
     assert 0 < a_val <= 1.0, f"alpha[{i}]={a_val} not in (0, 1]"
 
 

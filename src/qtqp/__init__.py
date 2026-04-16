@@ -154,6 +154,15 @@ class Solution:
   status: SolutionStatus
 
 
+@dataclasses.dataclass(frozen=True)
+class _PresolveState:
+  """Data needed to restore rows dropped during presolve."""
+
+  keep: np.ndarray
+  a_dropped: sp.csc_matrix
+  b_dropped: np.ndarray
+
+
 class QTQP:
   """Primal-dual interior point method for solving quadratic programs (QPs).
 
@@ -203,11 +212,13 @@ class QTQP:
     if self.c.shape != (self.n,):
       raise ValueError(f"c must have shape ({self.n},), got {self.c.shape}")
 
-    if self.z < 0 or self.z >= self.m:
+    if self.z < 0 or self.z > self.m:
       raise ValueError(
           f"Number of equality constraints z={self.z} must satisfy "
-          f"0 <= z < m={self.m}"
+          f"0 <= z <= m={self.m}"
       )
+
+    self._presolve()
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
@@ -219,6 +230,79 @@ class QTQP:
             f"p must have shape ({self.n}, {self.n}, got {p.shape})"
         )
       self.p = p
+
+  def _presolve(self, inf_bound: float = 1e20):
+    """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
+    or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
+    """
+    self._presolve_state = None
+    if not np.all(np.isfinite(self.b[: self.z])):
+      raise ValueError("Equality RHS entries in 'b' must be finite.")
+    ineq_b = self.b[self.z :]
+    if np.any(np.isnan(ineq_b) | np.isneginf(ineq_b)):
+      raise ValueError(
+          "Inequality RHS entries in 'b' must be finite, +inf, or >= inf_bound."
+      )
+    drop = np.zeros(self.m, dtype=bool)
+    drop[self.z :] = ineq_b >= inf_bound
+    if not np.any(drop):
+      return
+    keep = ~drop
+    self._presolve_state = _PresolveState(
+        keep=keep, a_dropped=self.a[drop], b_dropped=self.b[drop],
+    )
+    self.a = self.a[keep]
+    self.b = self.b[keep]
+    self.m = int(keep.sum())
+
+  def _postsolve(self, y, s, y_dropped=0.0, s_dropped=np.nan):
+    """Restore full-sized (y, s) after presolve dropped rows.
+
+    Kept entries are copied from (y, s); dropped entries take the values
+    passed in y_dropped and s_dropped, each of which may be a scalar or
+    an array of length (m_full - m_kept).
+    """
+    if self._presolve_state is None:
+      return y, s
+    ps = self._presolve_state
+    m_full = ps.keep.shape[0]
+    drop = ~ps.keep
+    y_full = np.empty(m_full, dtype=y.dtype)
+    s_full = np.empty(m_full, dtype=s.dtype)
+    y_full[ps.keep] = y
+    y_full[drop] = y_dropped
+    s_full[ps.keep] = s
+    s_full[drop] = s_dropped
+    return y_full, s_full
+
+  def _dropped_slack(self, x):
+    """Slack b - A @ x for dropped rows; 0.0 (harmless scalar) if none."""
+    ps = self._presolve_state
+    if ps is None:
+      return 0.0
+    return ps.b_dropped - ps.a_dropped @ x
+
+  def _init_variables(self, x, y, s, a, b):
+    """KKT-based starting point (modified in-place). Solves the mu=0 KKT
+    system, then shifts inequality (y, s) into the cone's strict interior.
+    When z == m the solve is exact. Returns the KKT lin-sys stats.
+    """
+    self._linear_solver.update(mu=0.0, s=s, y=y)
+    sol, init_stats = self._linear_solver.solve(
+        rhs=-self.q, warm_start=np.zeros_like(self.q),
+    )
+    x[:] = sol[: self.n]
+    y[:] = sol[self.n :]
+    s[:] = b - a @ x
+    s[: self.z] = 0.0
+    # No-op when z == m (no inequality indices).
+    alpha_p = -np.min(s[self.z :], initial=np.inf)
+    alpha_d = -np.min(y[self.z :], initial=np.inf)
+    if alpha_p >= -1.0:
+      s[self.z :] += 1.0 + alpha_p
+    if alpha_d >= -1.0:
+      y[self.z :] += 1.0 + alpha_d
+    return init_stats
 
   def solve(
       self,
@@ -344,6 +428,8 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
+    init_stats = self._init_variables(x, y, s, a, b)
+
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     status = SolutionStatus.UNFINISHED
@@ -353,13 +439,35 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # --- Main Iteration Loop ---
-    for self.it in range(max_iter):
-      stats_i = {}
+    # mu/alpha/sigma describe the IPM step that produced the current iterate;
+    # at iter 0 (init point) there is no prior step, so all three are 0.
+    alpha = sigma = mu = 0.0
+    q_lin_sys_stats = init_stats
+    predictor_lin_sys_stats = {}
+    corrector_lin_sys_stats = {}
 
+    # --- Main Iteration Loop ---
+    # Evaluate iterate, log/terminate, then take a step. self.it counts steps
+    # already taken (0 = init). When z == m iter 0 terminates (no central path).
+    for self.it in range(max_iter + 1):
       x, y, tau, s = self._normalize(x, y, tau, s)
 
-      # Calculate current complementary slackness error (mu)
+      stats_i = {
+          "q_lin_sys_stats": q_lin_sys_stats,
+          "predictor_lin_sys_stats": predictor_lin_sys_stats,
+          "corrector_lin_sys_stats": corrector_lin_sys_stats,
+      }
+      status = self._check_termination(
+          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+      )
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
+      if (status != SolutionStatus.UNFINISHED
+          or self.it == max_iter or self.z == self.m):
+        break
+
+      # --- Take an IPM step ---
       mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
@@ -368,7 +476,6 @@ class QTQP:
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
-      stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -385,7 +492,6 @@ class QTQP:
           tau=tau,
           correction=None,
       )
-      stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -422,7 +528,6 @@ class QTQP:
           tau=tau,
           correction=correction,
       )
-      stats_i.update(corrector_lin_sys_stats=corrector_lin_sys_stats)
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
@@ -446,14 +551,6 @@ class QTQP:
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = np.maximum(tau, 1e-30)
 
-      # --- Termination Check---
-      status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats)
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if status != SolutionStatus.UNFINISHED:
-        break
-
     # We have terminated for one reason or another.
     self._linear_solver.free()
     if self.equilibrate:
@@ -461,20 +558,28 @@ class QTQP:
     match status:
       case SolutionStatus.SOLVED:
         self._log_footer("Solved")
-        return Solution(x / tau, y / tau, s / tau, stats, status)
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
+        return Solution(x, y, s, stats, status)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
         x.fill(np.nan)
         s.fill(np.nan)
-        return Solution(x, y / abs(self.b @ y), s, stats, status)
+        y_scaled = y / abs(self.b @ y)
+        y_scaled, s = self._postsolve(y_scaled, s)
+        return Solution(x, y_scaled, s, stats, status)
       case SolutionStatus.UNBOUNDED:
         self._log_footer("Dual infeasible / primal unbounded")
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
-        return Solution(x / abs_ctx, y, s / abs_ctx, stats, status)
+        x, s = x / abs_ctx, s / abs_ctx
+        y, s = self._postsolve(y, s, y_dropped=np.nan)
+        return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge in {max_iter} iterations")
-        return Solution(x / tau, y / tau, s / tau, stats, SolutionStatus.FAILED)
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
+        return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
 
@@ -804,19 +909,21 @@ class QTQP:
     })
 
     if collect_stats:
-      sy = s * y
-      s_over_y = s / np.maximum(_EPS, y)
-      stats_i.update({
-          "complementarity": np.abs((y @ s) * inv_tau * inv_tau),
-          "norm_s": _norm(s, np.inf),
-          "max_sy": np.max(sy[self.z :]),
-          "min_sy": np.min(sy[self.z :]),
-          "std_sy": np.std(sy[self.z :]),
-          "max_s_over_y": np.max(s_over_y[self.z :]),
-          "min_s_over_y": np.min(s_over_y[self.z :]),
-          "mean_s_over_y": np.mean(s_over_y[self.z :]),
-          "std_s_over_y": np.std(s_over_y[self.z :]),
-      })
+      stats_i["complementarity"] = np.abs((y @ s) * inv_tau * inv_tau)
+      stats_i["norm_s"] = _norm(s, np.inf)
+      # Per-inequality stats only meaningful when inequalities exist.
+      if self.z < self.m:
+        sy = s[self.z :] * y[self.z :]
+        s_over_y = s[self.z :] / np.maximum(_EPS, y[self.z :])
+        stats_i.update({
+            "max_sy": np.max(sy),
+            "min_sy": np.min(sy),
+            "std_sy": np.std(sy),
+            "max_s_over_y": np.max(s_over_y),
+            "min_s_over_y": np.min(s_over_y),
+            "mean_s_over_y": np.mean(s_over_y),
+            "std_s_over_y": np.std(s_over_y),
+        })
 
     return status
 
