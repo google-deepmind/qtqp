@@ -160,8 +160,7 @@ class _PresolveState:
 
   keep: np.ndarray
   a_dropped: sp.csc_matrix
-  b_full: np.ndarray
-  m_full: int
+  b_dropped: np.ndarray
 
 
 class QTQP:
@@ -245,15 +244,15 @@ class QTQP:
           "Inequality RHS entries in 'b' must be finite, +inf, or >= inf_bound."
       )
     drop = np.zeros(self.m, dtype=bool)
-    drop[self.z :] = np.isposinf(ineq_b) | (ineq_b >= inf_bound)
+    drop[self.z :] = ineq_b >= inf_bound
     if not np.any(drop):
       return
     keep = ~drop
     self._presolve_state = _PresolveState(
-        keep=keep, a_dropped=self.a[drop], b_full=self.b.copy(), m_full=self.m,
+        keep=keep, a_dropped=self.a[drop], b_dropped=self.b[drop],
     )
     self.a = self.a[keep]
-    self.b = self.b[keep].copy()
+    self.b = self.b[keep]
     self.m = int(keep.sum())
 
   def _postsolve(self, y, s, y_dropped=0.0, s_dropped=np.nan):
@@ -266,12 +265,14 @@ class QTQP:
     if self._presolve_state is None:
       return y, s
     ps = self._presolve_state
-    y_full = np.empty(ps.m_full, dtype=y.dtype)
-    s_full = np.empty(ps.m_full, dtype=s.dtype)
+    m_full = ps.keep.shape[0]
+    drop = ~ps.keep
+    y_full = np.empty(m_full, dtype=y.dtype)
+    s_full = np.empty(m_full, dtype=s.dtype)
     y_full[ps.keep] = y
-    y_full[~ps.keep] = y_dropped
+    y_full[drop] = y_dropped
     s_full[ps.keep] = s
-    s_full[~ps.keep] = s_dropped
+    s_full[drop] = s_dropped
     return y_full, s_full
 
   def _dropped_slack(self, x):
@@ -279,7 +280,7 @@ class QTQP:
     ps = self._presolve_state
     if ps is None:
       return 0.0
-    return ps.b_full[~ps.keep] - ps.a_dropped @ x
+    return ps.b_dropped - ps.a_dropped @ x
 
   def _init_variables(self, x, y, s, a, b):
     """KKT-based starting point (modified in-place). Solves the mu=0 KKT
