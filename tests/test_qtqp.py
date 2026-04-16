@@ -1802,11 +1802,10 @@ def test_stats_monotonicity():
   times = [s['time'] for s in solution.stats]
   alphas = [s['alpha'] for s in solution.stats]
 
-  # At iter 0 no step has been taken, so mu is reported as 0. From iter 1
-  # onward mu is the complementarity that was used to compute the step
-  # which produced the current iterate, and it should be strictly decreasing.
-  assert mus[0] == 0.0
-  for i in range(2, len(mus)):
+  # mu is the complementarity of the current iterate and should decrease
+  # strictly as the IPM drives iterates toward the central path.
+  assert mus[0] > 0.0
+  for i in range(1, len(mus)):
     assert mus[i] < mus[i - 1], (
         f"mu not decreasing: mu[{i}]={mus[i]} >= mu[{i-1}]={mus[i-1]}"
     )
