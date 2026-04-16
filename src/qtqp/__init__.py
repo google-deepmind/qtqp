@@ -296,9 +296,12 @@ class QTQP:
     Solves [P, A'; A, -diag(h)] @ [x; y] = [-c; b] with mu=0, where
     h = [0]*z ++ [s/y]*{m-z}. When z == m the solution is exact.
     Otherwise inequality (y, s) are shifted into the strict interior.
+
+    Returns the linear-solver stats from the KKT solve (used to annotate
+    the iter-0 log row).
     """
     self._linear_solver.update(mu=0.0, s=s, y=y)
-    sol, _ = self._linear_solver.solve(
+    sol, init_stats = self._linear_solver.solve(
         rhs=-self.q, warm_start=np.zeros_like(self.q),
     )
     x[:] = sol[: self.n]
@@ -313,22 +316,35 @@ class QTQP:
       s[self.z :] += 1.0 + alpha_p
     if alpha_d >= -1.0:
       y[self.z :] += 1.0 + alpha_d
+    return init_stats
 
-  def _solve_equality_only(self, x, y, s) -> Solution:
-    """Validate and return the KKT solution for an equality-only QP."""
+  def _solve_equality_only(
+      self, x, y, s, tau, init_stats, collect_stats
+  ) -> Solution:
+    """Evaluate and return the KKT solution for an equality-only QP."""
+    self._log_header()
+    self.it = 0
+    stats_i = {
+        "q_lin_sys_stats": init_stats,
+        "predictor_lin_sys_stats": {},
+        "corrector_lin_sys_stats": {},
+    }
+    status = self._check_termination(
+        x, y, tau, s,
+        alpha=0.0, mu=0.0, sigma=0.0,
+        stats_i=stats_i, collect_stats=collect_stats,
+    )
+    self._log_iteration(stats_i)
+    stats = [stats_i] if collect_stats else []
     self._linear_solver.free()
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
-    pres = _norm(self.a @ x + s - self.b, np.inf)
-    dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
-    ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
-    dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
     y, s = self._postsolve(y, s, x)
-    if not np.all(np.isfinite(x)) or pres > ptol or dres > dtol:
-      self._log_footer("Failed: equality-only KKT solve")
-      return Solution(x, y, s, [], SolutionStatus.FAILED)
-    self._log_footer("Solved (equality-only, direct)")
-    return Solution(x, y, s, [], SolutionStatus.SOLVED)
+    if status == SolutionStatus.SOLVED:
+      self._log_footer("Solved (equality-only, direct)")
+      return Solution(x, y, s, stats, SolutionStatus.SOLVED)
+    self._log_footer("Failed: equality-only KKT solve")
+    return Solution(x, y, s, stats, SolutionStatus.FAILED)
 
   def solve(
       self,
@@ -454,9 +470,9 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    self._init_variables(x, y, s, a, b)
+    init_stats = self._init_variables(x, y, s, a, b)
     if self.z == self.m:
-      return self._solve_equality_only(x, y, s)
+      return self._solve_equality_only(x, y, s, tau, init_stats, collect_stats)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
@@ -467,14 +483,36 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
+    # Iter-0 log row reflects the initialized point before any IPM step.
+    # alpha/sigma don't apply yet; mu is the complementarity at init.
+    alpha = 0.0
+    sigma = 0.0
+    q_lin_sys_stats = init_stats
+    predictor_lin_sys_stats = {}
+    corrector_lin_sys_stats = {}
+
     # --- Main Iteration Loop ---
-    for self.it in range(max_iter):
-      stats_i = {}
-
+    # Each pass: evaluate current iterate, log, maybe terminate, then step.
+    # self.it counts IPM steps taken before this evaluation (0 = init).
+    for self.it in range(max_iter + 1):
       x, y, tau, s = self._normalize(x, y, tau, s)
-
-      # Calculate current complementary slackness error (mu)
       mu = (y @ s) / (self.m - self.z)
+
+      stats_i = {
+          "q_lin_sys_stats": q_lin_sys_stats,
+          "predictor_lin_sys_stats": predictor_lin_sys_stats,
+          "corrector_lin_sys_stats": corrector_lin_sys_stats,
+      }
+      status = self._check_termination(
+          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+      )
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
+      if status != SolutionStatus.UNFINISHED or self.it == max_iter:
+        break
+
+      # --- Take an IPM step ---
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
@@ -482,7 +520,6 @@ class QTQP:
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
-      stats_i.update(q_lin_sys_stats=q_lin_sys_stats)
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -499,7 +536,6 @@ class QTQP:
           tau=tau,
           correction=None,
       )
-      stats_i.update(predictor_lin_sys_stats=predictor_lin_sys_stats)
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -536,7 +572,6 @@ class QTQP:
           tau=tau,
           correction=correction,
       )
-      stats_i.update(corrector_lin_sys_stats=corrector_lin_sys_stats)
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
@@ -559,14 +594,6 @@ class QTQP:
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = np.maximum(tau, 1e-30)
-
-      # --- Termination Check---
-      status = self._check_termination(x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats)
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if status != SolutionStatus.UNFINISHED:
-        break
 
     # We have terminated for one reason or another.
     self._linear_solver.free()

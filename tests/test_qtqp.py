@@ -1800,8 +1800,10 @@ def test_stats_monotonicity():
         f"time not increasing: time[{i}]={times[i]} < time[{i-1}]={times[i-1]}"
     )
 
-  # alpha should be in (0, 1] at every iteration.
-  for i, a_val in enumerate(alphas):
+  # alpha should be in (0, 1] at every IPM step. Iteration 0 is the
+  # initialization point before any step, so alpha=0 there by convention.
+  assert alphas[0] == 0.0
+  for i, a_val in enumerate(alphas[1:], start=1):
     assert 0 < a_val <= 1.0, f"alpha[{i}]={a_val} not in (0, 1]"
 
 
