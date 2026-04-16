@@ -830,7 +830,7 @@ class QTQP:
     # Residuals
     pres = _norm((ax + s) * inv_tau - self.b, np.inf)
     dres = _norm((px + aty) * inv_tau + self.c, np.inf)
-    gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
+    gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
     # If the primal is unbounded (dual infeasible) this produces a ray x with
@@ -909,7 +909,7 @@ class QTQP:
     })
 
     if collect_stats:
-      stats_i["complementarity"] = np.abs((y @ s) * inv_tau * inv_tau)
+      stats_i["complementarity"] = abs((y @ s) * inv_tau * inv_tau)
       stats_i["norm_s"] = _norm(s, np.inf)
       # Per-inequality stats only meaningful when inequalities exist.
       if self.z < self.m:
