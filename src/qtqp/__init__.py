@@ -34,6 +34,7 @@
 import dataclasses
 import enum
 import logging
+import math
 import sys
 import timeit
 from typing import Any, Dict, List
@@ -768,7 +769,7 @@ class QTQP:
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
 
-    tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
+    tau_sol = (-t_b + math.sqrt(max(0.0, discriminant))) / (2 * t_a)
 
     if not np.isfinite(tau_sol) or tau_sol < -1e-10:
       raise ValueError(f"Invalid tau solution found: {tau_sol}")
@@ -790,8 +791,8 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = np.sqrt(x @ x + y @ y + tau[0] ** 2)
-    scale = np.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
+    xyt_norm = math.sqrt(x @ x + y @ y + tau[0] ** 2)
+    scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     x *= scale
     y *= scale
     tau *= scale
@@ -830,7 +831,7 @@ class QTQP:
     # Residuals
     pres = _norm((ax + s) * inv_tau - self.b, np.inf)
     dres = _norm((px + aty) * inv_tau + self.c, np.inf)
-    gap = np.abs((ctx + bty + xpx * inv_tau) * inv_tau)
+    gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
     # If the primal is unbounded (dual infeasible) this produces a ray x with
@@ -909,7 +910,7 @@ class QTQP:
     })
 
     if collect_stats:
-      stats_i["complementarity"] = np.abs((y @ s) * inv_tau * inv_tau)
+      stats_i["complementarity"] = abs((y @ s) * inv_tau * inv_tau)
       stats_i["norm_s"] = _norm(s, np.inf)
       # Per-inequality stats only meaningful when inequalities exist.
       if self.z < self.m:
