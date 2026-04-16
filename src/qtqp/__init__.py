@@ -233,40 +233,24 @@ class QTQP:
       self.p = p
 
   def _presolve(self, inf_bound: float = 1e20):
-    """Remove trivially satisfied inequality constraints.
-
-    Drops inequality rows i >= z where b[i] is +inf or >= inf_bound, since
-    those constraints are trivially satisfied for any finite x.
-
-    Equality RHS entries must be finite. Inequality RHS entries may be finite,
-    +inf, or very large positive values (treated as +inf), but NaN and -inf are
-    rejected.
-
-    Args:
-      inf_bound: Threshold above which a b entry is treated as infinite.
+    """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
+    or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
     """
     self._presolve_state = None
-
     if not np.all(np.isfinite(self.b[: self.z])):
       raise ValueError("Equality RHS entries in 'b' must be finite.")
-
     ineq_b = self.b[self.z :]
     if np.any(np.isnan(ineq_b) | np.isneginf(ineq_b)):
       raise ValueError(
           "Inequality RHS entries in 'b' must be finite, +inf, or >= inf_bound."
       )
-
     drop = np.zeros(self.m, dtype=bool)
     drop[self.z :] = np.isposinf(ineq_b) | (ineq_b >= inf_bound)
     if not np.any(drop):
       return
-
     keep = ~drop
     self._presolve_state = _PresolveState(
-        keep=keep,
-        a_dropped=self.a[drop],
-        b_full=self.b.copy(),
-        m_full=self.m,
+        keep=keep, a_dropped=self.a[drop], b_full=self.b.copy(), m_full=self.m,
     )
     self.a = self.a[keep]
     self.b = self.b[keep].copy()
@@ -291,26 +275,16 @@ class QTQP:
     return y_full, s_full
 
   def _dropped_slack(self, x):
-    """True slack b_i - a_i @ x for rows dropped by presolve.
-
-    Returns 0.0 (harmless scalar) if nothing was dropped — the caller
-    can pass the result to `_postsolve` unconditionally.
-    """
+    """Slack b - A @ x for dropped rows; 0.0 (harmless scalar) if none."""
     ps = self._presolve_state
     if ps is None:
       return 0.0
     return ps.b_full[~ps.keep] - ps.a_dropped @ x
 
   def _init_variables(self, x, y, s, a, b):
-    """KKT-based initialization of (x, y, s), modified in-place.
-
-    Solves [P, A'; A, -diag(h)] @ [x; y] = [-c; b] with mu=0, where
-    h = [0]*z ++ [s/y]*{m-z}. When z == m the solution is exact and the
-    first termination check will recognize it as SOLVED. Otherwise
-    inequality (y, s) are shifted into the strict interior.
-
-    Returns the linear-solver stats from the KKT solve (used to annotate
-    the iter-0 log row).
+    """KKT-based starting point (modified in-place). Solves the mu=0 KKT
+    system, then shifts inequality (y, s) into the cone's strict interior.
+    When z == m the solve is exact. Returns the KKT lin-sys stats.
     """
     self._linear_solver.update(mu=0.0, s=s, y=y)
     sol, init_stats = self._linear_solver.solve(
@@ -320,7 +294,6 @@ class QTQP:
     y[:] = sol[self.n :]
     s[:] = b - a @ x
     s[: self.z] = 0.0
-    # Shift inequality components into the strict interior of the cone.
     # No-op when z == m (no inequality indices).
     alpha_p = -np.min(s[self.z :], initial=np.inf)
     alpha_d = -np.min(y[self.z :], initial=np.inf)
@@ -465,20 +438,16 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # Iter-0 row reflects the initialized point before any IPM step has been
-    # taken. mu/alpha/sigma describe "the step that produced the current
-    # iterate"; at iter 0 there is none, so they are 0.
-    alpha = 0.0
-    sigma = 0.0
-    mu = 0.0
+    # mu/alpha/sigma describe the IPM step that produced the current iterate;
+    # at iter 0 (init point) there is no prior step, so all three are 0.
+    alpha = sigma = mu = 0.0
     q_lin_sys_stats = init_stats
     predictor_lin_sys_stats = {}
     corrector_lin_sys_stats = {}
 
     # --- Main Iteration Loop ---
-    # Each pass: evaluate current iterate, log, maybe terminate, then step.
-    # self.it counts IPM steps taken before this evaluation (0 = init).
-    # When z == m the init solve is exact and iter 0 terminates as SOLVED.
+    # Evaluate iterate, log/terminate, then take a step. self.it counts steps
+    # already taken (0 = init). When z == m iter 0 terminates (no central path).
     for self.it in range(max_iter + 1):
       x, y, tau, s = self._normalize(x, y, tau, s)
 
@@ -493,13 +462,8 @@ class QTQP:
       self._log_iteration(stats_i)
       if collect_stats:
         stats.append(stats_i)
-      # When z == m there are no inequalities, no central path, and no
-      # step to take — the init KKT solve is exact or there is no remedy.
-      if (
-          status != SolutionStatus.UNFINISHED
-          or self.it == max_iter
-          or self.z == self.m
-      ):
+      if (status != SolutionStatus.UNFINISHED
+          or self.it == max_iter or self.z == self.m):
         break
 
       # --- Take an IPM step ---
@@ -944,20 +908,21 @@ class QTQP:
     })
 
     if collect_stats:
-      sy = s[self.z :] * y[self.z :]
-      s_over_y = s[self.z :] / np.maximum(_EPS, y[self.z :])
-      # When z == m (no inequalities) these slice stats are undefined.
-      stats_i.update({
-          "complementarity": np.abs((y @ s) * inv_tau * inv_tau),
-          "norm_s": _norm(s, np.inf),
-          "max_sy": np.max(sy) if sy.size else np.nan,
-          "min_sy": np.min(sy) if sy.size else np.nan,
-          "std_sy": np.std(sy) if sy.size else np.nan,
-          "max_s_over_y": np.max(s_over_y) if s_over_y.size else np.nan,
-          "min_s_over_y": np.min(s_over_y) if s_over_y.size else np.nan,
-          "mean_s_over_y": np.mean(s_over_y) if s_over_y.size else np.nan,
-          "std_s_over_y": np.std(s_over_y) if s_over_y.size else np.nan,
-      })
+      stats_i["complementarity"] = np.abs((y @ s) * inv_tau * inv_tau)
+      stats_i["norm_s"] = _norm(s, np.inf)
+      # Per-inequality stats only meaningful when inequalities exist.
+      if self.z < self.m:
+        sy = s[self.z :] * y[self.z :]
+        s_over_y = s[self.z :] / np.maximum(_EPS, y[self.z :])
+        stats_i.update({
+            "max_sy": np.max(sy),
+            "min_sy": np.min(sy),
+            "std_sy": np.std(sy),
+            "max_s_over_y": np.max(s_over_y),
+            "min_s_over_y": np.min(s_over_y),
+            "mean_s_over_y": np.mean(s_over_y),
+            "std_s_over_y": np.std(s_over_y),
+        })
 
     return status
 
