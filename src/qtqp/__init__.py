@@ -438,9 +438,9 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # mu/alpha/sigma describe the IPM step that produced the current iterate;
-    # at iter 0 (init point) there is no prior step, so all three are 0.
-    alpha = sigma = mu = 0.0
+    # alpha/sigma describe the IPM step that produced the current iterate
+    # and are therefore 0 at init.
+    alpha = sigma = 0.0
     q_lin_sys_stats = init_stats
     predictor_lin_sys_stats = {}
     corrector_lin_sys_stats = {}
@@ -450,6 +450,12 @@ class QTQP:
     # already taken (0 = init). When z == m iter 0 terminates (no central path).
     for self.it in range(max_iter + 1):
       x, y, tau, s = self._normalize(x, y, tau, s)
+
+      # mu is a property of the current iterate (measures complementarity);
+      # equality-only problems (z == m) have no complementarity block, and
+      # the loop terminates at iter 0 before taking a step, so mu is defined
+      # as 0 there for logging purposes.
+      mu = (y @ s) / (self.m - self.z) if self.z < self.m else 0.0
 
       stats_i = {
           "q_lin_sys_stats": q_lin_sys_stats,
@@ -467,7 +473,6 @@ class QTQP:
         break
 
       # --- Take an IPM step ---
-      mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
