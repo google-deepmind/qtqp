@@ -315,7 +315,7 @@ class QTQP:
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
-      max_iterative_refinement_steps: int = 50,
+      max_iterative_refinement_steps: int = 10,
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
@@ -394,9 +394,7 @@ class QTQP:
     y[self.z :] = 1.0
     s[self.z :] = 1.0
 
-    # tau is homogeneous embedding variable. Kept as 1-element array for
-    # consistent vector operations (e.g., @ operator).
-    tau = np.array([1.0])
+    tau = 1.0
 
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
@@ -488,6 +486,7 @@ class QTQP:
           mu_target=0.0,
           r_anchor=xy,
           tau_anchor=tau,
+          x=x,
           y=y,
           s=s,
           tau=tau,
@@ -524,6 +523,7 @@ class QTQP:
           mu_target=sigma * mu,
           r_anchor=xy,
           tau_anchor=tau_p,
+          x=x,
           y=y,
           s=s,
           tau=tau,
@@ -550,7 +550,7 @@ class QTQP:
       # Ensure variables stay strictly in the cone to prevent numerical issues.
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
-      tau = np.maximum(tau, 1e-30)
+      tau = max(tau, 1e-30)
 
     # We have terminated for one reason or another.
     self._linear_solver.free()
@@ -664,7 +664,7 @@ class QTQP:
     # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
     # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
     # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff @ tau_aff
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff ** 2
     scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
@@ -676,7 +676,8 @@ class QTQP:
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
-      self, *, p, mu, mu_target, r_anchor, tau_anchor, y, s, tau, correction
+      self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau,
+      correction,
   ):
     """Computes a Newton search direction by solving the augmented KKT system.
 
@@ -686,19 +687,9 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
-    Args:
-      p: The quadratic cost matrix.
-      mu: Current barrier parameter.
-      mu_target: Complementarity target for this step (0 for predictor,
-        sigma*mu for corrector).
-      r_anchor: The current [x; y] iterate (as a single vector), used to
-        form the Newton RHS via r = (mu - mu_target) * r_anchor + ...
-      tau_anchor: The current tau iterate.
-      y: Current dual variables.
-      s: Current slack variables.
-      tau: Current homogeneous variable (used as fallback if tau solve fails).
-      correction: Optional Mehrotra second-order correction added to the
-        complementarity block of the RHS.
+    Uses the exact quadratic tau solve when the KKT solve is accurate, and a
+    linearized fallback (avoids squaring solver noise) when it's noisy or the
+    quadratic residual check fails.
     """
     # Prepare RHS for the linear system.
     r = (mu - mu_target) * r_anchor
@@ -713,23 +704,30 @@ class QTQP:
         warm_start=r_anchor,
     )
 
-    # Solve the 1D quadratic equation for the homogeneous tau component
-    try:
-      r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-    except ValueError as e:
-      # Fallback if quadratic solve fails numerically (rare but possible)
-      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
-      tau_plus = tau
+    # Tau solve: exact quadratic when KKT solve converged, linearized
+    # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
+    tau_plus = None
+    if lin_sys_stats["converged"]:
+      try:
+        r_tau = (mu - mu_target) * tau_anchor
+        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+        lin_sys_stats["tau_method"] = "quadratic"
+      except ValueError:
+        logging.debug("Primary tau solve failed; falling back to linearized.")
 
-    # Reconstruct full (x, y) solution by combining the parametric KKT components:
-    #   [x+; y+] = kinv_r - kinv_q * tau+
-    # Perform this in-place on kinv_r to avoid another large allocation.
+    if tau_plus is None:
+      lin_sys_stats["tau_method"] = "linearized"
+      logging.debug("Using linearized tau fallback.")
+      tau_plus = self._solve_for_tau_linearized_fallback(
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
+      )
+
+    # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
     kinv_r -= self.kinv_q * tau_plus
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -739,17 +737,16 @@ class QTQP:
         t_a * tau+^2 + t_b * tau+ + t_c = 0
 
     The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
-    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
-    the positive root since tau >= 0 is required for the embedding to represent
-    a feasible point (tau=0 corresponds to a certificate of infeasibility or
-    unboundedness, which is handled separately at termination).
+    and kinv_q with q and P. For LPs (P=0) the P terms drop out. The
+    coefficients are clamped to enforce structural signs (t_a > 0, t_c <= 0),
+    and Muller's stable quadratic formula avoids catastrophic cancellation.
     """
-    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
+    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0
     t_a = mu + kinv_q @ q
-    t_b = -r_tau[0] - kinv_r @ q
+    t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
       # Memory access for the sparse matrix P is the bottleneck here.
@@ -759,22 +756,67 @@ class QTQP:
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
       t_c -= kinv_r[:n] @ p_kinv_r
-    logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Standard quadratic formula for the positive root
-    if abs(t_a) < _EPS:
-      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
+    # Enforce structural signs
+    t_a = max(t_a, mu)
+    t_c = min(t_c, -mu_target)
 
     discriminant = t_b**2 - 4 * t_a * t_c
-    if discriminant < -1e-9:
-      raise ValueError(f"Negative discriminant: {discriminant}")
+    if discriminant < 0.0:
+      discriminant = 0.0
 
-    tau_sol = (-t_b + math.sqrt(max(0.0, discriminant))) / (2 * t_a)
+    # Stable Quadratic Formula (Muller)
+    if t_b > 0:
+      q_muller = -0.5 * (t_b + math.sqrt(discriminant))
+      tau_sol = t_c / q_muller
+    else:
+      q_muller = -0.5 * (t_b - math.sqrt(discriminant))
+      tau_sol = q_muller / t_a
 
-    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
-      raise ValueError(f"Invalid tau solution found: {tau_sol}")
+    if not np.isfinite(tau_sol) or tau_sol < 0.0:
+      raise ValueError(f"Invalid tau solution: {tau_sol}")
 
-    return np.array([max(0.0, tau_sol)])
+    return tau_sol
+
+  def _solve_for_tau_linearized_fallback(
+      self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
+  ) -> float:
+    """Linearized fallback for tau via first-order Taylor expansion of G(z,tau).
+
+    Replaces the exact quadratic with a linearization around z_curr = [x; y]
+    and tau_curr. P only multiplies the safe current iterate x, so KKT noise
+    enters linearly rather than quadratically. A [0.1x, 10x] trust region
+    prevents manifold drift from the first-order approximation.
+    """
+    n = self.n
+    q, kinv_q = self.q, self.kinv_q
+
+    px = p @ x if p.nnz > 0 else np.zeros(n)
+
+    # Scalar inner products; avoids allocating z_curr = [x; y] or r_z.
+    q_z = q[:n] @ x + q[n:] @ y
+    x_px = x @ px
+    q_kinv_q = q @ kinv_q
+    px_kinv_q = px @ kinv_q[:n]
+    # r_z = kinv_r - tau_curr * kinv_q - z_curr, collapsed into scalar dots.
+    q_rz = q @ kinv_r - tau_curr * q_kinv_q - q_z
+    px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
+
+    # Base residual G(z_curr, tau_curr).
+    g = (mu * tau_curr**2 + (mu_target - mu) * tau_anchor * tau_curr
+         - tau_curr * q_z - mu_target - x_px)
+
+    # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
+    num = g - tau_curr * q_rz - 2.0 * px_rz
+    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
+           + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
+
+    tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
+
+    if not np.isfinite(tau_sol):
+      logging.warning("Linearized tau fallback non-finite; using current tau.")
+      return tau_curr
+    return min(max(tau_sol, 0.1 * tau_curr), 10.0 * tau_curr)
 
   def _normalize(self, x, y, tau, s):
     """Normalizes iterates to match the homogeneous embedding central path norm.
@@ -791,7 +833,7 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = math.sqrt(x @ x + y @ y + tau[0] ** 2)
+    xyt_norm = math.sqrt(x @ x + y @ y + tau ** 2)
     scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     x *= scale
     y *= scale
@@ -805,12 +847,12 @@ class QTQP:
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
-  def _check_termination(self, x, y, tau_arr, s, alpha, mu, sigma, stats_i, collect_stats):
+  def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
-    inv_tau = 1.0 / max(tau_arr[0], _EPS)
+    inv_tau = 1.0 / max(tau, _EPS)
 
     # Precompute commonly used matrix-vector products
     ax = self.a @ x
@@ -900,7 +942,7 @@ class QTQP:
         "mu": mu,
         "sigma": sigma,
         "alpha": alpha,
-        "tau": tau_arr[0],
+        "tau": tau,
         "norm_x": norm_x,
         "norm_y": norm_y,
         "status": status,
