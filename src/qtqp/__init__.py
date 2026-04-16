@@ -272,37 +272,22 @@ class QTQP:
     self.b = self.b[keep].copy()
     self.m = int(keep.sum())
 
-  def _postsolve_primal(self, x, y, s):
-    """Restore dropped rows for primal iterates or solved outputs."""
-    if self._presolve_state is None:
-      return y, s
-    keep = self._presolve_state.keep
-    y_full = np.zeros(self._presolve_state.m_full, dtype=y.dtype)
-    s_full = np.zeros(self._presolve_state.m_full, dtype=s.dtype)
-    y_full[keep] = y
-    s_full[keep] = s
-    s_full[~keep] = (
-        self._presolve_state.b_full[~keep] - self._presolve_state.a_dropped @ x
-    )
-    return y_full, s_full
+  def _postsolve(self, y, s, x=None, y_fill=0.0, s_fill=np.nan):
+    """Restore full-sized (y, s) after presolve dropped rows.
 
-  def _postsolve_infeasible(self, y, s):
-    """Restore dropped rows for a primal infeasibility certificate."""
+    Kept entries are copied from (y, s). Dropped entries default to y_fill
+    and s_fill. If x is provided, dropped s entries are overridden with the
+    true slack b - a_dropped @ x.
+    """
     if self._presolve_state is None:
       return y, s
-    keep = self._presolve_state.keep
-    y_full = np.zeros(self._presolve_state.m_full, dtype=y.dtype)
-    s_full = np.full(self._presolve_state.m_full, np.nan, dtype=s.dtype)
-    y_full[keep] = y
-    return y_full, s_full
-
-  def _postsolve_unbounded(self, y, s):
-    """Restore dropped rows for a dual infeasibility certificate."""
-    if self._presolve_state is None:
-      return y, s
-    y_full = np.full(self._presolve_state.m_full, np.nan, dtype=y.dtype)
-    s_full = np.full(self._presolve_state.m_full, np.nan, dtype=s.dtype)
-    s_full[self._presolve_state.keep] = s
+    ps = self._presolve_state
+    y_full = np.full(ps.m_full, y_fill, dtype=y.dtype)
+    s_full = np.full(ps.m_full, s_fill, dtype=s.dtype)
+    y_full[ps.keep] = y
+    s_full[ps.keep] = s
+    if x is not None:
+      s_full[~ps.keep] = ps.b_full[~ps.keep] - ps.a_dropped @ x
     return y_full, s_full
 
   def _init_variables(self, x, y, s, a, b):
@@ -338,7 +323,7 @@ class QTQP:
     dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
     ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
     dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
-    y, s = self._postsolve_primal(x, y, s)
+    y, s = self._postsolve(y, s, x)
     if not np.all(np.isfinite(x)) or pres > ptol or dres > dtol:
       self._log_footer("Failed: equality-only KKT solve")
       return Solution(x, y, s, [], SolutionStatus.FAILED)
@@ -591,26 +576,26 @@ class QTQP:
       case SolutionStatus.SOLVED:
         self._log_footer("Solved")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve_primal(x, y, s)
+        y, s = self._postsolve(y, s, x)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
         x.fill(np.nan)
         s.fill(np.nan)
         y_scaled = y / abs(self.b @ y)
-        y_scaled, s = self._postsolve_infeasible(y_scaled, s)
+        y_scaled, s = self._postsolve(y_scaled, s)
         return Solution(x, y_scaled, s, stats, status)
       case SolutionStatus.UNBOUNDED:
         self._log_footer("Dual infeasible / primal unbounded")
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
         x, s = x / abs_ctx, s / abs_ctx
-        y, s = self._postsolve_unbounded(y, s)
+        y, s = self._postsolve(y, s, y_fill=np.nan)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge in {max_iter} iterations")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve_primal(x, y, s)
+        y, s = self._postsolve(y, s, x)
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
