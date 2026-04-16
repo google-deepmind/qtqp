@@ -1959,8 +1959,19 @@ def test_min_static_regularization(reg):
   m, n, z = 30, 20, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
+  # reg=1e-4 is an aggressive regularization: the factored KKT diagonal is
+  # shifted far above the true diagonal in late iterations (mu << reg), so
+  # iterative refinement must cancel an O(reg) correction via diag_correction.
+  # On backends whose single-solve residual does not drop all the way to
+  # atol/rtol=1e-12 in a handful of steps (e.g. Accelerate with
+  # multi-threaded BLAS on macOS CI), the default 10 refinement steps plateau
+  # above the convergence tolerance, pushing the tau solve onto the
+  # linearized fallback and occasionally failing. Give IR the headroom the
+  # regularization level demands.
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      min_static_regularization=reg, verbose=True
+      min_static_regularization=reg,
+      max_iterative_refinement_steps=50,
+      verbose=True,
   )
 
   assert solution.status == qtqp.SolutionStatus.SOLVED
