@@ -531,16 +531,18 @@ def test_equality_only_lp(seed):
   assert solution.stats == []
 
 
-def test_equality_only_singular():
-  """Test that a singular equality-only KKT system returns FAILED."""
+def test_equality_only_inconsistent():
+  """Inconsistent equality constraints are detected as primal infeasible."""
   n, m, z = 5, 3, 3
-  # All rows identical -> singular A.
+  # All rows of A are identical -> Ax = b can only be satisfied if all b_i
+  # are equal. Since they are not, the problem is primal infeasible and the
+  # termination check returns a Farkas certificate via b'y < 0.
   a = sparse.csc_matrix(np.ones((m, n)))
-  b = np.array([1.0, 2.0, 3.0])  # Inconsistent for identical rows.
+  b = np.array([1.0, 2.0, 3.0])
   c = np.ones(n)
   p = sparse.csc_matrix((n, n))
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
-  assert solution.status == qtqp.SolutionStatus.FAILED
+  assert solution.status == qtqp.SolutionStatus.INFEASIBLE
 
 
 def test_presolve_drops_all_inequalities():
@@ -658,16 +660,20 @@ def test_equality_only_recovers_known_solution():
 
 
 def test_equality_only_verbose(capsys):
-  """Test that equality-only path prints header and footer."""
+  """Test that equality-only path prints header and footer and terminates at iter 0."""
   rng = np.random.default_rng(8842)
   m, n, z = 5, 10, 5
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=True, collect_stats=True
+  )
   assert solution.status == qtqp.SolutionStatus.SOLVED
+  # Init KKT solve is exact, so iter 0 terminates immediately.
+  assert len(solution.stats) == 1
   captured = capsys.readouterr().out
   assert 'QTQP v' in captured
   assert 'z=5' in captured
-  assert 'equality-only' in captured
+  assert 'Solved' in captured
 
 
 def test_equality_only_sparse_p():
@@ -1788,8 +1794,11 @@ def test_stats_monotonicity():
   times = [s['time'] for s in solution.stats]
   alphas = [s['alpha'] for s in solution.stats]
 
-  # mu should be strictly decreasing for a well-conditioned solved problem.
-  for i in range(1, len(mus)):
+  # At iter 0 no step has been taken, so mu is reported as 0. From iter 1
+  # onward mu is the complementarity that was used to compute the step
+  # which produced the current iterate, and it should be strictly decreasing.
+  assert mus[0] == 0.0
+  for i in range(2, len(mus)):
     assert mus[i] < mus[i - 1], (
         f"mu not decreasing: mu[{i}]={mus[i]} >= mu[{i-1}]={mus[i-1]}"
     )

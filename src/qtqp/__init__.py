@@ -294,8 +294,9 @@ class QTQP:
     """KKT-based initialization of (x, y, s), modified in-place.
 
     Solves [P, A'; A, -diag(h)] @ [x; y] = [-c; b] with mu=0, where
-    h = [0]*z ++ [s/y]*{m-z}. When z == m the solution is exact.
-    Otherwise inequality (y, s) are shifted into the strict interior.
+    h = [0]*z ++ [s/y]*{m-z}. When z == m the solution is exact and the
+    first termination check will recognize it as SOLVED. Otherwise
+    inequality (y, s) are shifted into the strict interior.
 
     Returns the linear-solver stats from the KKT solve (used to annotate
     the iter-0 log row).
@@ -317,34 +318,6 @@ class QTQP:
     if alpha_d >= -1.0:
       y[self.z :] += 1.0 + alpha_d
     return init_stats
-
-  def _solve_equality_only(
-      self, x, y, s, tau, init_stats, collect_stats
-  ) -> Solution:
-    """Evaluate and return the KKT solution for an equality-only QP."""
-    self._log_header()
-    self.it = 0
-    stats_i = {
-        "q_lin_sys_stats": init_stats,
-        "predictor_lin_sys_stats": {},
-        "corrector_lin_sys_stats": {},
-    }
-    status = self._check_termination(
-        x, y, tau, s,
-        alpha=0.0, mu=0.0, sigma=0.0,
-        stats_i=stats_i, collect_stats=collect_stats,
-    )
-    self._log_iteration(stats_i)
-    stats = [stats_i] if collect_stats else []
-    self._linear_solver.free()
-    if self.equilibrate:
-      x, y, s = self._unequilibrate_iterates(x, y, s)
-    y, s = self._postsolve(y, s, x)
-    if status == SolutionStatus.SOLVED:
-      self._log_footer("Solved (equality-only, direct)")
-      return Solution(x, y, s, stats, SolutionStatus.SOLVED)
-    self._log_footer("Failed: equality-only KKT solve")
-    return Solution(x, y, s, stats, SolutionStatus.FAILED)
 
   def solve(
       self,
@@ -471,8 +444,6 @@ class QTQP:
     )
 
     init_stats = self._init_variables(x, y, s, a, b)
-    if self.z == self.m:
-      return self._solve_equality_only(x, y, s, tau, init_stats, collect_stats)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
@@ -483,10 +454,12 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # Iter-0 log row reflects the initialized point before any IPM step.
-    # alpha/sigma don't apply yet; mu is the complementarity at init.
+    # Iter-0 row reflects the initialized point before any IPM step has been
+    # taken. mu/alpha/sigma describe "the step that produced the current
+    # iterate"; at iter 0 there is none, so they are 0.
     alpha = 0.0
     sigma = 0.0
+    mu = 0.0
     q_lin_sys_stats = init_stats
     predictor_lin_sys_stats = {}
     corrector_lin_sys_stats = {}
@@ -494,9 +467,9 @@ class QTQP:
     # --- Main Iteration Loop ---
     # Each pass: evaluate current iterate, log, maybe terminate, then step.
     # self.it counts IPM steps taken before this evaluation (0 = init).
+    # When z == m the init solve is exact and iter 0 terminates as SOLVED.
     for self.it in range(max_iter + 1):
       x, y, tau, s = self._normalize(x, y, tau, s)
-      mu = (y @ s) / (self.m - self.z)
 
       stats_i = {
           "q_lin_sys_stats": q_lin_sys_stats,
@@ -509,10 +482,17 @@ class QTQP:
       self._log_iteration(stats_i)
       if collect_stats:
         stats.append(stats_i)
-      if status != SolutionStatus.UNFINISHED or self.it == max_iter:
+      # When z == m there are no inequalities, no central path, and no
+      # step to take — the init KKT solve is exact or there is no remedy.
+      if (
+          status != SolutionStatus.UNFINISHED
+          or self.it == max_iter
+          or self.z == self.m
+      ):
         break
 
       # --- Take an IPM step ---
+      mu = (y @ s) / (self.m - self.z)
       self._linear_solver.update(mu=mu, s=s, y=y)
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
@@ -953,18 +933,19 @@ class QTQP:
     })
 
     if collect_stats:
-      sy = s * y
-      s_over_y = s / np.maximum(_EPS, y)
+      sy = s[self.z :] * y[self.z :]
+      s_over_y = s[self.z :] / np.maximum(_EPS, y[self.z :])
+      # When z == m (no inequalities) these slice stats are undefined.
       stats_i.update({
           "complementarity": np.abs((y @ s) * inv_tau * inv_tau),
           "norm_s": _norm(s, np.inf),
-          "max_sy": np.max(sy[self.z :]),
-          "min_sy": np.min(sy[self.z :]),
-          "std_sy": np.std(sy[self.z :]),
-          "max_s_over_y": np.max(s_over_y[self.z :]),
-          "min_s_over_y": np.min(s_over_y[self.z :]),
-          "mean_s_over_y": np.mean(s_over_y[self.z :]),
-          "std_s_over_y": np.std(s_over_y[self.z :]),
+          "max_sy": np.max(sy) if sy.size else np.nan,
+          "min_sy": np.min(sy) if sy.size else np.nan,
+          "std_sy": np.std(sy) if sy.size else np.nan,
+          "max_s_over_y": np.max(s_over_y) if s_over_y.size else np.nan,
+          "min_s_over_y": np.min(s_over_y) if s_over_y.size else np.nan,
+          "mean_s_over_y": np.mean(s_over_y) if s_over_y.size else np.nan,
+          "std_s_over_y": np.std(s_over_y) if s_over_y.size else np.nan,
       })
 
     return status
