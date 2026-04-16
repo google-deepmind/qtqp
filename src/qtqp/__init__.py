@@ -719,8 +719,7 @@ class QTQP:
       lin_sys_stats["tau_method"] = "linearized"
       logging.debug("Using linearized tau fallback.")
       tau_plus = self._solve_for_tau_linearized_fallback(
-          p, kinv_r, self.kinv_q, mu, mu_target,
-          np.concatenate([x, y]), tau, tau_anchor,
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
       )
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
@@ -780,41 +779,44 @@ class QTQP:
     return tau_sol
 
   def _solve_for_tau_linearized_fallback(
-      self, p, kinv_r, kinv_q, mu, mu_target, z_curr, tau_curr, tau_anchor,
-      *, clamp_to_current_tau_range=True,
+      self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
   ) -> float:
     """Linearized fallback for tau via first-order Taylor expansion of G(z,tau).
 
-    Replaces the exact quadratic with a linearization around (z_curr, tau_curr).
-    P only multiplies the safe current iterate x_curr, so KKT noise enters
-    linearly rather than quadratically. A [0.1x, 10x] trust region prevents
-    manifold drift from the first-order approximation.
+    Replaces the exact quadratic with a linearization around z_curr = [x; y]
+    and tau_curr. P only multiplies the safe current iterate x, so KKT noise
+    enters linearly rather than quadratically. A [0.1x, 10x] trust region
+    prevents manifold drift from the first-order approximation.
     """
     n = self.n
-    q = self.q
-    r_z = kinv_r - tau_curr * kinv_q - z_curr
-    px = p @ z_curr[:n] if p.nnz > 0 else np.zeros(n)
+    q, kinv_q = self.q, self.kinv_q
+
+    px = p @ x if p.nnz > 0 else np.zeros(n)
+
+    # Scalar inner products; avoids allocating z_curr = [x; y] or r_z.
+    q_z = q[:n] @ x + q[n:] @ y
+    x_px = x @ px
+    q_kinv_q = q @ kinv_q
+    px_kinv_q = px @ kinv_q[:n]
+    # r_z = kinv_r - tau_curr * kinv_q - z_curr, collapsed into scalar dots.
+    q_rz = q @ kinv_r - tau_curr * q_kinv_q - q_z
+    px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    q_z = q @ z_curr
     g = (mu * tau_curr**2 + (mu_target - mu) * tau_anchor * tau_curr
-         - tau_curr * q_z - mu_target - z_curr[:n] @ px)
+         - tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
-    num = g - tau_curr * (q @ r_z) - 2.0 * (px @ r_z[:n])
+    num = g - tau_curr * q_rz - 2.0 * px_rz
     den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
-           + tau_curr * (q @ kinv_q) + 2.0 * (px @ kinv_q[:n]))
+           + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
 
     if not np.isfinite(tau_sol):
       logging.warning("Linearized tau fallback non-finite; using current tau.")
-      tau_sol = tau_curr
-    elif clamp_to_current_tau_range:
-      tau_sol = max(tau_sol, 0.1 * tau_curr)
-      tau_sol = min(tau_sol, 10.0 * tau_curr)
-
-    return tau_sol
+      return tau_curr
+    return min(max(tau_sol, 0.1 * tau_curr), 10.0 * tau_curr)
 
   def _normalize(self, x, y, tau, s):
     """Normalizes iterates to match the homogeneous embedding central path norm.

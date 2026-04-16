@@ -16,6 +16,7 @@
 """Tests for QTQP solver."""
 
 import sys
+import types
 import numpy as np
 import pytest
 import qtqp
@@ -1074,26 +1075,21 @@ def test_linearized_tau_converges_to_exact(seed):
   # Start from a perturbed tau (within the trust region).
   tau_k = 0.9 * tau_exact
 
-  # Create a minimal QTQP solver object to hold q.
+  # Create a minimal QTQP solver object to hold q and kinv_q.
   a = sparse.random(m, n, density=0.05, random_state=rng, format='csc')
   b_vec = rng.standard_normal(m)
   c_vec = rng.standard_normal(n)
   solver = qtqp.QTQP(a=a, b=b_vec, c=c_vec, z=0, p=p)
   solver.q = q
+  solver.kinv_q = kinv_q
 
   # Iterate: update z to lie on the search line, then apply linearized step.
+  # Newton on a quadratic starting at 0.9*tau_exact converges monotonically
+  # toward tau_exact, so iterates stay within the [0.1x, 10x] trust region.
   for _ in range(15):
     z_k = kinv_r - tau_k * kinv_q
     tau_new = solver._solve_for_tau_linearized_fallback(  # pylint: disable=protected-access
-        p,
-        kinv_r,
-        kinv_q,
-        mu,
-        mu_target,
-        z_k,
-        tau_k,
-        tau_anchor,
-        clamp_to_current_tau_range=False,
+        p, kinv_r, mu, mu_target, z_k[:n], z_k[n:], tau_k, tau_anchor,
     )
     tau_k = tau_new
 
@@ -1108,15 +1104,16 @@ def test_linearized_tau_nonfinite_update_uses_current_tau():
   p = sparse.csc_matrix(np.array([[1e150, 0.0], [0.0, -1e150]]))
   solver = qtqp.QTQP(a=a, b=b, c=c, z=0, p=p)
   solver.q = np.array([1e45, 1e-47, 1e-82, 1e-21])
+  solver.kinv_q = np.array([-1e79, -1e-73, -1e-68, -1e-78])
 
   tau_curr = 1e-113
   tau_new = solver._solve_for_tau_linearized_fallback(  # pylint: disable=protected-access
       p=p,
       kinv_r=np.array([1e112, 1e140, -1e-108, 1e19]),
-      kinv_q=np.array([-1e79, -1e-73, -1e-68, -1e-78]),
       mu=1e-113,
       mu_target=0.0,
-      z_curr=np.array([-1e-87, 1e117, 1e-85, 1e-83]),
+      x=np.array([-1e-87, 1e117]),
+      y=np.array([1e-85, 1e-83]),
       tau_curr=tau_curr,
       tau_anchor=1e84,
   )
@@ -1126,7 +1123,6 @@ def test_linearized_tau_nonfinite_update_uses_current_tau():
 
 def _make_tau_gating_solver(converged):
   """Create a QTQP solver with fake KKT solve returning given converged flag."""
-  import types
   solver = qtqp.QTQP(
       a=sparse.csc_matrix(np.eye(2)),
       b=np.ones(2),
@@ -1207,7 +1203,6 @@ def test_linearized_tau_always_converges(seed, problem_type):
   shipped trust-region and non-finite guards instead of a test-only
   reimplementation.
   """
-  import types
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   if problem_type == 'feasible':
