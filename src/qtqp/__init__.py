@@ -272,23 +272,34 @@ class QTQP:
     self.b = self.b[keep].copy()
     self.m = int(keep.sum())
 
-  def _postsolve(self, y, s, x=None, y_fill=0.0, s_fill=np.nan):
+  def _postsolve(self, y, s, y_dropped=0.0, s_dropped=np.nan):
     """Restore full-sized (y, s) after presolve dropped rows.
 
-    Kept entries are copied from (y, s). Dropped entries default to y_fill
-    and s_fill. If x is provided, dropped s entries are overridden with the
-    true slack b - a_dropped @ x.
+    Kept entries are copied from (y, s); dropped entries take the values
+    passed in y_dropped and s_dropped, each of which may be a scalar or
+    an array of length (m_full - m_kept).
     """
     if self._presolve_state is None:
       return y, s
     ps = self._presolve_state
-    y_full = np.full(ps.m_full, y_fill, dtype=y.dtype)
-    s_full = np.full(ps.m_full, s_fill, dtype=s.dtype)
+    y_full = np.empty(ps.m_full, dtype=y.dtype)
+    s_full = np.empty(ps.m_full, dtype=s.dtype)
     y_full[ps.keep] = y
+    y_full[~ps.keep] = y_dropped
     s_full[ps.keep] = s
-    if x is not None:
-      s_full[~ps.keep] = ps.b_full[~ps.keep] - ps.a_dropped @ x
+    s_full[~ps.keep] = s_dropped
     return y_full, s_full
+
+  def _dropped_slack(self, x):
+    """True slack b_i - a_i @ x for rows dropped by presolve.
+
+    Returns 0.0 (harmless scalar) if nothing was dropped — the caller
+    can pass the result to `_postsolve` unconditionally.
+    """
+    ps = self._presolve_state
+    if ps is None:
+      return 0.0
+    return ps.b_full[~ps.keep] - ps.a_dropped @ x
 
   def _init_variables(self, x, y, s, a, b):
     """KKT-based initialization of (x, y, s), modified in-place.
@@ -583,7 +594,7 @@ class QTQP:
       case SolutionStatus.SOLVED:
         self._log_footer("Solved")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve(y, s, x)
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
@@ -597,12 +608,12 @@ class QTQP:
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
         x, s = x / abs_ctx, s / abs_ctx
-        y, s = self._postsolve(y, s, y_fill=np.nan)
+        y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge in {max_iter} iterations")
         x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve(y, s, x)
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
