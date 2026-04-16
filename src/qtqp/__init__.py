@@ -306,7 +306,7 @@ class QTQP:
     return y_full, s_full
 
   def _init_variables(self, x, y, s, a, b):
-    """KKT-based initialization; returns Solution if z == m, else None.
+    """KKT-based initialization of (x, y, s), modified in-place.
 
     Solves [P, A'; A, -diag(h)] @ [x; y] = [-c; b] with mu=0, where
     h = [0]*z ++ [s/y]*{m-z}. When z == m the solution is exact.
@@ -320,30 +320,30 @@ class QTQP:
     y[:] = sol[self.n :]
     s[:] = b - a @ x
     s[: self.z] = 0.0
-
-    if self.z == self.m:
-      self._linear_solver.free()
-      if self.equilibrate:
-        x, y, s = self._unequilibrate_iterates(x, y, s)
-      pres = _norm(self.a @ x + s - self.b, np.inf)
-      dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
-      ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
-      dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
-      y, s = self._postsolve_primal(x, y, s)
-      if not np.all(np.isfinite(sol)) or pres > ptol or dres > dtol:
-        self._log_footer("Failed: equality-only KKT solve")
-        return Solution(x, y, s, [], SolutionStatus.FAILED)
-      self._log_footer("Solved (equality-only, direct)")
-      return Solution(x, y, s, [], SolutionStatus.SOLVED)
-
     # Shift inequality components into the strict interior of the cone.
-    alpha_p = -np.min(s[self.z :])
-    alpha_d = -np.min(y[self.z :])
+    # No-op when z == m (no inequality indices).
+    alpha_p = -np.min(s[self.z :], initial=np.inf)
+    alpha_d = -np.min(y[self.z :], initial=np.inf)
     if alpha_p >= -1.0:
       s[self.z :] += 1.0 + alpha_p
     if alpha_d >= -1.0:
       y[self.z :] += 1.0 + alpha_d
-    return None
+
+  def _solve_equality_only(self, x, y, s) -> Solution:
+    """Validate and return the KKT solution for an equality-only QP."""
+    self._linear_solver.free()
+    if self.equilibrate:
+      x, y, s = self._unequilibrate_iterates(x, y, s)
+    pres = _norm(self.a @ x + s - self.b, np.inf)
+    dres = _norm(self.p @ x + self.a.T @ y + self.c, np.inf)
+    ptol = self.atol + self.rtol * max(self._norm_b, 1.0)
+    dtol = self.atol + self.rtol * max(self._norm_c, 1.0)
+    y, s = self._postsolve_primal(x, y, s)
+    if not np.all(np.isfinite(x)) or pres > ptol or dres > dtol:
+      self._log_footer("Failed: equality-only KKT solve")
+      return Solution(x, y, s, [], SolutionStatus.FAILED)
+    self._log_footer("Solved (equality-only, direct)")
+    return Solution(x, y, s, [], SolutionStatus.SOLVED)
 
   def solve(
       self,
@@ -469,9 +469,9 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    init_result = self._init_variables(x, y, s, a, b)
-    if init_result is not None:
-      return init_result
+    self._init_variables(x, y, s, a, b)
+    if self.z == self.m:
+      return self._solve_equality_only(x, y, s)
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
