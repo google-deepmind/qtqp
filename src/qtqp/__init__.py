@@ -220,6 +220,12 @@ class QTQP:
       )
 
     self._presolve()
+    if self.z == self.m:
+      raise ValueError(
+          "Equality-only problems are not currently supported "
+          "(effective z == m after presolve; some rows may have been dropped "
+          "during presolve)."
+      )
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
@@ -403,7 +409,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, q_lin_sys_stats = self._init_variables()
+    x, y, s, tau, _ = self._init_variables()
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -411,38 +417,16 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # alpha/sigma describe the IPM step that produced the current iterate
-    # and are therefore 0 at init.
     alpha = sigma = 0.0
-    predictor_lin_sys_stats = {}
-    corrector_lin_sys_stats = {}
 
     # --- Main Iteration Loop ---
-    # Evaluate iterate, log/terminate, then take a step. self.it counts steps
-    # already taken (0 = init). When z == m iter 0 terminates (no central path).
-    for self.it in range(max_iter + 1):
+    # self.it counts IPM steps already taken.
+    for self.it in range(max_iter):
+      stats_i = {}
       x, y, tau, s = self._normalize(x, y, tau, s)
 
-      # mu is a property of the current iterate (measures complementarity);
-      # equality-only problems (z == m) have no complementarity block, and
-      # the loop terminates at iter 0 before taking a step, so mu is defined
-      # as 0 there for logging purposes.
-      mu = (y @ s) / (self.m - self.z) if self.z < self.m else 0.0
-
-      stats_i = {
-          "q_lin_sys_stats": q_lin_sys_stats,
-          "predictor_lin_sys_stats": predictor_lin_sys_stats,
-          "corrector_lin_sys_stats": corrector_lin_sys_stats,
-      }
-      status = self._check_termination(
-          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
-      )
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if (status != SolutionStatus.UNFINISHED
-          or self.it == max_iter or self.z == self.m):
-        break
+      # mu is a property of the current iterate (measures complementarity).
+      mu = (y @ s) / (self.m - self.z)
 
       # --- Take an IPM step ---
       self._linear_solver.update(mu=mu, s=s, y=y)
@@ -452,6 +436,7 @@ class QTQP:
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
+      stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -469,6 +454,7 @@ class QTQP:
           tau=tau,
           correction=None,
       )
+      stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -506,6 +492,7 @@ class QTQP:
           tau=tau,
           correction=correction,
       )
+      stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
@@ -528,6 +515,15 @@ class QTQP:
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = max(tau, 1e-30)
+
+      status = self._check_termination(
+          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+      )
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
+      if status != SolutionStatus.UNFINISHED:
+        break
 
     # We have terminated for one reason or another.
     self._linear_solver.free()
