@@ -222,7 +222,9 @@ class QTQP:
     self._presolve()
     if self.z == self.m:
       raise ValueError(
-          "effective z == m after presolve; some rows may have been dropped"
+          "Equality-only problems are not currently supported "
+          "(effective z == m after presolve; some rows may have been dropped "
+          "during presolve)."
       )
 
     if p is None:
@@ -423,6 +425,7 @@ class QTQP:
       stats_i = {}
       x, y, tau, s = self._normalize(x, y, tau, s)
 
+      # mu is a property of the current iterate (measures complementarity).
       mu = (y @ s) / (self.m - self.z)
 
       # --- Take an IPM step ---
@@ -474,9 +477,9 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
-      xy[: self.n] = x_p
-      xy[self.n :] = y_p
+      correction = -d_s[self.z:] * d_y_p[self.z:] / y[self.z:]
+      xy[:self.n] = x_p
+      xy[self.n:] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
@@ -689,8 +692,7 @@ class QTQP:
       lin_sys_stats["tau_method"] = "linearized"
       logging.debug("Using linearized tau fallback.")
       tau_plus = self._solve_for_tau_linearized_fallback(
-          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
-      )
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor)
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
     kinv_r -= self.kinv_q * tau_plus
@@ -736,7 +738,6 @@ class QTQP:
     discriminant = t_b * t_b - 4 * t_a * t_c
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
-    discriminant = max(0.0, discriminant)
 
     # Stable Quadratic Formula (Muller)
     if t_b > 0:
@@ -816,12 +817,12 @@ class QTQP:
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
-    alpha_s = self._max_step_size(s[self.z :], d_s[self.z :])
-    alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
+    alpha_s = self._max_step_size(s[self.z:], d_s[self.z:])
+    alpha_y = self._max_step_size(y[self.z:], d_y[self.z:])
     return min(alpha_s, alpha_y)
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
-    """Check termination criteria and compute iteration statistics."""
+    """Check Clarabel-style termination criteria and compute iteration statistics."""
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -843,58 +844,47 @@ class QTQP:
     pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
     dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
 
-    # Residuals
-    pres = _norm((ax + s) * inv_tau - self.b, np.inf)
-    dres = _norm((px + aty) * inv_tau + self.c, np.inf)
-    gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
+    # Clarabel checks residuals on normalized iterates x/tau, y/tau, s/tau using
+    # 2-norm residuals and inf-norm data scales. This produces dimensionless
+    # residuals that can be compared directly against rtol.
+    norm_x = _norm(x)
+    norm_y = _norm(y)
+    norm_s = _norm(s)
+    norm_x_bar = norm_x * inv_tau
+    norm_y_bar = norm_y * inv_tau
+    norm_s_bar = norm_s * inv_tau
 
-    # Infeasibility certificates (Farkas-type, from the embedding structure).
-    # If the primal is unbounded (dual infeasible) this produces a ray x with
-    # c'x < 0 that satisfies the homogeneous primal conditions Ax + s ≈ 0 and Px
-    # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
-    norm_aty = _norm(aty, np.inf)
-    norm_px = _norm(px, np.inf)
-    dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
-    dinfeas_p = norm_px / (abs(ctx) + _EPS)
+    rp = (ax + s) * inv_tau - self.b
+    rd = (px + aty) * inv_tau + self.c
+    prelrhs = max(1.0, self._norm_b + norm_x_bar + norm_s_bar)
+    drelrhs = max(1.0, self._norm_c + norm_x_bar + norm_y_bar)
+    pres = _norm(rp) / prelrhs
+    dres = _norm(rd) / drelrhs
+
+    gap_abs = abs(pcost - dcost)
+    gap_rel = gap_abs / max(1.0, min(abs(pcost), abs(dcost)))
+    gap = min(gap_abs, gap_rel)
+
+    # Clarabel checks infeasibility certificates on the unnormalized homogeneous
+    # iterates because infeasible rays emerge as tau -> 0.
+    pinfeas = _norm(aty) / max(1.0, norm_y)
+    dinfeas_p = _norm(px) / max(1.0, norm_x)
+    dinfeas_a = _norm(ax + s) / max(1.0, norm_x + norm_s)
     dinfeas = max(dinfeas_a, dinfeas_p)
-    # If the primal is infeasible (dual unbounded) this produces a ray y
-    # with b'y < 0 that satisfies the homogeneous dual condition A'y ≈ 0.
-    # pinfeas measures how well y/|b'y| certifies primal infeasibility.
-    pinfeas = norm_aty / (abs(bty) + _EPS)
 
-    # Primal residual tolerance relative scale.
-    prelrhs = max(
-        _norm(ax, np.inf) * inv_tau,
-        _norm(s, np.inf) * inv_tau,
-        self._norm_b,
-    )
-
-    # Dual residual tolerance relative scale.
-    drelrhs = max(
-        norm_px * inv_tau,
-        norm_aty * inv_tau,
-        self._norm_c,
-    )
-
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
-
-    # Solved: duality gap and both residuals are within tolerance.
+    # Solved: both normalized residuals meet the feasibility tolerance and the
+    # gap meets either the absolute or relative threshold.
     if (
-        gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
-        and pres < self.atol + self.rtol * prelrhs
-        and dres < self.atol + self.rtol * drelrhs
+        ((gap_abs < self.atol) or (gap_rel < self.rtol))
+        and pres < self.rtol
+        and dres < self.rtol
     ):
       status = SolutionStatus.SOLVED
     # Unbounded: x is a dual infeasibility certificate (primal unbounded ray).
-    elif ctx < -_EPS and (
-        dinfeas < self.atol_infeas + self.rtol_infeas * norm_x / abs(ctx)
-    ):
+    elif ctx < -self.atol_infeas and dinfeas < -self.rtol_infeas * ctx:
       status = SolutionStatus.UNBOUNDED
     # Infeasible: y is a primal infeasibility certificate (dual unbounded ray).
-    elif bty < -_EPS and (
-        pinfeas < self.atol_infeas + self.rtol_infeas * norm_y / abs(bty)
-    ):
+    elif bty < -self.atol_infeas and pinfeas < -self.rtol_infeas * bty:
       status = SolutionStatus.INFEASIBLE
     else:
       status = SolutionStatus.UNFINISHED
@@ -908,6 +898,8 @@ class QTQP:
         "pres": pres,
         "dres": dres,
         "gap": gap,
+        "gap_abs": gap_abs,
+        "gap_rel": gap_rel,
         "pinfeas": pinfeas,
         "dinfeas": dinfeas,
         "dinfeas_a": dinfeas_a,
@@ -926,7 +918,7 @@ class QTQP:
 
     if collect_stats:
       stats_i["complementarity"] = abs((y @ s) * inv_tau * inv_tau)
-      stats_i["norm_s"] = _norm(s, np.inf)
+      stats_i["norm_s"] = norm_s
       # Per-inequality stats only meaningful when inequalities exist.
       if self.z < self.m:
         sy = s[self.z :] * y[self.z :]

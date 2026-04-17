@@ -288,23 +288,16 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
 
   pcost = c @ x + 0.5 * x @ p @ x
   dcost = -b @ y - 0.5 * x @ p @ x
-  pres = np.linalg.norm(a @ x + s - b, np.inf)
-  dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
-  gap = np.abs(c @ x + b @ y + x @ p @ x)
-  prelrhs = max(
-      np.linalg.norm(a @ x, np.inf),
-      np.linalg.norm(s, np.inf),
-      np.linalg.norm(b, np.inf),
-  )
-  drelrhs = max(
-      np.linalg.norm(p @ x, np.inf),
-      np.linalg.norm(a.T @ y, np.inf),
-      np.linalg.norm(c, np.inf),
-  )
+  pres = np.linalg.norm(a @ x + s - b)
+  dres = np.linalg.norm(p @ x + a.T @ y + c)
+  gap_abs = np.abs(c @ x + b @ y + x @ p @ x)
+  gap_rel = gap_abs / max(1.0, min(abs(pcost), abs(dcost)))
+  prelrhs = max(1.0, np.linalg.norm(b, np.inf) + np.linalg.norm(x) + np.linalg.norm(s))
+  drelrhs = max(1.0, np.linalg.norm(c, np.inf) + np.linalg.norm(x) + np.linalg.norm(y))
   assert solution.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_array_less(gap, atol + rtol * min(abs(pcost), abs(dcost)))
-  np.testing.assert_array_less(pres, atol + rtol * prelrhs)
-  np.testing.assert_array_less(dres, atol + rtol * drelrhs)
+  assert gap_abs < atol or gap_rel < rtol
+  np.testing.assert_array_less(pres / prelrhs, rtol)
+  np.testing.assert_array_less(dres / drelrhs, rtol)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
 
@@ -315,14 +308,16 @@ def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
   y = solution.y
   s = solution.s
 
-  pinfeas = np.linalg.norm(a.T @ y, np.inf)
+  pinfeas = np.linalg.norm(a.T @ y) / max(1.0, np.linalg.norm(y))
+  bty = b @ y
 
   assert solution.status == qtqp.SolutionStatus.INFEASIBLE
   np.testing.assert_array_equal(np.isnan(x), True)
   np.testing.assert_array_equal(np.isnan(s), True)
-  np.testing.assert_allclose(b @ y, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_allclose(bty, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
-  np.testing.assert_array_less(pinfeas, atol + rtol * np.linalg.norm(y, np.inf))
+  assert bty < -atol
+  np.testing.assert_array_less(pinfeas, atol - rtol * bty)
 
 
 def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
@@ -331,19 +326,17 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
   y = solution.y
   s = solution.s
 
-  dinfeas_a = np.linalg.norm(a @ x + s, np.inf)
-  dinfeas_p = np.linalg.norm(p @ x, np.inf)
+  ctx = c @ x
+  dinfeas_a = np.linalg.norm(a @ x + s) / max(1.0, np.linalg.norm(x) + np.linalg.norm(s))
+  dinfeas_p = np.linalg.norm(p @ x) / max(1.0, np.linalg.norm(x))
+  dinfeas = max(dinfeas_a, dinfeas_p)
 
   assert solution.status == qtqp.SolutionStatus.UNBOUNDED
   np.testing.assert_array_equal(np.isnan(y), True)
-  np.testing.assert_allclose(c @ x, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_allclose(ctx, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
-  np.testing.assert_array_less(
-      dinfeas_a, atol + rtol * np.linalg.norm(x, np.inf)
-  )
-  np.testing.assert_array_less(
-      dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf)
-  )
+  assert ctx < -atol
+  np.testing.assert_array_less(dinfeas, atol - rtol * ctx)
 
 
 @pytest.mark.parametrize('equilibrate', [True, False])
