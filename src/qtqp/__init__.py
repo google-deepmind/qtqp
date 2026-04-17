@@ -284,10 +284,6 @@ class QTQP:
     return ps.b_dropped - ps.a_dropped @ x
 
   def _init_variables(self):
-    """KKT-based starting point (modified in-place). Solves the mu=0 KKT
-    system, then shifts inequality (y, s) into the cone's strict interior.
-    When z == m the solve is exact. Returns the KKT lin-sys stats.
-    """
     x = np.zeros(self.n)
     y = np.zeros(self.m)
     s = np.zeros(self.m)
@@ -296,37 +292,6 @@ class QTQP:
     if self.equilibrate:
       x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
-
-    # This ensures that there is a -I in the bottom rght block of the KKT.
-    self._linear_solver.update(mu=0.0, s=s, y=y)
-    if self.p.nnz == 0:
-      # Handle the LP case slightly differently.
-      xs, _ = self._linear_solver.solve(
-        rhs=np.concatenate([np.zeros(self.n), self.b]), warm_start=self.kinv_q,
-      )
-      xy, init_stats = self._linear_solver.solve(
-        rhs=np.concatenate([self.c, np.zeros(self.m)]), warm_start=self.kinv_q,
-      )
-      x = -xs[: self.n]
-      y = -xy[self.n :]
-      s = xs[self.n :]
-    else:
-      xy, init_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.kinv_q,
-      )
-      x = -xy[: self.n]
-      y = -xy[self.n :]
-      s = -y
-    
-    s[: self.z] = 0.0
-    # No-op when z == m (no inequality indices).
-    alpha_s = np.min(s[self.z :], initial=np.inf)
-    alpha_y = np.min(y[self.z :], initial=np.inf)
-    if alpha_s <= 1.0:
-      s[self.z :] += 1.0 - alpha_s
-    if alpha_y <= 1.0:
-      y[self.z :] += 1.0 - alpha_y
-    return x, y, s, 1.0, init_stats
 
   def solve(
       self,
@@ -526,9 +491,9 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
-      xy[: self.n] = x_p
-      xy[self.n :] = y_p
+      correction = -d_s[self.z:] * d_y_p[self.z:] / y[self.z:]
+      xy[:self.n] = x_p
+      xy[self.n:] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
@@ -629,7 +594,7 @@ class QTQP:
       col_scale_a = np.repeat(e_i, np.diff(a.indptr))
       a.data *= d_i[a.indices] * col_scale_a
       if p.nnz > 0:
-      	# E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
+        # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
         col_scale_p = np.repeat(e_i, np.diff(p.indptr))
         p.data *= e_i[p.indices] * col_scale_p
 
@@ -677,19 +642,19 @@ class QTQP:
     # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
     # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
     xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
-    scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
+    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, xyt_norm_sq)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
     # drives mu close to zero, sigma is small (aggressive, little centering).
     # If mu_aff ≈ mu (affine step didn't help much), sigma ≈ 1 (full centering).
     # The cubic exponent amplifies the contrast, pushing sigma toward 0 or 1.
-    sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
+    sigma_base = mu_aff / max(_EPS, mu_curr)
+    sigma = sigma_base * sigma_base * sigma_base  # More stable than **3.
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
-      self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau,
-      correction,
+      self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau, correction,
   ):
     """Computes a Newton search direction by solving the augmented KKT system.
 
@@ -718,30 +683,20 @@ class QTQP:
 
     # Tau solve: exact quadratic when KKT solve converged, linearized
     # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
-    # tau_plus = None
-    # if lin_sys_stats["converged"]:
-    #   try:
-    #     r_tau = (mu - mu_target) * tau_anchor
-    #     tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-    #     lin_sys_stats["tau_method"] = "quadratic"
-    #   except ValueError:
-    #     logging.debug("Primary tau solve failed; falling back to linearized.")
+    tau_plus = None
+    if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
+      try:
+        r_tau = (mu - mu_target) * tau_anchor
+        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+        lin_sys_stats["tau_method"] = "quadratic"
+      except ValueError:
+        logging.debug("Primary tau solve failed; falling back to linearized.")
 
-    # if tau_plus is None:
-    #   lin_sys_stats["tau_method"] = "linearized"
-    #   logging.debug("Using linearized tau fallback.")
-    #   tau_plus = self._solve_for_tau_linearized_fallback(
-    #       p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
-    #   )
-
-    try:
-      r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-    except ValueError as e:
-      # Fallback if quadratic solve fails numerically (rare but possible)
-      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
-      tau_plus = tau
-
+    if tau_plus is None:
+      lin_sys_stats["tau_method"] = "linearized"
+      logging.debug("Using linearized tau fallback.")
+      tau_plus = self._solve_for_tau_linearized_fallback(
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor)
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
     kinv_r -= self.kinv_q * tau_plus
@@ -784,7 +739,7 @@ class QTQP:
     if abs(t_a) < _EPS:
       raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
 
-    discriminant = t_b**2 - 4 * t_a * t_c
+    discriminant = t_b * t_b - 4 * t_a * t_c
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
 
@@ -805,7 +760,6 @@ class QTQP:
     enters linearly rather than quadratically. A [0.1x, 10x] trust region
     prevents manifold drift from the first-order approximation.
     """
-    return tau_curr
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
@@ -821,13 +775,13 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr**2 + (mu_target - mu) * tau_anchor * tau_curr
-         - tau_curr * q_z - mu_target - x_px)
+    g = (mu * tau_curr * tau_curr + (mu_target - mu) * tau_anchor * tau_curr -
+         tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
-           + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
+    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
+           tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
 
@@ -851,7 +805,7 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = math.sqrt(x @ x + y @ y + tau ** 2)
+    xyt_norm = math.sqrt(x @ x + y @ y + tau * tau)
     scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     x *= scale
     y *= scale
@@ -861,8 +815,8 @@ class QTQP:
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
-    alpha_s = self._max_step_size(s[self.z :], d_s[self.z :])
-    alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
+    alpha_s = self._max_step_size(s[self.z:], d_s[self.z:])
+    alpha_y = self._max_step_size(y[self.z:], d_y[self.z:])
     return min(alpha_s, alpha_y)
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
