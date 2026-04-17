@@ -676,7 +676,7 @@ class QTQP:
     # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
     # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
     # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff ** 2
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
     scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
