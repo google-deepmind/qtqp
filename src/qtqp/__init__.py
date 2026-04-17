@@ -220,6 +220,8 @@ class QTQP:
       )
 
     self._presolve()
+    if self.z == self.m:
+      raise ValueError("z == m after presolve; some rows may have been dropped")
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
@@ -283,27 +285,15 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
-  def _init_variables(self, x, y, s, a, b):
-    """KKT-based starting point (modified in-place). Solves the mu=0 KKT
-    system, then shifts inequality (y, s) into the cone's strict interior.
-    When z == m the solve is exact. Returns the KKT lin-sys stats.
-    """
-    self._linear_solver.update(mu=0.0, s=s, y=y)
-    sol, init_stats = self._linear_solver.solve(
-        rhs=-self.q, warm_start=np.zeros_like(self.q),
-    )
-    x[:] = sol[: self.n]
-    y[:] = sol[self.n :]
-    s[:] = b - a @ x
-    s[: self.z] = 0.0
-    # No-op when z == m (no inequality indices).
-    alpha_p = -np.min(s[self.z :], initial=np.inf)
-    alpha_d = -np.min(y[self.z :], initial=np.inf)
-    if alpha_p >= -1.0:
-      s[self.z :] += 1.0 + alpha_p
-    if alpha_d >= -1.0:
-      y[self.z :] += 1.0 + alpha_d
-    return init_stats
+  def _init_variables(self):
+    x = np.zeros(self.n)
+    y = np.zeros(self.m)
+    s = np.zeros(self.m)
+    y[self.z :] = 1.0
+    s[self.z :] = 1.0
+    if self.equilibrate:
+      x, y, s = self._equilibrate_iterates(x, y, s)
+    return x, y, s, 1.0, {}
 
   def solve(
       self,
@@ -383,22 +373,8 @@ class QTQP:
           f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name}"
       )
 
-    # --- Initialization ---
-    x = np.zeros(self.n)
-    y = np.zeros(self.m)
-    s = np.zeros(self.m)
-
-    # Initialize inequality duals and slacks to 1.0. This places the starting
-    # point strictly inside the cone (required for the IPM) and sets the
-    # initial barrier parameter mu = (y @ s) / (m - z) = 1.0.
-    y[self.z :] = 1.0
-    s[self.z :] = 1.0
-
-    tau = 1.0
-
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
-      x, y, s = self._equilibrate_iterates(x, y, s)
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
@@ -427,10 +403,9 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    init_stats = self._init_variables(x, y, s, a, b)
-
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
+    x, y, s, tau, _ = self._init_variables()
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -438,39 +413,15 @@ class QTQP:
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
-    # alpha/sigma describe the IPM step that produced the current iterate
-    # and are therefore 0 at init.
     alpha = sigma = 0.0
-    q_lin_sys_stats = init_stats
-    predictor_lin_sys_stats = {}
-    corrector_lin_sys_stats = {}
 
     # --- Main Iteration Loop ---
-    # Evaluate iterate, log/terminate, then take a step. self.it counts steps
-    # already taken (0 = init). When z == m iter 0 terminates (no central path).
-    for self.it in range(max_iter + 1):
+    # self.it counts IPM steps already taken.
+    for self.it in range(max_iter):
+      stats_i = {}
       x, y, tau, s = self._normalize(x, y, tau, s)
 
-      # mu is a property of the current iterate (measures complementarity);
-      # equality-only problems (z == m) have no complementarity block, and
-      # the loop terminates at iter 0 before taking a step, so mu is defined
-      # as 0 there for logging purposes.
-      mu = (y @ s) / (self.m - self.z) if self.z < self.m else 0.0
-
-      stats_i = {
-          "q_lin_sys_stats": q_lin_sys_stats,
-          "predictor_lin_sys_stats": predictor_lin_sys_stats,
-          "corrector_lin_sys_stats": corrector_lin_sys_stats,
-      }
-      status = self._check_termination(
-          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
-      )
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if (status != SolutionStatus.UNFINISHED
-          or self.it == max_iter or self.z == self.m):
-        break
+      mu = (y @ s) / (self.m - self.z)
 
       # --- Take an IPM step ---
       self._linear_solver.update(mu=mu, s=s, y=y)
@@ -480,6 +431,7 @@ class QTQP:
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
+      stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -497,6 +449,7 @@ class QTQP:
           tau=tau,
           correction=None,
       )
+      stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -534,6 +487,7 @@ class QTQP:
           tau=tau,
           correction=correction,
       )
+      stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
@@ -556,6 +510,15 @@ class QTQP:
       y[self.z :] = np.maximum(y[self.z :], 1e-30)
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = max(tau, 1e-30)
+
+      status = self._check_termination(
+          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+      )
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
+      if status != SolutionStatus.UNFINISHED:
+        break
 
     # We have terminated for one reason or another.
     self._linear_solver.free()
@@ -582,7 +545,7 @@ class QTQP:
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
-        self._log_footer(f"Failed to converge in {max_iter} iterations")
+        self._log_footer(f"Failed to converge")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
@@ -622,7 +585,7 @@ class QTQP:
       col_scale_a = np.repeat(e_i, np.diff(a.indptr))
       a.data *= d_i[a.indices] * col_scale_a
       if p.nnz > 0:
-      	# E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
+        # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
         col_scale_p = np.repeat(e_i, np.diff(p.indptr))
         p.data *= e_i[p.indices] * col_scale_p
 
@@ -669,20 +632,20 @@ class QTQP:
     # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
     # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
     # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff ** 2
-    scale_sq = (self.m - self.z + 1) / max(_EPS**2, xyt_norm_sq)
+    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
+    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, xyt_norm_sq)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
     # drives mu close to zero, sigma is small (aggressive, little centering).
     # If mu_aff ≈ mu (affine step didn't help much), sigma ≈ 1 (full centering).
     # The cubic exponent amplifies the contrast, pushing sigma toward 0 or 1.
-    sigma = (mu_aff / max(_EPS, mu_curr)) ** 3
+    sigma_base = mu_aff / max(_EPS, mu_curr)
+    sigma = sigma_base * sigma_base * sigma_base  # More stable than **3.
     return np.clip(sigma, 0.0, 1.0)
 
   def _newton_step(
-      self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau,
-      correction,
+      self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau, correction,
   ):
     """Computes a Newton search direction by solving the augmented KKT system.
 
@@ -712,7 +675,7 @@ class QTQP:
     # Tau solve: exact quadratic when KKT solve converged, linearized
     # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
     tau_plus = None
-    if lin_sys_stats["converged"]:
+    if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
         r_tau = (mu - mu_target) * tau_anchor
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
@@ -724,7 +687,7 @@ class QTQP:
       lin_sys_stats["tau_method"] = "linearized"
       logging.debug("Using linearized tau fallback.")
       tau_plus = self._solve_for_tau_linearized_fallback(
-          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
       )
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
@@ -742,14 +705,15 @@ class QTQP:
         t_a * tau+^2 + t_b * tau+ + t_c = 0
 
     The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
-    and kinv_q with q and P. For LPs (P=0) the P terms drop out. The
-    coefficients are clamped to enforce structural signs (t_a > 0, t_c <= 0),
-    and Muller's stable quadratic formula avoids catastrophic cancellation.
+    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
+    the positive root since tau >= 0 is required for the embedding to represent
+    a feasible point (tau=0 corresponds to a certificate of infeasibility or
+    unboundedness, which is handled separately at termination).
     """
+    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0
     t_a = mu + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
@@ -761,14 +725,16 @@ class QTQP:
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
       t_c -= kinv_r[:n] @ p_kinv_r
+    logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Enforce structural signs
-    t_a = max(t_a, mu)
-    t_c = min(t_c, -mu_target)
+    # Standard quadratic formula for the positive root
+    if abs(t_a) < _EPS:
+      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
 
-    discriminant = t_b**2 - 4 * t_a * t_c
-    if discriminant < 0.0:
-      discriminant = 0.0
+    discriminant = t_b * t_b - 4 * t_a * t_c
+    if discriminant < -1e-9:
+      raise ValueError(f"Negative discriminant: {discriminant}")
+    discriminant = max(0.0, discriminant)
 
     # Stable Quadratic Formula (Muller)
     if t_b > 0:
@@ -778,10 +744,10 @@ class QTQP:
       q_muller = -0.5 * (t_b - math.sqrt(discriminant))
       tau_sol = q_muller / t_a
 
-    if not np.isfinite(tau_sol) or tau_sol < 0.0:
-      raise ValueError(f"Invalid tau solution: {tau_sol}")
+    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
+      raise ValueError(f"Invalid tau solution found: {tau_sol}")
 
-    return tau_sol
+    return max(0.0, tau_sol)
 
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
@@ -808,13 +774,13 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr**2 + (mu_target - mu) * tau_anchor * tau_curr
-         - tau_curr * q_z - mu_target - x_px)
+    g = (mu * tau_curr * tau_curr + (mu_target - mu) * tau_anchor * tau_curr -
+         tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
-           + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
+    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
+           tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
 
@@ -838,7 +804,7 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = math.sqrt(x @ x + y @ y + tau ** 2)
+    xyt_norm = math.sqrt(x @ x + y @ y + tau * tau)
     scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
     x *= scale
     y *= scale
@@ -972,7 +938,6 @@ class QTQP:
             "mean_s_over_y": np.mean(s_over_y),
             "std_s_over_y": np.std(s_over_y),
         })
-
     return status
 
   def _log_header(self):
