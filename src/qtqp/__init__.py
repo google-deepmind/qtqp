@@ -221,7 +221,9 @@ class QTQP:
 
     self._presolve()
     if self.z == self.m:
-      raise ValueError("z == m after presolve; some rows may have been dropped")
+      raise ValueError(
+          "effective z == m after presolve; some rows may have been dropped"
+      )
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
