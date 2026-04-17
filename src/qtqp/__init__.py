@@ -288,10 +288,15 @@ class QTQP:
     system, then shifts inequality (y, s) into the cone's strict interior.
     When z == m the solve is exact. Returns the KKT lin-sys stats.
     """
+    x = np.zeros(self.n)
     y = np.zeros(self.m)
     s = np.zeros(self.m)
     y[self.z :] = 1.0
     s[self.z :] = 1.0
+    if self.equilibrate:
+      x, y, s = self._equilibrate_iterates(x, y, s)
+    return x, y, s, 1.0, {}
+
     # This ensures that there is a -I in the bottom rght block of the KKT.
     self._linear_solver.update(mu=0.0, s=s, y=y)
     if self.p.nnz == 0:
@@ -333,7 +338,7 @@ class QTQP:
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
-      max_iterative_refinement_steps: int = 10,
+      max_iterative_refinement_steps: int = 50,
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
@@ -642,6 +647,9 @@ class QTQP:
 
   def _unequilibrate_iterates(self, x, y, s):
     return (self.e * x, self.d * y, s / self.d)
+ 
+  def _equilibrate_iterates(self, x, y, s):
+    return (x / self.e, y / self.d, s * self.d)
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
@@ -710,28 +718,37 @@ class QTQP:
 
     # Tau solve: exact quadratic when KKT solve converged, linearized
     # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
-    tau_plus = None
-    if lin_sys_stats["converged"]:
-      try:
-        r_tau = (mu - mu_target) * tau_anchor
-        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-        lin_sys_stats["tau_method"] = "quadratic"
-      except ValueError:
-        logging.debug("Primary tau solve failed; falling back to linearized.")
+    # tau_plus = None
+    # if lin_sys_stats["converged"]:
+    #   try:
+    #     r_tau = (mu - mu_target) * tau_anchor
+    #     tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+    #     lin_sys_stats["tau_method"] = "quadratic"
+    #   except ValueError:
+    #     logging.debug("Primary tau solve failed; falling back to linearized.")
 
-    if tau_plus is None:
-      lin_sys_stats["tau_method"] = "linearized"
-      logging.debug("Using linearized tau fallback.")
-      tau_plus = self._solve_for_tau_linearized_fallback(
-          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
-      )
+    # if tau_plus is None:
+    #   lin_sys_stats["tau_method"] = "linearized"
+    #   logging.debug("Using linearized tau fallback.")
+    #   tau_plus = self._solve_for_tau_linearized_fallback(
+    #       p, kinv_r, mu, mu_target, x, y, tau, tau_anchor,
+    #   )
+
+    try:
+      r_tau = (mu - mu_target) * tau_anchor
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+    except ValueError as e:
+      # Fallback if quadratic solve fails numerically (rare but possible)
+      logging.warning("Tau solve failed, using previous tau. Error: %s", e)
+      tau_plus = tau
+
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
     kinv_r -= self.kinv_q * tau_plus
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -741,14 +758,15 @@ class QTQP:
         t_a * tau+^2 + t_b * tau+ + t_c = 0
 
     The coefficients t_a, t_b, t_c are computed from inner products of kinv_r
-    and kinv_q with q and P. For LPs (P=0) the P terms drop out. The
-    coefficients are clamped to enforce structural signs (t_a > 0, t_c <= 0),
-    and Muller's stable quadratic formula avoids catastrophic cancellation.
+    and kinv_q with q and P. For LPs (P=0) the P terms drop out. We always take
+    the positive root since tau >= 0 is required for the embedding to represent
+    a feasible point (tau=0 corresponds to a certificate of infeasibility or
+    unboundedness, which is handled separately at termination).
     """
+    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0
     t_a = mu + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
@@ -760,27 +778,22 @@ class QTQP:
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
       t_c -= kinv_r[:n] @ p_kinv_r
+    logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Enforce structural signs
-    t_a = max(t_a, mu)
-    t_c = min(t_c, -mu_target)
+    # Standard quadratic formula for the positive root
+    if abs(t_a) < _EPS:
+      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
 
     discriminant = t_b**2 - 4 * t_a * t_c
-    if discriminant < 0.0:
-      discriminant = 0.0
+    if discriminant < -1e-9:
+      raise ValueError(f"Negative discriminant: {discriminant}")
 
-    # Stable Quadratic Formula (Muller)
-    if t_b > 0:
-      q_muller = -0.5 * (t_b + math.sqrt(discriminant))
-      tau_sol = t_c / q_muller
-    else:
-      q_muller = -0.5 * (t_b - math.sqrt(discriminant))
-      tau_sol = q_muller / t_a
+    tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
 
-    if not np.isfinite(tau_sol) or tau_sol < 0.0:
-      raise ValueError(f"Invalid tau solution: {tau_sol}")
+    if not np.isfinite(tau_sol) or tau_sol < -1e-10:
+      raise ValueError(f"Invalid tau solution found: {tau_sol}")
 
-    return tau_sol
+    return max(0.0, tau_sol)
 
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
@@ -792,6 +805,7 @@ class QTQP:
     enters linearly rather than quadratically. A [0.1x, 10x] trust region
     prevents manifold drift from the first-order approximation.
     """
+    return tau_curr
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
@@ -971,7 +985,7 @@ class QTQP:
             "mean_s_over_y": np.mean(s_over_y),
             "std_s_over_y": np.std(s_over_y),
         })
-    print(stats_i)
+    # print(stats_i)
     return status
 
   def _log_header(self):

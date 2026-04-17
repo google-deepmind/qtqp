@@ -304,7 +304,8 @@ class AccelerateSolver(LinearSolver):
 
   def factorize(self):
     if self._solver is None:
-      self._solver = self._macldlt.LDLTSolver(self._kkt, triangle="upper")
+      self._solver = self._macldlt.LDLTSolver(
+        self._kkt, triangle="upper", factorization="ldlt_sbk")
     else:
       self._solver.refactor(self._kkt.data)
 
