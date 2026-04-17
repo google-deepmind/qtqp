@@ -506,7 +506,7 @@ def test_equality_only_solve(equilibrate, seed, mn):
   z = m
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, equilibrate=equilibrate,
+      verbose=True, equilibrate=equilibrate,
   )
   _assert_solution(solution, a, b, c, p, z)
   assert solution.stats == []
@@ -527,7 +527,7 @@ def test_equality_only_lp(seed):
   b = a @ x_star
   c = -(a.T @ y_star)
   p = sparse.csc_matrix((n, n))
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=True)
   _assert_solution(solution, a, b, c, p, z)
   assert solution.stats == []
 
@@ -547,7 +547,7 @@ def test_equality_only_inconsistent():
   b = np.array([1.0, 2.0, 3.0])
   c = np.ones(n)
   p = sparse.csc_matrix((n, n))
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   assert solution.status in (
       qtqp.SolutionStatus.INFEASIBLE,
       qtqp.SolutionStatus.FAILED,
@@ -565,7 +565,7 @@ def test_presolve_drops_all_inequalities():
   a, b = _append_dropped_inequalities(
       a, b, n_extra=m_ineq, random_state=rng, rhs_value=1e21,
   )
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   _assert_solution(solution, a, b, c, p, z)
   assert solution.y.shape == (m,)
   assert solution.s.shape == (m,)
@@ -579,7 +579,7 @@ def test_presolve_restores_infeasible_certificate():
   a, b = _append_dropped_inequalities(
       a, b, n_extra=3, random_state=rng, rhs_value=1e21,
   )
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   _assert_infeasible(solution, a, b, z)
 
 
@@ -592,7 +592,7 @@ def test_presolve_restores_unbounded_certificate():
   a, b = _append_dropped_inequalities(
       a, b, n_extra=3, random_state=rng, rhs_value=1e21,
   )
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   assert solution.status == qtqp.SolutionStatus.UNBOUNDED
   np.testing.assert_array_equal(np.isnan(solution.y), True)
   np.testing.assert_array_equal(np.isnan(solution.s[-3:]), True)
@@ -613,11 +613,11 @@ def test_presolve_accepts_posinf_inequalities():
   rng = np.random.default_rng(2042)
   m_eq, n, z = 5, 20, 5
   a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
-  baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   a_full, b_full = _append_dropped_inequalities(
       a, b, n_extra=3, random_state=rng, rhs_value=np.inf,
   )
-  solution = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=True)
   assert solution.status == qtqp.SolutionStatus.SOLVED
   np.testing.assert_allclose(solution.x, baseline.x, atol=1e-8, rtol=1e-8)
   np.testing.assert_allclose(solution.y[:z], baseline.y, atol=1e-8, rtol=1e-8)
@@ -643,7 +643,7 @@ def test_equality_only_all_backends(linear_solver, seed):
   m, n, z = 20, 40, 20
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, linear_solver=linear_solver,
+      verbose=True, linear_solver=linear_solver,
   )
   _assert_solution(solution, a, b, c, p, z)
   assert solution.stats == []
@@ -661,7 +661,7 @@ def test_equality_only_recovers_known_solution():
   p = sparse.csc_matrix(q.T @ q * 0.01)
   b = a @ x_star
   c = -(p @ x_star + a.T @ y_star)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
   assert solution.status == qtqp.SolutionStatus.SOLVED
   np.testing.assert_allclose(solution.x, x_star, atol=1e-6)
   np.testing.assert_allclose(solution.y, y_star, atol=1e-6)
@@ -704,7 +704,7 @@ def test_equality_only_sparse_p():
   c = -(p @ x_star + a.T @ y_star)
   solution = qtqp.QTQP(
       a=sparse.csc_matrix(a), b=b, c=c, z=z, p=sparse.csc_matrix(p),
-  ).solve(verbose=False)
+  ).solve(verbose=True)
   _assert_solution(solution, sparse.csc_matrix(a), b, c, sparse.csc_matrix(p), z)
   assert solution.stats == []
 
@@ -1548,16 +1548,16 @@ def test_resolve():
 
 
 # =============================================================================
-# verbose=False produces no output
+# verbose=True produces no output
 # =============================================================================
 
 def test_verbose_false(capsys):
-  """Test that verbose=False suppresses all printed output."""
+  """Test that verbose=True suppresses all printed output."""
   rng = np.random.default_rng(42)
   m, n, z = 10, 5, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
 
   captured = capsys.readouterr()
   assert captured.out == ""

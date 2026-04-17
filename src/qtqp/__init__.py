@@ -283,27 +283,45 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
-  def _init_variables(self, x, y, s, a, b):
+  def _init_variables(self):
     """KKT-based starting point (modified in-place). Solves the mu=0 KKT
     system, then shifts inequality (y, s) into the cone's strict interior.
     When z == m the solve is exact. Returns the KKT lin-sys stats.
     """
+    y = np.zeros(self.m)
+    s = np.zeros(self.m)
+    y[self.z :] = 1.0
+    s[self.z :] = 1.0
+    # This ensures that there is a -I in the bottom rght block of the KKT.
     self._linear_solver.update(mu=0.0, s=s, y=y)
-    sol, init_stats = self._linear_solver.solve(
-        rhs=-self.q, warm_start=np.zeros_like(self.q),
-    )
-    x[:] = sol[: self.n]
-    y[:] = sol[self.n :]
-    s[:] = b - a @ x
+    if self.p.nnz == 0:
+      # Handle the LP case slightly differently.
+      xs, _ = self._linear_solver.solve(
+        rhs=np.concatenate([np.zeros(self.n), self.b]), warm_start=self.kinv_q,
+      )
+      xy, init_stats = self._linear_solver.solve(
+        rhs=np.concatenate([self.c, np.zeros(self.m)]), warm_start=self.kinv_q,
+      )
+      x = -xs[: self.n]
+      y = -xy[self.n :]
+      s = xs[self.n :]
+    else:
+      xy, init_stats = self._linear_solver.solve(
+          rhs=self.q, warm_start=self.kinv_q,
+      )
+      x = -xy[: self.n]
+      y = -xy[self.n :]
+      s = -y
+    
     s[: self.z] = 0.0
     # No-op when z == m (no inequality indices).
-    alpha_p = -np.min(s[self.z :], initial=np.inf)
-    alpha_d = -np.min(y[self.z :], initial=np.inf)
-    if alpha_p >= -1.0:
-      s[self.z :] += 1.0 + alpha_p
-    if alpha_d >= -1.0:
-      y[self.z :] += 1.0 + alpha_d
-    return init_stats
+    alpha_s = np.min(s[self.z :], initial=np.inf)
+    alpha_y = np.min(y[self.z :], initial=np.inf)
+    if alpha_s <= 1.0:
+      s[self.z :] += 1.0 - alpha_s
+    if alpha_y <= 1.0:
+      y[self.z :] += 1.0 - alpha_y
+    return x, y, s, 1.0, init_stats
 
   def solve(
       self,
@@ -383,22 +401,8 @@ class QTQP:
           f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name}"
       )
 
-    # --- Initialization ---
-    x = np.zeros(self.n)
-    y = np.zeros(self.m)
-    s = np.zeros(self.m)
-
-    # Initialize inequality duals and slacks to 1.0. This places the starting
-    # point strictly inside the cone (required for the IPM) and sets the
-    # initial barrier parameter mu = (y @ s) / (m - z) = 1.0.
-    y[self.z :] = 1.0
-    s[self.z :] = 1.0
-
-    tau = 1.0
-
     if self.equilibrate:
       a, p, b, c, self.d, self.e = self._equilibrate()
-      x, y, s = self._equilibrate_iterates(x, y, s)
     else:
       a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
 
@@ -427,10 +431,9 @@ class QTQP:
         solver=linear_solver_backend,
     )
 
-    init_stats = self._init_variables(x, y, s, a, b)
-
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
+    x, y, s, tau, q_lin_sys_stats = self._init_variables()
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -441,7 +444,6 @@ class QTQP:
     # alpha/sigma describe the IPM step that produced the current iterate
     # and are therefore 0 at init.
     alpha = sigma = 0.0
-    q_lin_sys_stats = init_stats
     predictor_lin_sys_stats = {}
     corrector_lin_sys_stats = {}
 
@@ -582,7 +584,7 @@ class QTQP:
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
-        self._log_footer(f"Failed to converge in {max_iter} iterations")
+        self._log_footer(f"Failed to converge")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
@@ -640,9 +642,6 @@ class QTQP:
 
   def _unequilibrate_iterates(self, x, y, s):
     return (self.e * x, self.d * y, s / self.d)
-
-  def _equilibrate_iterates(self, x, y, s):
-    return (x / self.e, y / self.d, s * self.d)
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
@@ -972,7 +971,7 @@ class QTQP:
             "mean_s_over_y": np.mean(s_over_y),
             "std_s_over_y": np.std(s_over_y),
         })
-
+    print(stats_i)
     return status
 
   def _log_header(self):
