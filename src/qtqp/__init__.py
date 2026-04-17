@@ -687,7 +687,8 @@ class QTQP:
       lin_sys_stats["tau_method"] = "linearized"
       logging.debug("Using linearized tau fallback.")
       tau_plus = self._solve_for_tau_linearized_fallback(
-          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor)
+          p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
+      )
 
     # Reconstruct [x+; y+] = kinv_r - kinv_q * tau+ (in-place on kinv_r).
     kinv_r -= self.kinv_q * tau_plus
@@ -733,6 +734,7 @@ class QTQP:
     discriminant = t_b * t_b - 4 * t_a * t_c
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
+    discriminant = max(0.0, discriminant)
 
     # Stable Quadratic Formula (Muller)
     if t_b > 0:
