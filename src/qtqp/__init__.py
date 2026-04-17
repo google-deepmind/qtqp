@@ -302,10 +302,10 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-7,
+      atol: float = 1e-8,
       rtol: float = 1e-8,
       atol_infeas: float = 1e-8,
-      rtol_infeas: float = 1e-9,
+      rtol_infeas: float = 1e-8,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
