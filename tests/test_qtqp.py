@@ -1538,16 +1538,16 @@ def test_resolve():
 
 
 # =============================================================================
-# verbose=True produces no output
+# verbose=False produces no output
 # =============================================================================
 
 def test_verbose_false(capsys):
-  """Test that verbose=True suppresses all printed output."""
+  """Test that verbose=False suppresses all printed output."""
   rng = np.random.default_rng(42)
   m, n, z = 10, 5, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
 
   captured = capsys.readouterr()
   assert captured.out == ""
