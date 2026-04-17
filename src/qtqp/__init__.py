@@ -608,7 +608,7 @@ class QTQP:
 
   def _unequilibrate_iterates(self, x, y, s):
     return (self.e * x, self.d * y, s / self.d)
- 
+
   def _equilibrate_iterates(self, x, y, s):
     return (x / self.e, y / self.d, s * self.d)
 
@@ -699,7 +699,7 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> np.ndarray:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -739,7 +739,13 @@ class QTQP:
     if discriminant < -1e-9:
       raise ValueError(f"Negative discriminant: {discriminant}")
 
-    tau_sol = (-t_b + np.sqrt(max(0.0, discriminant))) / (2 * t_a)
+    # Stable Quadratic Formula (Muller)
+    if t_b > 0:
+      q_muller = -0.5 * (t_b + math.sqrt(discriminant))
+      tau_sol = t_c / q_muller
+    else:
+      q_muller = -0.5 * (t_b - math.sqrt(discriminant))
+      tau_sol = q_muller / t_a
 
     if not np.isfinite(tau_sol) or tau_sol < -1e-10:
       raise ValueError(f"Invalid tau solution found: {tau_sol}")
@@ -935,7 +941,6 @@ class QTQP:
             "mean_s_over_y": np.mean(s_over_y),
             "std_s_over_y": np.std(s_over_y),
         })
-    # print(stats_i)
     return status
 
   def _log_header(self):
