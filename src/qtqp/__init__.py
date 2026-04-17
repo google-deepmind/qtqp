@@ -221,11 +221,7 @@ class QTQP:
 
     self._presolve()
     if self.z == self.m:
-      raise ValueError(
-          "Equality-only problems are not currently supported "
-          "(effective z == m after presolve; some rows may have been dropped "
-          "during presolve)."
-      )
+      raise ValueError("z == m after presolve; some rows may have been dropped")
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
@@ -425,7 +421,6 @@ class QTQP:
       stats_i = {}
       x, y, tau, s = self._normalize(x, y, tau, s)
 
-      # mu is a property of the current iterate (measures complementarity).
       mu = (y @ s) / (self.m - self.z)
 
       # --- Take an IPM step ---
@@ -477,9 +472,9 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      correction = -d_s[self.z:] * d_y_p[self.z:] / y[self.z:]
-      xy[:self.n] = x_p
-      xy[self.n:] = y_p
+      correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+      xy[: self.n] = x_p
+      xy[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
@@ -817,8 +812,8 @@ class QTQP:
 
   def _compute_step_size(self, y, s, d_y, d_s) -> float:
     """Computes the maximum standard primal-dual step size."""
-    alpha_s = self._max_step_size(s[self.z:], d_s[self.z:])
-    alpha_y = self._max_step_size(y[self.z:], d_y[self.z:])
+    alpha_s = self._max_step_size(s[self.z :], d_s[self.z :])
+    alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
