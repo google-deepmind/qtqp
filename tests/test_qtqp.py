@@ -1428,11 +1428,11 @@ def test_unbounded_small(equilibrate, seed, linear_solver, record_iterations):
 
 
 # =============================================================================
-# SolutionStatus.FAILED
+# SolutionStatus.HIT_MAX_ITER
 # =============================================================================
 
-def test_failed_status():
-  """Test that FAILED is returned when max_iter is exhausted."""
+def test_hit_max_iter_status():
+  """Test that HIT_MAX_ITER is returned when max_iter is exhausted."""
   rng = np.random.default_rng(42)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
@@ -1441,14 +1441,14 @@ def test_failed_status():
       max_iter=1, verbose=True
   )
 
-  assert solution.status == qtqp.SolutionStatus.FAILED
-  # FAILED still returns a finite best-effort iterate (not NaN).
+  assert solution.status == qtqp.SolutionStatus.HIT_MAX_ITER
+  # HIT_MAX_ITER still returns a finite best-effort iterate (not NaN).
   assert np.all(np.isfinite(solution.x))
   assert np.all(np.isfinite(solution.y))
   assert np.all(np.isfinite(solution.s))
 
 
-def test_failed_status_collect_stats_counts_post_step_iterates():
+def test_hit_max_iter_status_collect_stats_counts_post_step_iterates():
   """With end-of-loop logging, max_iter bounds the number of recorded IPM steps."""
   rng = np.random.default_rng(42)
   m, n, z = 150, 100, 10
@@ -1458,10 +1458,10 @@ def test_failed_status_collect_stats_counts_post_step_iterates():
       max_iter=1, verbose=True, collect_stats=True
   )
 
-  assert solution.status == qtqp.SolutionStatus.FAILED
+  assert solution.status == qtqp.SolutionStatus.HIT_MAX_ITER
   assert len(solution.stats) == 1
   assert solution.stats[0]['iter'] == 0
-  assert solution.stats[0]['status'] == qtqp.SolutionStatus.UNFINISHED
+  assert solution.stats[-1]['status'] == solution.status
 
 
 # =============================================================================
@@ -1786,7 +1786,7 @@ def test_verbose_unbounded(capsys):
   assert "Dual infeasible" in out
 
 
-def test_verbose_failed(capsys):
+def test_verbose_hit_max_iter(capsys):
   """Test that verbose=True prints the correct footer when max_iter is hit."""
   rng = np.random.default_rng(42)
   m, n, z = 150, 100, 10
@@ -1795,7 +1795,7 @@ def test_verbose_failed(capsys):
   qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True, max_iter=1)
 
   out = capsys.readouterr().out
-  assert "Failed to converge" in out
+  assert "Hit maximum iterations" in out
 
 
 # =============================================================================
@@ -2027,7 +2027,9 @@ def test_stats_monotonicity():
 # Solution shape correctness for every status
 # =============================================================================
 
-@pytest.mark.parametrize('status_type', ['solved', 'infeasible', 'unbounded', 'failed'])
+@pytest.mark.parametrize(
+    'status_type', ['solved', 'infeasible', 'unbounded', 'hit_max_iter']
+)
 def test_solution_shapes(status_type):
   """Test that solution x, y, s have the correct shapes for every status."""
   rng = np.random.default_rng(42)
@@ -2042,7 +2044,7 @@ def test_solution_shapes(status_type):
   elif status_type == 'unbounded':
     a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
     sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
-  elif status_type == 'failed':
+  elif status_type == 'hit_max_iter':
     a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
     sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True, max_iter=1)
 
@@ -2173,5 +2175,6 @@ def test_nonsymmetric_p():
   # (it defines a different KKT). Just verify it doesn't crash.
   assert sol_triu.status in (
       qtqp.SolutionStatus.SOLVED,
+      qtqp.SolutionStatus.HIT_MAX_ITER,
       qtqp.SolutionStatus.FAILED,
   )
