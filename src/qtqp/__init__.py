@@ -132,6 +132,7 @@ class SolutionStatus(enum.Enum):
   SOLVED = "solved"
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
+  HIT_MAX_ITER = "hit_max_iter"
   FAILED = "failed"
   UNFINISHED = "unfinished"
 
@@ -521,6 +522,10 @@ class QTQP:
         stats.append(stats_i)
       if status != SolutionStatus.UNFINISHED:
         break
+    else:
+      status = SolutionStatus.HIT_MAX_ITER
+      if collect_stats:
+        stats[-1]["status"] = status
 
     # We have terminated for one reason or another.
     self._linear_solver.free()
@@ -545,6 +550,11 @@ class QTQP:
         abs_ctx = abs(self.c @ x)
         x, s = x / abs_ctx, s / abs_ctx
         y, s = self._postsolve(y, s, y_dropped=np.nan)
+        return Solution(x, y, s, stats, status)
+      case SolutionStatus.HIT_MAX_ITER:
+        self._log_footer("Hit maximum iterations")
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
         self._log_footer(f"Failed to converge")

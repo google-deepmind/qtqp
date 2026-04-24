@@ -190,7 +190,7 @@ This method will return a `qtqp.Solution` object, with fields:
 -   `y`: (m) Dual variable or certificate of infeasibility.
 -   `s`: (m) Slack variable or certificate of unboundedness.
 -   `status`: (`qtqp.SolutionStatus`) One of `SOLVED`, `INFEASIBLE`,
-    `UNBOUNDED`, `FAILED`.
+    `UNBOUNDED`, `HIT_MAX_ITER`, `FAILED`.
 -   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
     `collect_stats=True`. When enabled, includes primal/dual objective,
     residuals, gap, mu, elapsed time, and complementarity statistics.
