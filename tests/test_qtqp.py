@@ -26,6 +26,10 @@ from scipy import sparse
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
     qtqp.LinearSolver.SCIPY_DENSE,
+    qtqp.LinearSolver.UMFPACK,
+    qtqp.LinearSolver.QDLDL,
+    qtqp.LinearSolver.CHOLMOD,
+    qtqp.LinearSolver.EIGEN,
 ]
 
 
@@ -1258,24 +1262,51 @@ def test_linearized_tau_always_converges(seed, problem_type):
     _assert_unbounded(solution, a, c, p, z)
 
 
-def _equilibrate_reference(a, p, num_iters=10, min_scale=1e-3, max_scale=1e3):
-  """Reference Ruiz equilibration using sparse diagonal matrix products."""
+def _equilibrate_reference(a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
+                           min_norm=1e-4, max_norm=1e4):
+  """Reference SCS-style Ruiz + L2 equilibration using sparse matmul."""
   a, p = a.copy(), p.copy()
-  d, e = np.ones(a.shape[0]), np.ones(a.shape[1])
-  for _ in range(num_iters):
-    d_i = sparse.linalg.norm(a, np.inf, axis=1)
-    d_i = np.where(d_i == 0.0, 1.0, d_i)
-    d_i = np.clip(1.0 / np.sqrt(d_i), min_scale, max_scale)
-    e_i = np.maximum(sparse.linalg.norm(a, np.inf, axis=0),
-                     sparse.linalg.norm(p, np.inf, axis=0))
-    e_i = np.where(e_i == 0.0, 1.0, e_i)
-    e_i = np.clip(1.0 / np.sqrt(e_i), min_scale, max_scale)
-    d_mat, e_mat = sparse.diags(d_i), sparse.diags(e_i)
+  b, c = b.copy(), c.copy()
+  m, n = a.shape
+  d, e = np.ones(m), np.ones(n)
+
+  def to_scale(v):
+    v = np.where(v < min_norm, 1.0, np.minimum(v, max_norm))
+    return 1.0 / np.sqrt(v)
+
+  for _ in range(num_ruiz_passes):
+    d_step = sparse.linalg.norm(a, np.inf, axis=1)
+    e_step = np.maximum(sparse.linalg.norm(a, np.inf, axis=0),
+                        sparse.linalg.norm(p, np.inf, axis=0))
+    if m > z:
+      d_step[z:] = np.max(d_step[z:])
+    d_step, e_step = to_scale(d_step), to_scale(e_step)
+    d_mat, e_mat = sparse.diags(d_step), sparse.diags(e_step)
     a = d_mat @ a @ e_mat
     p = e_mat @ p @ e_mat
-    d *= d_i
-    e *= e_i
-  return a, p, d, e
+    d *= d_step
+    e *= e_step
+
+  for _ in range(num_l2_passes):
+    d_step = sparse.linalg.norm(a, ord=2, axis=1)
+    e_step = np.sqrt(sparse.linalg.norm(a, ord=2, axis=0) ** 2
+                     + sparse.linalg.norm(p, ord=2, axis=0) ** 2)
+    if m > z:
+      d_step[z:] = np.mean(d_step[z:])
+    d_step, e_step = to_scale(d_step), to_scale(e_step)
+    d_mat, e_mat = sparse.diags(d_step), sparse.diags(e_step)
+    a = d_mat @ a @ e_mat
+    p = e_mat @ p @ e_mat
+    d *= d_step
+    e *= e_step
+
+  c = e * c
+  b = d * b
+  sigma_norm = max(np.linalg.norm(c, np.inf), np.linalg.norm(b, np.inf))
+  if sigma_norm < min_norm:
+    sigma_norm = 1.0
+  sigma = 1.0 / min(sigma_norm, max_norm)
+  return a, p, sigma * b, sigma * c, d, e, sigma
 
 
 @pytest.mark.parametrize('seed', 2142 + np.arange(10))
@@ -1286,14 +1317,18 @@ def test_equivalent_equilibration(seed):
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  a_eq, p_eq, _, _, d, e = solver._equilibrate()  # pylint: disable=protected-access
+  a_eq, p_eq, b_eq, c_eq, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
 
-  a_ref, p_ref, d_ref, e_ref = _equilibrate_reference(a, p)
+  a_ref, p_ref, b_ref, c_ref, d_ref, e_ref, sigma_ref = _equilibrate_reference(
+      a, p, b, c, z)
 
   np.testing.assert_allclose(a_eq.toarray(), a_ref.toarray(), atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(b_eq, b_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(c_eq, c_ref, atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(sigma, sigma_ref, atol=1e-14, rtol=1e-14)
 
 
 def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
@@ -1757,7 +1792,7 @@ def test_equilibrate_unequilibrate_roundtrip():
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
 
-  _, _, _, _, solver.d, solver.e = solver._equilibrate()  # pylint: disable=protected-access
+  _, _, _, _, solver.d, solver.e, solver.sigma = solver._equilibrate()  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.uniform(size=m)

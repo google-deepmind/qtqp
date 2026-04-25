@@ -427,9 +427,10 @@ class QTQP:
       )
 
     if self.equilibrate:
-      a, p, b, c, self.d, self.e = self._equilibrate()
+      a, p, b, c, self.d, self.e, self.sigma = self._equilibrate()
     else:
-      a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+      a, p, b, c = self.a, self.p, self.b, self.c
+      self.d, self.e, self.sigma = None, None, None
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -613,60 +614,101 @@ class QTQP:
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
 
-  def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
-    """Ruiz equilibration to improve numerical conditioning."""
-    # Work on copies so self.a / self.p are not modified in-place; they are
-    # used unequilibrated later (e.g. in _check_termination).
-    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
-    b, c = self.b, self.c
-    # Initialize the equilibration matrices.
-    d, e = (np.ones(self.m), np.ones(self.n))
+  def _equilibrate(
+      self,
+      num_ruiz_passes: int = 25,
+      num_l2_passes: int = 1,
+      min_norm: float = 1e-4,
+      max_norm: float = 1e4,
+  ):
+    """SCS-style Ruiz + ell_2 equilibration on [[P, A^T], [A, 0]] plus sigma.
 
-    for i in range(num_iters):
-      # Row norms (infinity norm)
-      d_i = sp.linalg.norm(a, np.inf, axis=1)
-      d_i = np.where(d_i == 0.0, 1.0, d_i)  # If a row is zero, set d_i 1.0.
-      d_i = 1.0 / np.sqrt(d_i)
-      d_i = np.clip(d_i, min_scale, max_scale)
+    Produces diagonal scales E (size n), D (size m) and scalar sigma > 0 with
+        P_hat = E P E,  A_hat = D A E,  c_hat = sigma E c,  b_hat = sigma D b.
+    The original solution recovers as
+        x = E x_hat / sigma,  y = D y_hat / sigma,  s = D^{-1} s_hat / sigma.
 
-      # Column norms (max of A col norms and P col norms)
-      e_i_a = sp.linalg.norm(a, np.inf, axis=0)
-      e_i_p = sp.linalg.norm(p, np.inf, axis=0)
-      e_i = np.maximum(e_i_a, e_i_p)
-      e_i = np.where(e_i == 0.0, 1.0, e_i)  # If a col is zero, set e_i 1.0.
-      e_i = 1.0 / np.sqrt(e_i)
-      e_i = np.clip(e_i, min_scale, max_scale)
+    To preserve cone membership (s in K iff D s in K) D is held constant across
+    the positive-orthant cone: the per-row Ruiz norm is replaced by the
+    in-cone l_inf, and the per-row l_2 norm by the in-cone mean. The zero-cone
+    slice of D and the columns scaled by E carry no such constraint.
+    """
+    # Work on copies so self.a / self.p stay in original space for use in
+    # _check_termination (which un-equilibrates iterates and compares against
+    # the original problem data).
+    a, p = self.a.copy(), self.p.copy()
+    b, c = self.b.copy(), self.c.copy()
+    d, e = np.ones(self.m), np.ones(self.n)
+    z, m = self.z, self.m
 
-      # Apply scaling directly to CSC data arrays, avoiding temporary sparse matrices.
-      # D @ A @ E: scale non-zero at row r, col c by d_i[r] * e_i[c].
-      # Equivalent to (for CSC matrices):
-      #     d_mat, e_mat = sp.diags(d_i), sp.diags(e_i)
-      #     a = d_mat @ a @ e_mat
-      #     p = e_mat @ p @ e_mat
-      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
-      a.data *= d_i[a.indices] * col_scale_a
+    def _to_scale(v):
+      # Treat tiny norms as 1 (no scaling) and clip large norms; both Ruiz and
+      # L2 then take 1/sqrt as the scaling factor.
+      v = np.where(v < min_norm, 1.0, np.minimum(v, max_norm))
+      return 1.0 / np.sqrt(v)
+
+    def _apply(d_step, e_step):
+      # In-place D A E and E P E on CSC data arrays.
+      col_scale_a = np.repeat(e_step, np.diff(a.indptr))
+      a.data *= d_step[a.indices] * col_scale_a
       if p.nnz > 0:
-        # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
-        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
-        p.data *= e_i[p.indices] * col_scale_p
+        col_scale_p = np.repeat(e_step, np.diff(p.indptr))
+        p.data *= e_step[p.indices] * col_scale_p
 
-      # Accumulate scaling factors
-      d *= d_i
-      e *= e_i
+    for i in range(num_ruiz_passes):
+      d_step = sp.linalg.norm(a, np.inf, axis=1)
+      e_step = np.maximum(
+          sp.linalg.norm(a, np.inf, axis=0),
+          sp.linalg.norm(p, np.inf, axis=0),
+      )
+      if m > z:
+        d_step[z:] = np.max(d_step[z:])
+      d_step, e_step = _to_scale(d_step), _to_scale(e_step)
+      _apply(d_step, e_step)
+      d *= d_step
+      e *= e_step
       logging.debug(
-          "Equilibration: iter %d: d_i err: %s, e_i err: %s",
-          i,
-          _norm(d_i - 1, np.inf),
-          _norm(e_i - 1, np.inf),
+          "Ruiz pass %d: d err %s, e err %s",
+          i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
       )
 
-    return a, p, b * d, c * e, d, e
+    for i in range(num_l2_passes):
+      d_step = sp.linalg.norm(a, ord=2, axis=1)
+      e_step = np.sqrt(
+          sp.linalg.norm(a, ord=2, axis=0) ** 2
+          + sp.linalg.norm(p, ord=2, axis=0) ** 2
+      )
+      if m > z:
+        d_step[z:] = np.mean(d_step[z:])
+      d_step, e_step = _to_scale(d_step), _to_scale(e_step)
+      _apply(d_step, e_step)
+      d *= d_step
+      e *= e_step
+      logging.debug(
+          "L2 pass %d: d err %s, e err %s",
+          i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
+      )
+
+    # Sigma rescales (b, c) once their D, E factors are folded in. SCS uses the
+    # max of the post-equilibration inf-norms, clipped to [min_norm, max_norm];
+    # tiny values fall back to 1 to avoid amplifying noise.
+    c *= e
+    b *= d
+    sigma_norm = max(_norm(c, np.inf), _norm(b, np.inf))
+    if sigma_norm < min_norm:
+      sigma_norm = 1.0
+    sigma = 1.0 / min(sigma_norm, max_norm)
+    c *= sigma
+    b *= sigma
+
+    return a, p, b, c, d, e, sigma
 
   def _unequilibrate_iterates(self, x, y, s):
-    return (self.e * x, self.d * y, s / self.d)
+    inv_sigma = 1.0 / self.sigma
+    return (self.e * x * inv_sigma, self.d * y * inv_sigma, s / self.d * inv_sigma)
 
   def _equilibrate_iterates(self, x, y, s):
-    return (x / self.e, y / self.d, s * self.d)
+    return (self.sigma * x / self.e, self.sigma * y / self.d, self.sigma * self.d * s)
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
