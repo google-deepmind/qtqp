@@ -364,6 +364,8 @@ class QTQP:
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
       equilibrate: bool = True,
+      equilibrate_constant_d_in_cone: bool = False,
+      equilibrate_separate_scales: bool = False,
       collect_stats: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
@@ -392,6 +394,15 @@ class QTQP:
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
+      equilibrate_constant_d_in_cone (bool): If True (and equilibrate is True),
+        constrain the row scaling D to be constant within the positive-orthant
+        cone (SCS convention for preserving cone membership under arbitrary
+        cones). For QTQP's non-negative orthant, any positive diagonal D
+        already preserves cone membership, so the default is False.
+      equilibrate_separate_scales (bool): If True (and equilibrate is True),
+        compute primal_scale (for c) and dual_scale (for b) independently from
+        their inf-norms (the historical SCS behavior). If False, both equal a
+        single sigma derived from max(||c||_inf, ||b||_inf) (current SCS).
       collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
@@ -427,10 +438,14 @@ class QTQP:
       )
 
     if self.equilibrate:
-      a, p, b, c, self.d, self.e, self.sigma = self._equilibrate()
+      (a, p, b, c, self.d, self.e,
+       self.primal_scale, self.dual_scale) = self._equilibrate(
+          constant_d_in_cone=equilibrate_constant_d_in_cone,
+          separate_scales=equilibrate_separate_scales,
+      )
     else:
       a, p, b, c = self.a, self.p, self.b, self.c
-      self.d, self.e, self.sigma = None, None, None
+      self.d = self.e = self.primal_scale = self.dual_scale = None
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -620,18 +635,33 @@ class QTQP:
       num_l2_passes: int = 1,
       min_norm: float = 1e-4,
       max_norm: float = 1e4,
+      constant_d_in_cone: bool = False,
+      separate_scales: bool = False,
   ):
-    """SCS-style Ruiz + ell_2 equilibration on [[P, A^T], [A, 0]] plus sigma.
+    """SCS-style Ruiz + ell_2 equilibration on [[P, A^T], [A, 0]] plus
+    primal/dual scaling.
 
-    Produces diagonal scales E (size n), D (size m) and scalar sigma > 0 with
-        P_hat = E P E,  A_hat = D A E,  c_hat = sigma E c,  b_hat = sigma D b.
-    The original solution recovers as
-        x = E x_hat / sigma,  y = D y_hat / sigma,  s = D^{-1} s_hat / sigma.
+    Produces diagonal scales E (size n), D (size m) and positive scalars
+    primal_scale, dual_scale (equal in single-scale mode) such that:
+        P_hat = (rho_p / rho_d) E P E,  A_hat = D A E,
+        c_hat = rho_p E c,             b_hat = rho_d D b.
+    The (rho_p / rho_d) factor on P_hat keeps the equilibrated dual KKT in
+    standard form when the two scales differ; when they are equal it is just
+    E P E. The original solution is recovered as
+        x = E x_hat / rho_d,  y = D y_hat / rho_p,  s = D^{-1} s_hat / rho_d.
 
-    To preserve cone membership (s in K iff D s in K) D is held constant across
-    the positive-orthant cone: the per-row Ruiz norm is replaced by the
-    in-cone l_inf, and the per-row l_2 norm by the in-cone mean. The zero-cone
-    slice of D and the columns scaled by E carry no such constraint.
+    constant_d_in_cone:
+      If True, D is held constant across the positive-orthant cone (Ruiz uses
+      the in-cone ell_infinity, L2 uses the in-cone mean) so cone membership
+      is preserved under arbitrary cones (SCS convention). For QTQP the only
+      cone is the non-negative orthant, which is preserved by any positive
+      diagonal D, so the default is False (per-row scaling).
+
+    separate_scales:
+      If False (default, current SCS behavior), one shared sigma rescales both
+      b and c, computed from max(||c||_inf, ||b||_inf). If True, primal_scale
+      is computed from ||c||_inf and dual_scale from ||b||_inf independently
+      (the historical SCS form before they were unified).
     """
     # Work on copies so self.a / self.p stay in original space for use in
     # _check_termination (which un-equilibrates iterates and compares against
@@ -661,7 +691,7 @@ class QTQP:
           sp.linalg.norm(a, np.inf, axis=0),
           sp.linalg.norm(p, np.inf, axis=0),
       )
-      if m > z:
+      if constant_d_in_cone and m > z:
         d_step[z:] = np.max(d_step[z:])
       d_step, e_step = _to_scale(d_step), _to_scale(e_step)
       _apply(d_step, e_step)
@@ -678,7 +708,7 @@ class QTQP:
           sp.linalg.norm(a, ord=2, axis=0) ** 2
           + sp.linalg.norm(p, ord=2, axis=0) ** 2
       )
-      if m > z:
+      if constant_d_in_cone and m > z:
         d_step[z:] = np.mean(d_step[z:])
       d_step, e_step = _to_scale(d_step), _to_scale(e_step)
       _apply(d_step, e_step)
@@ -689,26 +719,46 @@ class QTQP:
           i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
       )
 
-    # Sigma rescales (b, c) once their D, E factors are folded in. SCS uses the
-    # max of the post-equilibration inf-norms, clipped to [min_norm, max_norm];
-    # tiny values fall back to 1 to avoid amplifying noise.
+    # primal_scale rescales c, dual_scale rescales b. Norms are taken on
+    # E*c and D*b, clipped to [min_norm, max_norm]; tiny values fall back to
+    # 1.0 to avoid amplifying noise.
     c *= e
     b *= d
-    sigma_norm = max(_norm(c, np.inf), _norm(b, np.inf))
-    if sigma_norm < min_norm:
-      sigma_norm = 1.0
-    sigma = 1.0 / min(sigma_norm, max_norm)
-    c *= sigma
-    b *= sigma
 
-    return a, p, b, c, d, e, sigma
+    def _scale_from_norm(nrm):
+      if nrm < min_norm:
+        nrm = 1.0
+      return 1.0 / min(nrm, max_norm)
+
+    if separate_scales:
+      primal_scale = _scale_from_norm(_norm(c, np.inf))
+      dual_scale = _scale_from_norm(_norm(b, np.inf))
+      # Absorb the (rho_p/rho_d) factor into P_hat so the IPM still sees a
+      # standard KKT system when the two scales differ.
+      if primal_scale != dual_scale and p.nnz > 0:
+        p.data *= primal_scale / dual_scale
+    else:
+      sigma = _scale_from_norm(max(_norm(c, np.inf), _norm(b, np.inf)))
+      primal_scale = dual_scale = sigma
+
+    c *= primal_scale
+    b *= dual_scale
+
+    return a, p, b, c, d, e, primal_scale, dual_scale
 
   def _unequilibrate_iterates(self, x, y, s):
-    inv_sigma = 1.0 / self.sigma
-    return (self.e * x * inv_sigma, self.d * y * inv_sigma, s / self.d * inv_sigma)
+    return (
+        self.e * x / self.dual_scale,
+        self.d * y / self.primal_scale,
+        s / (self.d * self.dual_scale),
+    )
 
   def _equilibrate_iterates(self, x, y, s):
-    return (self.sigma * x / self.e, self.sigma * y / self.d, self.sigma * self.d * s)
+    return (
+        self.dual_scale * x / self.e,
+        self.primal_scale * y / self.d,
+        self.dual_scale * self.d * s,
+    )
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""

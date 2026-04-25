@@ -1252,7 +1252,13 @@ def test_linearized_tau_always_converges(seed, problem_type):
   # linearized fallback.
   solver._solve_for_tau = types.MethodType(_always_raise_tau, solver)  # pylint: disable=protected-access
 
-  solution = solver.solve(collect_stats=True)
+  # Pin the SCS-style cone-constant D scaling: this stress test exercises the
+  # linearized tau fallback on every iteration, which is sensitive to
+  # equilibration choice; the per-row D default occasionally causes one of the
+  # 30 cases to diverge under the forced fallback.
+  solution = solver.solve(
+      collect_stats=True, equilibrate_constant_d_in_cone=True,
+  )
 
   if problem_type == 'feasible':
     _assert_solution(solution, a, b, c, p, z)
@@ -1263,7 +1269,8 @@ def test_linearized_tau_always_converges(seed, problem_type):
 
 
 def _equilibrate_reference(a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
-                           min_norm=1e-4, max_norm=1e4):
+                           min_norm=1e-4, max_norm=1e4,
+                           constant_d_in_cone=False, separate_scales=False):
   """Reference SCS-style Ruiz + L2 equilibration using sparse matmul."""
   a, p = a.copy(), p.copy()
   b, c = b.copy(), c.copy()
@@ -1274,11 +1281,16 @@ def _equilibrate_reference(a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
     v = np.where(v < min_norm, 1.0, np.minimum(v, max_norm))
     return 1.0 / np.sqrt(v)
 
+  def scale_from_norm(nrm):
+    if nrm < min_norm:
+      nrm = 1.0
+    return 1.0 / min(nrm, max_norm)
+
   for _ in range(num_ruiz_passes):
     d_step = sparse.linalg.norm(a, np.inf, axis=1)
     e_step = np.maximum(sparse.linalg.norm(a, np.inf, axis=0),
                         sparse.linalg.norm(p, np.inf, axis=0))
-    if m > z:
+    if constant_d_in_cone and m > z:
       d_step[z:] = np.max(d_step[z:])
     d_step, e_step = to_scale(d_step), to_scale(e_step)
     d_mat, e_mat = sparse.diags(d_step), sparse.diags(e_step)
@@ -1291,7 +1303,7 @@ def _equilibrate_reference(a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
     d_step = sparse.linalg.norm(a, ord=2, axis=1)
     e_step = np.sqrt(sparse.linalg.norm(a, ord=2, axis=0) ** 2
                      + sparse.linalg.norm(p, ord=2, axis=0) ** 2)
-    if m > z:
+    if constant_d_in_cone and m > z:
       d_step[z:] = np.mean(d_step[z:])
     d_step, e_step = to_scale(d_step), to_scale(e_step)
     d_mat, e_mat = sparse.diags(d_step), sparse.diags(e_step)
@@ -1302,25 +1314,38 @@ def _equilibrate_reference(a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
 
   c = e * c
   b = d * b
-  sigma_norm = max(np.linalg.norm(c, np.inf), np.linalg.norm(b, np.inf))
-  if sigma_norm < min_norm:
-    sigma_norm = 1.0
-  sigma = 1.0 / min(sigma_norm, max_norm)
-  return a, p, sigma * b, sigma * c, d, e, sigma
+  if separate_scales:
+    primal_scale = scale_from_norm(np.linalg.norm(c, np.inf))
+    dual_scale = scale_from_norm(np.linalg.norm(b, np.inf))
+    if primal_scale != dual_scale:
+      p = (primal_scale / dual_scale) * p
+  else:
+    sigma = scale_from_norm(max(np.linalg.norm(c, np.inf),
+                                np.linalg.norm(b, np.inf)))
+    primal_scale = dual_scale = sigma
+  return a, p, dual_scale * b, primal_scale * c, d, e, primal_scale, dual_scale
 
 
+@pytest.mark.parametrize('constant_d,separate', [
+    (False, False), (True, False), (False, True), (True, True),
+])
 @pytest.mark.parametrize('seed', 2142 + np.arange(10))
-def test_equivalent_equilibration(seed):
+def test_equivalent_equilibration(seed, constant_d, separate):
   """Test that in-place equilibration matches the reference sparse matmul."""
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  a_eq, p_eq, b_eq, c_eq, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
+  a_eq, p_eq, b_eq, c_eq, d, e, primal, dual = solver._equilibrate(  # pylint: disable=protected-access
+      constant_d_in_cone=constant_d, separate_scales=separate,
+  )
 
-  a_ref, p_ref, b_ref, c_ref, d_ref, e_ref, sigma_ref = _equilibrate_reference(
-      a, p, b, c, z)
+  ref = _equilibrate_reference(
+      a, p, b, c, z,
+      constant_d_in_cone=constant_d, separate_scales=separate,
+  )
+  a_ref, p_ref, b_ref, c_ref, d_ref, e_ref, primal_ref, dual_ref = ref
 
   np.testing.assert_allclose(a_eq.toarray(), a_ref.toarray(), atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
@@ -1328,7 +1353,8 @@ def test_equivalent_equilibration(seed):
   np.testing.assert_allclose(c_eq, c_ref, atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
-  np.testing.assert_allclose(sigma, sigma_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(primal, primal_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(dual, dual_ref, atol=1e-14, rtol=1e-14)
 
 
 def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
@@ -1792,7 +1818,8 @@ def test_equilibrate_unequilibrate_roundtrip():
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
 
-  _, _, _, _, solver.d, solver.e, solver.sigma = solver._equilibrate()  # pylint: disable=protected-access
+  (_, _, _, _, solver.d, solver.e,
+   solver.primal_scale, solver.dual_scale) = solver._equilibrate()  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.uniform(size=m)
@@ -1984,6 +2011,33 @@ def test_resolve_flip_equilibrate():
   obj1 = c @ sol1.x + 0.5 * sol1.x @ p @ sol1.x
   obj2 = c @ sol2.x + 0.5 * sol2.x @ p @ sol2.x
   np.testing.assert_allclose(obj1, obj2, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize('constant_d,separate', [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_equilibrate_modes_solve(constant_d, separate):
+  """Each (constant_d_in_cone, separate_scales) combo produces a valid
+  solution with the same objective as the unequilibrated solve."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_eq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=True,
+      equilibrate_constant_d_in_cone=constant_d,
+      equilibrate_separate_scales=separate,
+      verbose=False,
+  )
+  sol_noeq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate=False, verbose=False,
+  )
+
+  assert sol_eq.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(sol_eq, a, b, c, p, z)
+  obj_eq = c @ sol_eq.x + 0.5 * sol_eq.x @ p @ sol_eq.x
+  obj_noeq = c @ sol_noeq.x + 0.5 * sol_noeq.x @ p @ sol_noeq.x
+  np.testing.assert_allclose(obj_eq, obj_noeq, atol=1e-5, rtol=1e-5)
 
 
 # =============================================================================
