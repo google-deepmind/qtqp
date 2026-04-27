@@ -154,7 +154,7 @@ solve(
     max_iter: int = 100,
     step_size_scale: float = 0.99,
     min_static_regularization: float = 1e-8,
-    max_iterative_refinement_steps: int = 10,
+    max_iterative_refinement_steps: int = 20,
     linear_solver_atol: float = 1e-12,
     linear_solver_rtol: float = 1e-12,
     linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.AUTO,
@@ -174,7 +174,7 @@ Key parameters:
     interior.
 -   `min_static_regularization`: Diagonal regularization on KKT for robustness.
 -   `max_iterative_refinement_steps`, `linear_solver_atol/rtol`: Control
-    iterative refinement of the linear solve. The default is 10 refinement
+    iterative refinement of the linear solve. The default is 20 refinement
     steps, counting the initial solve.
 -   `linear_solver`: (`qtqp.LinearSolver`) Choose the KKT solver backend (see
     below).
