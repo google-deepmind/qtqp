@@ -308,7 +308,7 @@ class QTQP:
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
-      max_iterative_refinement_steps: int = 10,
+      max_iterative_refinement_steps: int = 20,
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
