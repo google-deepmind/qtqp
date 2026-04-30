@@ -185,15 +185,12 @@ _append_solver_if_available(qtqp.LinearSolver.UMFPACK, 'scikits.umfpack')
 _append_solver_if_available(qtqp.LinearSolver.QDLDL, 'qdldl')
 _append_solver_if_available(qtqp.LinearSolver.CHOLMOD, 'sksparse.cholmod')
 _append_solver_if_available(qtqp.LinearSolver.EIGEN, 'nanoeigenpy')
+_append_solver_if_available(qtqp.LinearSolver.MUMPS, 'petsc4py.PETSc')
 _append_solver_if_available(qtqp.LinearSolver.PARDISO, 'pymklpardiso')
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':
   _append_solver_if_available(qtqp.LinearSolver.ACCELERATE, 'macldlt')
-
-# Petsc4py not available on windows; some conda builds also fail to load
-# (e.g. CUDA-linked builds on machines without a GPU).
-_append_solver_if_available(qtqp.LinearSolver.MUMPS, 'petsc4py.PETSc')
 
 try:
   import cupy  # noqa: F401
