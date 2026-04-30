@@ -15,6 +15,7 @@
 
 """Tests for QTQP solver."""
 
+import importlib
 import sys
 import types
 import numpy as np
@@ -25,11 +26,17 @@ from scipy import sparse
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
     qtqp.LinearSolver.SCIPY_DENSE,
-    qtqp.LinearSolver.UMFPACK,
-    qtqp.LinearSolver.QDLDL,
-    qtqp.LinearSolver.CHOLMOD,
-    qtqp.LinearSolver.EIGEN,
 ]
+
+
+def _append_solver_if_available(linear_solver, module_name):
+  """Append an optional solver only when its import dependency is available."""
+  try:
+    importlib.import_module(module_name)
+  except (ImportError, ModuleNotFoundError, OSError) as e:
+    print(f'Skipping {linear_solver.name} tests: {e}')
+  else:
+    _SOLVERS.append(linear_solver)
 
 
 class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
@@ -174,23 +181,19 @@ def test_auto_caches_resolved_backend(monkeypatch):
       qtqp.LinearSolver.SCIPY,
   ]
 
-try:
-  import pymklpardiso  # noqa: F401
-  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
-except (ImportError, ModuleNotFoundError) as e:
-  print(f'Skipping PARDISO tests: {e}')
+_append_solver_if_available(qtqp.LinearSolver.UMFPACK, 'scikits.umfpack')
+_append_solver_if_available(qtqp.LinearSolver.QDLDL, 'qdldl')
+_append_solver_if_available(qtqp.LinearSolver.CHOLMOD, 'sksparse.cholmod')
+_append_solver_if_available(qtqp.LinearSolver.EIGEN, 'nanoeigenpy')
+_append_solver_if_available(qtqp.LinearSolver.PARDISO, 'pymklpardiso')
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':
-  _SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
+  _append_solver_if_available(qtqp.LinearSolver.ACCELERATE, 'macldlt')
 
 # Petsc4py not available on windows; some conda builds also fail to load
 # (e.g. CUDA-linked builds on machines without a GPU).
-try:
-  import petsc4py.PETSc  # noqa: F401
-  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
-except (ImportError, ModuleNotFoundError) as e:
-  print(f'Skipping MUMPS tests: {e}')
+_append_solver_if_available(qtqp.LinearSolver.MUMPS, 'petsc4py.PETSc')
 
 try:
   import cupy  # noqa: F401
