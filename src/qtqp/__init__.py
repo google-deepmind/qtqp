@@ -739,9 +739,15 @@ class QTQP:
       t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
-    # Standard quadratic formula for the positive root
     if abs(t_a) < _EPS:
-      raise ValueError(f"Near-zero t_a={t_a}, cannot solve for tau")
+      if abs(t_b) < _EPS:
+        raise ValueError(
+            f"Degenerate tau equation: t_a={t_a}, t_b={t_b}, t_c={t_c}"
+        )
+      tau_sol = -t_c / t_b
+      if not np.isfinite(tau_sol) or tau_sol < -1e-10:
+        raise ValueError(f"Invalid linear tau solution found: {tau_sol}")
+      return max(0.0, tau_sol)
 
     discriminant = t_b * t_b - 4 * t_a * t_c
     if discriminant < -1e-9:
