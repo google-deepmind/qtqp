@@ -568,7 +568,7 @@ class QTQP:
     """Ruiz equilibration to improve numerical conditioning."""
     # Work on copies so self.a / self.p are not modified in-place; they are
     # used unequilibrated later (e.g. in _check_termination).
-    a, p = self.a.copy(), self.p.copy()
+    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
     b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
