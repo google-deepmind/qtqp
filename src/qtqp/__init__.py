@@ -229,34 +229,21 @@ class QTQP:
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
     else:
-      self.p = self._validate_and_canonicalize_p(p)
-
-  def _validate_and_canonicalize_p(self, p: sp.csc_matrix) -> sp.csc_matrix:
-    """Validates and returns a symmetric CSC copy of the quadratic matrix."""
-    if not sp.isspmatrix_csc(p):
-      raise TypeError("QP matrix 'p' must be in CSC format.")
-    if p.shape != (self.n, self.n):
-      raise ValueError(
-          f"p must have shape ({self.n}, {self.n}), got {p.shape}"
-      )
-
-    p = p.copy().tocsc()
-    p.sum_duplicates()
-    p.eliminate_zeros()
-    if not np.all(np.isfinite(p.data)):
-      raise ValueError("QP matrix 'p' must contain only finite values.")
-
-    asymmetry = (p - p.T).tocsc()
-    asymmetry.eliminate_zeros()
-    if asymmetry.nnz:
-      scale = max(1.0, np.max(np.abs(p.data), initial=0.0))
-      if np.max(np.abs(asymmetry.data)) > 1e-12 * scale:
+      if not sp.isspmatrix_csc(p):
+        raise TypeError("QP matrix 'p' must be in CSC format.")
+      if p.shape != (self.n, self.n):
+        raise ValueError(
+            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
+        )
+      if not np.all(np.isfinite(p.data)):
+        raise ValueError("QP matrix 'p' must contain only finite values.")
+      asymmetry = p - p.T
+      if (
+          asymmetry.nnz
+          and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12
+      ):
         raise ValueError("QP matrix 'p' must be symmetric.")
-
-    p = ((p + p.T) * 0.5).tocsc()
-    p.sum_duplicates()
-    p.eliminate_zeros()
-    return p
+      self.p = p
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
