@@ -316,6 +316,48 @@ class QTQP:
       equilibrate: bool = True,
       collect_stats: bool = False,
   ) -> Solution:
+    """Solves the QP using a primal-dual interior-point method."""
+    self._linear_solver = None
+    try:
+      return self._solve_impl(
+          atol=atol,
+          rtol=rtol,
+          atol_infeas=atol_infeas,
+          rtol_infeas=rtol_infeas,
+          max_iter=max_iter,
+          step_size_scale=step_size_scale,
+          min_static_regularization=min_static_regularization,
+          max_iterative_refinement_steps=max_iterative_refinement_steps,
+          linear_solver_atol=linear_solver_atol,
+          linear_solver_rtol=linear_solver_rtol,
+          linear_solver=linear_solver,
+          verbose=verbose,
+          equilibrate=equilibrate,
+          collect_stats=collect_stats,
+      )
+    finally:
+      if self._linear_solver is not None:
+        self._linear_solver.free()
+        self._linear_solver = None
+
+  def _solve_impl(
+      self,
+      *,
+      atol: float = 1e-7,
+      rtol: float = 1e-8,
+      atol_infeas: float = 1e-8,
+      rtol_infeas: float = 1e-9,
+      max_iter: int = 100,
+      step_size_scale: float = 0.99,
+      min_static_regularization: float = 1e-8,
+      max_iterative_refinement_steps: int = 20,
+      linear_solver_atol: float = 1e-12,
+      linear_solver_rtol: float = 1e-12,
+      linear_solver: LinearSolver = LinearSolver.AUTO,
+      verbose: bool = True,
+      equilibrate: bool = True,
+      collect_stats: bool = False,
+  ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
     Args:
@@ -528,7 +570,6 @@ class QTQP:
         stats[-1]["status"] = status
 
     # We have terminated for one reason or another.
-    self._linear_solver.free()
     if self.equilibrate:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
@@ -568,7 +609,7 @@ class QTQP:
     """Ruiz equilibration to improve numerical conditioning."""
     # Work on copies so self.a / self.p are not modified in-place; they are
     # used unequilibrated later (e.g. in _check_termination).
-    a, p = self.a.copy(), self.p.copy()
+    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
     b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
