@@ -697,6 +697,46 @@ def test_raise_error_negative_invalid_shapes():
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
 
 
+def test_solve_frees_linear_solver_on_exception(monkeypatch):
+  """Linear solver resources should be freed when an IPM step raises."""
+
+  class FailingSolver(qtqp.direct.LinearSolver):
+
+    def __init__(self):
+      self.freed = False
+
+    def factorize(self):
+      raise RuntimeError("forced factorization failure")
+
+    def solve(self, rhs):
+      del rhs
+      raise AssertionError("factorization should fail before solve")
+
+    def format(self):
+      return 'csc'
+
+    def free(self):
+      self.freed = True
+
+  backend = FailingSolver()
+  monkeypatch.setattr(
+      qtqp,
+      '_resolve_linear_solver',
+      lambda linear_solver: (linear_solver, backend),
+  )
+
+  rng = np.random.default_rng(842)
+  m, n, z = 20, 10, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  with pytest.raises(RuntimeError, match='forced factorization failure'):
+    solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+
+  assert backend.freed
+  assert solver._linear_solver is None  # pylint: disable=protected-access
+
+
 @pytest.mark.parametrize('seed', 842 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 def test_direct_linear_solver(seed, linear_solver):
