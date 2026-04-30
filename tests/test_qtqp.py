@@ -1044,6 +1044,23 @@ def test_equivalent_tau_solution(seed, linear_solver):
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
 
 
+def test_solve_for_tau_handles_linear_equation():
+  """Near-zero quadratic coefficient should fall back to a linear solve."""
+  p = sparse.csc_matrix((1, 1))
+  solver = qtqp.QTQP(
+      a=sparse.csc_matrix([[1.0]]), b=np.ones(1), c=np.zeros(1), z=0, p=p,
+  )
+  solver.q = np.array([1.0, 0.0])
+  solver.kinv_q = np.array([-1.0, 0.0])
+  kinv_r = np.array([-2.0, 0.0])
+
+  tau = solver._solve_for_tau(  # pylint: disable=protected-access
+      p=p, kinv_r=kinv_r, mu=1.0, mu_target=4.0, r_tau=0.0,
+  )
+
+  np.testing.assert_allclose(tau, 2.0)
+
+
 @pytest.mark.parametrize('seed', 42 + np.arange(10))
 def test_linearized_tau_converges_to_exact(seed):
   """Test that the linearized tau fallback converges to the exact quadratic root.
