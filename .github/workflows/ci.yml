@@ -32,6 +32,10 @@ jobs:
           channels: conda-forge
           channel-priority: strict
 
+      - name: Install pip
+        shell: bash -l {0}
+        run: conda install -y pip
+
       # MKL Pardiso is not available on macOS.
       - name: Install MKL Pardiso
         if: matrix.os != 'macos-latest'
