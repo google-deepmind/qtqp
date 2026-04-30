@@ -2155,26 +2155,23 @@ def test_linear_solver_tolerances():
 # Non-symmetric P handling
 # =============================================================================
 
-def test_nonsymmetric_p():
-  """Test solver behavior with a non-symmetric P (upper triangle only).
+def test_nonsymmetric_p_rejected():
+  """Non-symmetric P is ambiguous and should be rejected."""
+  a = sparse.eye(2, format='csc')
+  b = np.ones(2)
+  c = np.zeros(2)
+  p = sparse.csc_matrix([[1.0, 2.0], [0.0, 1.0]])
 
-  Users are expected to provide symmetric P, but verify the solver doesn't
-  crash with the upper triangle alone.
-  """
-  rng = np.random.default_rng(42)
-  m, n, z = 20, 10, 3
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError, match='symmetric'):
+    qtqp.QTQP(a=a, b=b, c=c, z=0, p=p)
 
-  p_triu = sparse.triu(p, format='csc')
 
-  sol_sym = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
-  sol_triu = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_triu).solve(verbose=True)
+def test_nonfinite_p_rejected():
+  """Non-finite entries in P should fail during input validation."""
+  a = sparse.eye(2, format='csc')
+  b = np.ones(2)
+  c = np.zeros(2)
+  p = sparse.csc_matrix([[1.0, np.nan], [np.nan, 1.0]])
 
-  assert sol_sym.status == qtqp.SolutionStatus.SOLVED
-  # Upper-triangle-only P may or may not converge to the same optimum
-  # (it defines a different KKT). Just verify it doesn't crash.
-  assert sol_triu.status in (
-      qtqp.SolutionStatus.SOLVED,
-      qtqp.SolutionStatus.HIT_MAX_ITER,
-      qtqp.SolutionStatus.FAILED,
-  )
+  with pytest.raises(ValueError, match='finite'):
+    qtqp.QTQP(a=a, b=b, c=c, z=0, p=p)
