@@ -133,8 +133,26 @@ class SolutionStatus(enum.Enum):
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
   HIT_MAX_ITER = "hit_max_iter"
+  HIT_TIME_LIMIT = "hit_time_limit"
   FAILED = "failed"
   UNFINISHED = "unfinished"
+
+
+class Initialization(enum.Enum):
+  """How to construct the IPM's starting iterate (x, y, s, tau)."""
+
+  # Trivial: x = 0, y[z:] = s[z:] = 1, tau = 1.
+  TRIVIAL = "trivial"
+
+  # Mehrotra/CVXOPT-style: solve (P + A^T A) x = A^T b - c (the KKT system
+  # [P, A^T; A, -I][x; y] = [-c; b] after eliminating y), set s = b - Ax and
+  # y = Ax - b, then shift the inequality slices into the cone interior.
+  CVXOPT = "cvxopt"
+
+  # Fix s and y in the cone interior (s[z:] = y[z:] = 1) and solve for x by a
+  # direct method that minimizes ||A x + s - b||^2 + ||P x + A^T y + c||^2,
+  # i.e. (A^T A + P^T P) x = A^T (b - s) - P (A^T y + c).
+  LEAST_SQUARES = "least_squares"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -297,14 +315,104 @@ class QTQP:
     return ps.b_dropped - ps.a_dropped @ x
 
   def _init_variables(self):
+    """Build the IPM starting iterate in original (un-equilibrated) space and
+    map to equilibrated space if applicable. tau is always 1.
+    """
+    match self.initialization:
+      case Initialization.TRIVIAL:
+        x, y, s = self._init_trivial()
+      case Initialization.CVXOPT:
+        x, y, s = self._init_cvxopt()
+      case Initialization.LEAST_SQUARES:
+        x, y, s = self._init_least_squares()
+      case _:
+        raise ValueError(f"Unknown initialization: {self.initialization}")
+    if self.equilibrate:
+      x, y, s = self._equilibrate_iterates(x, y, s)
+    return x, y, s, 1.0, {}
+
+  def _init_trivial(self):
     x = np.zeros(self.n)
     y = np.zeros(self.m)
     s = np.zeros(self.m)
     y[self.z :] = 1.0
     s[self.z :] = 1.0
-    if self.equilibrate:
-      x, y, s = self._equilibrate_iterates(x, y, s)
-    return x, y, s, 1.0, {}
+    return x, y, s
+
+  def _init_cvxopt(self, reg: float = 1e-10, shift_buffer: float = 1.0):
+    """Mehrotra/CVXOPT-style starting point.
+
+    Solve the auxiliary saddle-point KKT system directly:
+        [P + reg*I,  A^T] [x]   [-c]
+        [A,          -I ] [y] = [ b]
+    From the second block y = A x - b and Ax + s = b gives s = b - A x = -y on
+    the inequality slice; both y[z:] and s[z:] are then shifted into the cone
+    interior with a +1 buffer (Mehrotra heuristic).
+
+    Eliminating y collapses to (P + A^T A + reg*I) x = A^T b - c, but we never
+    form A^T A: it is typically much denser than A and P themselves and can be
+    full in the worst case. Solving the augmented form via a single sparse
+    factorization avoids that cost. reg regularizes only the (1,1) block so the
+    elimination still matches the (P + A^T A + reg*I) formulation exactly.
+    """
+    z, m, n = self.z, self.m, self.n
+    a, p = self.a, self.p
+    p_reg = p + reg * sp.eye(n, format="csc") if reg > 0 else p
+    kkt = sp.bmat(
+        [[p_reg, a.T], [a, -sp.eye(m, format="csc")]],
+        format="csc",
+    )
+    sol = sp.linalg.spsolve(kkt, np.concatenate([-self.c, self.b]))
+    x = sol[:n]
+    y = sol[n:]
+    s = -y.copy()
+    if m > z:
+      ts = -np.min(s[z:])
+      if ts >= 0:
+        s[z:] += shift_buffer + ts
+      ty = -np.min(y[z:])
+      if ty >= 0:
+        y[z:] += shift_buffer + ty
+    s[:z] = 0.0
+    return x, y, s
+
+  def _init_least_squares(
+      self, reg: float = 1e-10, atol: float = 1e-6, btol: float = 1e-6,
+  ):
+    """Fix s, y in the cone interior and solve for x via iterative least squares.
+
+    Sets s[z:] = y[z:] = 1 and solves
+        x = argmin (1/2) ||A x + s - b||^2 + (1/2) ||P x + A^T y + c||^2
+    by treating it as the sparse least-squares problem
+        min ||M x - d||^2 + reg*||x||^2,   M = [A; P], d = [b-s; -(A^T y + c)]
+    and applying LSQR (Paige/Saunders). LSQR only requires matvecs with M and
+    M^T, so we expose M as a LinearOperator: A^T A, P^2, the stacked matrix,
+    and any direct factorization are all avoided. This keeps peak memory at
+    O(nnz(A) + nnz(P)) — suitable for very large problems where even an
+    augmented KKT factorization would exhaust memory. Initialization tolerance
+    is loose (atol/btol = 1e-6) since the IPM only needs a feasible interior
+    starting point, not a high-accuracy least-squares solution.
+    """
+    z, m, n = self.z, self.m, self.n
+    a, p = self.a, self.p
+    s = np.zeros(m)
+    y = np.zeros(m)
+    s[z:] = 1.0
+    y[z:] = 1.0
+
+    def matvec(v):
+      return np.concatenate([a @ v, p @ v])
+
+    def rmatvec(w):
+      return a.T @ w[:m] + p @ w[m:]
+
+    m_op = sp.linalg.LinearOperator(
+        shape=(m + n, n), matvec=matvec, rmatvec=rmatvec, dtype=a.dtype,
+    )
+    d = np.concatenate([self.b - s, -(a.T @ y + self.c)])
+    damp = np.sqrt(reg) if reg > 0 else 0.0
+    x = sp.linalg.lsqr(m_op, d, damp=damp, atol=atol, btol=btol)[0]
+    return x, y, s
 
   def solve(
       self,
@@ -314,6 +422,7 @@ class QTQP:
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
+      time_limit_secs: float | None = None,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 20,
@@ -362,10 +471,15 @@ class QTQP:
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
+      refinement_strategy: direct.RefinementStrategy = "fixed_point",
+      fgmres_restart: int = 10,
+      legacy_stall_check: bool = False,
+      equilibrate_per_iteration: bool = False,
       verbose: bool = True,
       equilibrate: bool = True,
       equilibrate_constant_d_in_cone: bool = False,
       equilibrate_separate_scales: bool = False,
+      initialization: Initialization = Initialization.TRIVIAL,
       collect_stats: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
@@ -379,6 +493,12 @@ class QTQP:
       rtol_infeas (float): Relative tolerance for detecting primal or dual
         infeasibility.
       max_iter (int): Maximum number of iterations before stopping.
+      time_limit_secs (float | None): If set, stop after the elapsed wall-clock
+        time exceeds this many seconds and return SolutionStatus.HIT_TIME_LIMIT
+        with the latest iterate. The check fires between linear solves and
+        between iterative-refinement steps; it cannot interrupt a single
+        in-progress backend call (notably KKT factorization), so the actual
+        runtime can overshoot by the cost of one such call.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
       min_static_regularization (float): Minimum regularization value used in
@@ -391,6 +511,31 @@ class QTQP:
         refinement process within the linear solver.
       linear_solver (LinearSolver): The linear solver to use when solving the
         KKT system.
+      refinement_strategy ("fixed_point" | "fgmres"): Iterative refinement
+        scheme. "fixed_point" (default) is the classical residual-correction
+        loop. "fgmres" wraps the same direct factorization as a right-
+        preconditioner inside restarted FGMRES, which converges in fewer
+        outer iterations on ill-conditioned KKT systems where pure IR has a
+        contraction factor close to one.
+      fgmres_restart (int): Inner-iteration count between FGMRES restarts.
+        Each inner iteration costs one preconditioner solve plus one matvec
+        and stores two vectors of size n+m. Ignored when refinement_strategy
+        is "fixed_point".
+      legacy_stall_check (bool): When True, restore the original stall
+        criterion ("any non-decrease in residual norm halts refinement").
+        When False (default), use a ratio-and-window criterion that tolerates
+        small non-monotonic blips at the roundoff floor. Exposed for
+        A/B comparison; the rest of the iterative-refinement loop (best-
+        iterate rollback) is unaffected by this flag.
+      equilibrate_per_iteration (bool): When True, apply one Ruiz-style
+        symmetric rescaling of the full KKT matrix at every IPM iteration,
+        on top of whatever one-shot equilibration was applied to A and P at
+        the start. The per-iteration scaling targets the cone-block diagonal
+        which spans many orders of magnitude as the active set separates;
+        it is invisible to the IPM. Reported linear-solve residual norms
+        are in the equilibrated frame and not directly comparable across
+        iterations or against runs with the flag off. Not supported with
+        GPU backends.
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
@@ -403,6 +548,11 @@ class QTQP:
         compute primal_scale (for c) and dual_scale (for b) independently from
         their inf-norms (the historical SCS behavior). If False, both equal a
         single sigma derived from max(||c||_inf, ||b||_inf) (current SCS).
+      initialization (Initialization): How to construct the starting iterate.
+        TRIVIAL uses x = 0 and unit y, s in the cone interior. CVXOPT solves
+        a Mehrotra-style auxiliary KKT system and shifts s, y into the cone
+        interior. LEAST_SQUARES fixes s and y in the cone interior and solves
+        for x by a direct method that minimises the primal and dual residuals.
       collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
@@ -416,20 +566,27 @@ class QTQP:
     assert atol_infeas >= 0
     assert rtol_infeas >= 0
     assert max_iter > 0
+    assert time_limit_secs is None or time_limit_secs > 0
     assert 0 < step_size_scale < 1
     assert min_static_regularization >= 0
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
+    assert refinement_strategy in ("fixed_point", "fgmres")
+    assert fgmres_restart >= 1
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
     )
     self.start_time = timeit.default_timer()
+    self._deadline = (
+        self.start_time + time_limit_secs if time_limit_secs is not None else None
+    )
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
     self.equilibrate = equilibrate
+    self.initialization = initialization
     if verbose:
       print(
           f"| QTQP v{__version__}:"
@@ -470,6 +627,11 @@ class QTQP:
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
+        deadline=self._deadline,
+        refinement_strategy=refinement_strategy,
+        fgmres_restart=fgmres_restart,
+        legacy_stall_check=legacy_stall_check,
+        equilibrate_per_iteration=equilibrate_per_iteration,
     )
 
     stats = []
@@ -502,6 +664,10 @@ class QTQP:
       )
       stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
+      if self._time_limit_reached():
+        status = SolutionStatus.HIT_TIME_LIMIT
+        break
+
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
       xy[: self.n] = x
@@ -519,6 +685,10 @@ class QTQP:
           correction=None,
       )
       stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+
+      if self._time_limit_reached():
+        status = SolutionStatus.HIT_TIME_LIMIT
+        break
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -583,6 +753,9 @@ class QTQP:
       status = self._check_termination(
           x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
       )
+      if status == SolutionStatus.UNFINISHED and self._time_limit_reached():
+        status = SolutionStatus.HIT_TIME_LIMIT
+        stats_i["status"] = status
       self._log_iteration(stats_i)
       if collect_stats:
         stats.append(stats_i)
@@ -618,6 +791,11 @@ class QTQP:
         return Solution(x, y, s, stats, status)
       case SolutionStatus.HIT_MAX_ITER:
         self._log_footer("Hit maximum iterations")
+        x, y, s = x / tau, y / tau, s / tau
+        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
+        return Solution(x, y, s, stats, status)
+      case SolutionStatus.HIT_TIME_LIMIT:
+        self._log_footer("Hit time limit")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
@@ -1098,6 +1276,13 @@ class QTQP:
             "std_s_over_y": np.std(s_over_y),
         })
     return status
+
+  def _time_limit_reached(self) -> bool:
+    """True iff a deadline was set and the current time has exceeded it."""
+    return (
+        self._deadline is not None
+        and timeit.default_timer() > self._deadline
+    )
 
   def _log_header(self):
     if self.verbose:

@@ -115,6 +115,18 @@ class ScipyDenseSolver(LinearSolver):
     if info != 0:
       raise np.linalg.LinAlgError(f"Cholesky failed (dpotrf info={info})")
 
+  def rescale_off_diagonals(self, r: np.ndarray) -> None:
+    super().rescale_off_diagonals(r)
+    n = self._n
+    r_x = r[:n]
+    r_y = r[n:]
+    # _A is (m, n): A[i, j] *= r_y[i] * r_x[j].
+    self._A *= r_y[:, None]
+    self._A *= r_x[None, :]
+    # _P_offdiag is (n, n) symmetric: P[i, j] *= r_x[i] * r_x[j].
+    self._P_offdiag *= r_x[:, None]
+    self._P_offdiag *= r_x[None, :]
+
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     n = self._n
     x_x, x_y = x[:n], x[n:]

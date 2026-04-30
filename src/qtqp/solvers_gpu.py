@@ -56,6 +56,12 @@ class CuDssSolver(LinearSolver):
     self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
     self._kkt_diag_idxs_gpu = self._cp.asarray(self._kkt_diag_idxs)
 
+  def rescale_off_diagonals(self, r):
+    raise NotImplementedError(
+        "Per-iteration equilibration is not supported on the cuDSS backend; "
+        "the GPU-side KKT mirror would not see the rescaling."
+    )
+
   def update_diag(self, diag: np.ndarray) -> None:
     diag_gpu = self._cp.asarray(diag)
     self._kkt_gpu.data[self._kkt_diag_idxs_gpu] = diag_gpu
@@ -155,6 +161,13 @@ class CupyDenseSolver(LinearSolver):
     P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
+
+  def rescale_off_diagonals(self, r):
+    raise NotImplementedError(
+        "Per-iteration equilibration is not supported on the cupy dense "
+        "backend; the GPU-side A and P_offdiag mirrors would not see the "
+        "rescaling."
+    )
 
   def update_diag(self, diag: np.ndarray) -> None:
     self._R_x_gpu.set(diag[:self._n])

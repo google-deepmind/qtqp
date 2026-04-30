@@ -17,6 +17,7 @@
 
 import importlib
 import sys
+import timeit
 import types
 import numpy as np
 import pytest
@@ -773,6 +774,40 @@ def test_direct_linear_solver(seed, linear_solver):
   np.testing.assert_allclose(
       -a @ sol[:n] + (d + mu) * sol[n:], b, atol=1e-10, rtol=1e-10
   )
+
+
+def test_direct_linear_solver_respects_deadline():
+  """Iterative refinement bails out with status='time_limit_exceeded' once the
+  deadline is past. Use loose tolerances and tiny static regularization to keep
+  refinement from converging or stalling on the first step."""
+  rng = np.random.default_rng(42)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 1e-3
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+
+  linear_solver = qtqp.direct.DirectKktSolver(
+      a=a,
+      p=p,
+      z=z,
+      min_static_regularization=1e-2,
+      max_iterative_refinement_steps=20,
+      atol=0.0,
+      rtol=0.0,
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      deadline=timeit.default_timer() - 1.0,
+  )
+  linear_solver.update(mu=mu, s=s, y=y)
+  q = np.concatenate([c, b])
+  _, stats = linear_solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  linear_solver.free()
+
+  assert stats['status'] == 'time_limit_exceeded'
+  assert not stats['converged']
+  # Should have stopped well short of max steps.
+  assert stats['solves'] < 20
 
 
 def test_upper_triangular_kkt_matvec_matches_full():
@@ -1583,6 +1618,55 @@ def test_hit_max_iter_status_collect_stats_counts_post_step_iterates():
 
 
 # =============================================================================
+# SolutionStatus.HIT_TIME_LIMIT
+# =============================================================================
+
+def test_hit_time_limit_status():
+  """Test that HIT_TIME_LIMIT is returned when time_limit_secs is exceeded."""
+  rng = np.random.default_rng(42)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  # Use a tiny limit so the very first iteration trips it. The mid-iteration
+  # check fires after the q-solve, so stats may be empty (broke before the
+  # iteration completed and could record itself).
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      time_limit_secs=1e-9, verbose=True, collect_stats=True
+  )
+
+  assert solution.status == qtqp.SolutionStatus.HIT_TIME_LIMIT
+  # HIT_TIME_LIMIT still returns a finite best-effort iterate (not NaN).
+  assert np.all(np.isfinite(solution.x))
+  assert np.all(np.isfinite(solution.y))
+  assert np.all(np.isfinite(solution.s))
+
+
+def test_hit_time_limit_does_not_override_solved():
+  """A generous time limit must not prevent SOLVED."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      time_limit_secs=60.0, verbose=True
+  )
+
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+
+
+def test_verbose_hit_time_limit(capsys):
+  """Test that verbose=True prints the correct footer when time limit is hit."""
+  rng = np.random.default_rng(42)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True, time_limit_secs=1e-9)
+
+  out = capsys.readouterr().out
+  assert "Hit time limit" in out
+
+
+# =============================================================================
 # collect_stats=False (default)
 # =============================================================================
 
@@ -2041,6 +2125,62 @@ def test_equilibrate_modes_solve(constant_d, separate):
 
 
 # =============================================================================
+# Each Initialization mode produces a valid starting iterate and a correct
+# solution on feasible / infeasible / unbounded problems.
+# =============================================================================
+
+@pytest.mark.parametrize('init', list(qtqp.Initialization))
+@pytest.mark.parametrize('seed', 42 + np.arange(3))
+@pytest.mark.parametrize('problem_type', ['feasible', 'infeasible', 'unbounded'])
+def test_initialization_modes(init, seed, problem_type):
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 5
+  if problem_type == 'feasible':
+    a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  elif problem_type == 'infeasible':
+    a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
+  else:
+    a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
+
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, initialization=init,
+  )
+
+  if problem_type == 'feasible':
+    assert sol.status == qtqp.SolutionStatus.SOLVED
+    _assert_solution(sol, a, b, c, p, z)
+  elif problem_type == 'infeasible':
+    _assert_infeasible(sol, a, b, z)
+  else:
+    _assert_unbounded(sol, a, c, p, z)
+
+
+@pytest.mark.parametrize('init', list(qtqp.Initialization))
+def test_initialization_yields_cone_interior(init):
+  """Whatever init mode is chosen, the IPM's starting iterate must have
+  s[z:] > 0, y[z:] > 0, tau > 0 — these are required for complementarity to be
+  well-defined."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  # _init_variables touches self.equilibrate / self.initialization but not the
+  # KKT solver, so we set just the attributes it needs.
+  solver.equilibrate = False
+  solver.initialization = init
+
+  x, y, s, tau, _ = solver._init_variables()  # pylint: disable=protected-access
+  assert x.shape == (n,)
+  assert y.shape == (m,)
+  assert s.shape == (m,)
+  assert tau > 0
+  assert np.all(y[z:] > 0)
+  assert np.all(s[z:] > 0)
+  np.testing.assert_array_equal(s[:z], 0.0)
+
+
+# =============================================================================
 # complementarity is near zero at convergence
 # =============================================================================
 
@@ -2081,6 +2221,359 @@ def test_iterative_refinement_improves_residual():
   res_50 = sol_50.stats[0]['q_lin_sys_stats']['final_residual_norm']
   assert res_1 >= res_50, (
       f"1-step residual {res_1} should be >= 50-step residual {res_50}"
+  )
+
+
+# =============================================================================
+# Iterative refinement: best-iterate rollback never returns a worse residual
+# than the warm start, even when later steps degrade the iterate.
+# =============================================================================
+
+
+def _initial_residual_norm(linear_solver, q):
+  """Inf-norm of the warm-start residual the way DirectKktSolver computes it."""
+  kkt_rhs = q.copy()
+  kkt_rhs[linear_solver.n :] *= -1.0
+  warm = np.zeros_like(kkt_rhs)
+  return float(np.linalg.norm(kkt_rhs, np.inf))  # warm = 0 => residual = kkt_rhs
+
+
+def test_refinement_rollback_preserves_warm_start():
+  """A near-perfect warm start must never come back worse: best-iterate
+  rollback should keep the residual at or below its starting value even when
+  the IR loop is configured to run extra steps that only inject roundoff."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+  mu = 1e-3
+
+  linear_solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=20,
+      atol=0.0, rtol=0.0,  # never declare convergence; IR runs to completion
+      solver=qtqp.LinearSolver.SCIPY.value(),
+  )
+  linear_solver.update(mu=mu, s=s, y=y)
+  q = np.concatenate([c, b])
+
+  # First solve from cold start to produce a near-optimal reference.
+  ref_sol, ref_stats = linear_solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  ref_residual = ref_stats['final_residual_norm']
+
+  # Re-solve using the reference as warm start: the warm-start residual is
+  # already at the roundoff floor, so further IR steps can only oscillate
+  # within roundoff. The returned residual must not exceed the warm start.
+  _, stats = linear_solver.solve(rhs=q, warm_start=ref_sol)
+  linear_solver.free()
+  assert stats['final_residual_norm'] <= ref_residual
+
+
+# =============================================================================
+# legacy_stall_check parameter: legacy and new criteria both produce a
+# valid solution on a benign problem.
+# =============================================================================
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_legacy_stall_check_solves(legacy):
+  """Both stall-check modes must solve a feasible problem to optimality."""
+  rng = np.random.default_rng(42)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      legacy_stall_check=legacy, verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_legacy_stall_check_bails_on_first_blip():
+  """With legacy_stall_check=True, a single non-decrease in residual halts
+  refinement immediately. With the default ratio+window check, refinement
+  is allowed to tolerate one sluggish step before declaring stall, so the
+  default mode should run at least as many solves as legacy on a problem
+  that produces a slow-contracting residual."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+  mu = 1e-3
+  q = np.concatenate([c, b])
+
+  def make(legacy):
+    ls = qtqp.direct.DirectKktSolver(
+        a=a, p=p, z=z,
+        # Large reg vs. tiny mu => contraction factor ~ 1, so IR oscillates
+        # at the roundoff floor and the legacy criterion fires early.
+        min_static_regularization=1e-2,
+        max_iterative_refinement_steps=20,
+        atol=0.0, rtol=0.0,
+        solver=qtqp.LinearSolver.SCIPY.value(),
+        legacy_stall_check=legacy,
+    )
+    ls.update(mu=mu, s=s, y=y)
+    return ls
+
+  ls_legacy = make(True)
+  _, stats_legacy = ls_legacy.solve(rhs=q, warm_start=np.zeros(n + m))
+  ls_legacy.free()
+
+  ls_new = make(False)
+  _, stats_new = ls_new.solve(rhs=q, warm_start=np.zeros(n + m))
+  ls_new.free()
+
+  assert stats_legacy['solves'] <= stats_new['solves']
+
+
+# =============================================================================
+# FGMRES refinement strategy: opt-in alternative to fixed-point IR.
+# =============================================================================
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_fgmres_strategy_solves(linear_solver):
+  """End-to-end QP solve with refinement_strategy='fgmres' must succeed on
+  every direct backend."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      refinement_strategy='fgmres',
+      linear_solver=linear_solver,
+      verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_fgmres_matches_fixed_point_solution():
+  """FGMRES and fixed-point IR must converge to the same direct-solve
+  answer (up to the requested tolerance) on a well-conditioned problem."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+  mu = 1e-3
+  q = np.concatenate([c, b])
+
+  def solve_with(strategy):
+    ls = qtqp.direct.DirectKktSolver(
+        a=a, p=p, z=z,
+        min_static_regularization=1e-8,
+        max_iterative_refinement_steps=30,
+        atol=1e-12, rtol=1e-12,
+        solver=qtqp.LinearSolver.SCIPY.value(),
+        refinement_strategy=strategy,
+    )
+    ls.update(mu=mu, s=s, y=y)
+    sol, stats = ls.solve(rhs=q, warm_start=np.zeros(n + m))
+    ls.free()
+    return sol, stats
+
+  sol_fp, stats_fp = solve_with('fixed_point')
+  sol_gm, stats_gm = solve_with('fgmres')
+
+  np.testing.assert_allclose(sol_gm, sol_fp, atol=1e-9, rtol=1e-9)
+  assert stats_fp['converged']
+  assert stats_gm['converged']
+
+
+def test_fgmres_beats_fixed_point_under_heavy_regularization():
+  """When min_static_regularization is large compared to the true diagonal,
+  the fixed-point IR contraction factor is close to one and IR struggles to
+  converge. FGMRES preconditioned by the same factor should reach a smaller
+  residual within the same solve budget."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+  mu = 1e-6
+  q = np.concatenate([c, b])
+
+  def solve_with(strategy):
+    ls = qtqp.direct.DirectKktSolver(
+        a=a, p=p, z=z,
+        min_static_regularization=1e-2,  # large vs. mu=1e-6
+        max_iterative_refinement_steps=10,
+        atol=0.0, rtol=0.0,  # exhaust the budget so we compare residuals
+        solver=qtqp.LinearSolver.SCIPY.value(),
+        refinement_strategy=strategy,
+        fgmres_restart=10,
+    )
+    ls.update(mu=mu, s=s, y=y)
+    _, stats = ls.solve(rhs=q, warm_start=np.zeros(n + m))
+    ls.free()
+    return stats
+
+  stats_fp = solve_with('fixed_point')
+  stats_gm = solve_with('fgmres')
+
+  assert stats_gm['final_residual_norm'] < stats_fp['final_residual_norm']
+
+
+# =============================================================================
+# Per-iteration equilibration: opt-in symmetric Ruiz pass at every IPM step.
+# =============================================================================
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_equilibrate_per_iteration_solves(linear_solver):
+  """End-to-end QP solve with equilibrate_per_iteration=True must succeed on
+  every CPU backend (sparse and dense)."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate_per_iteration=True,
+      linear_solver=linear_solver,
+      verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_equilibrate_per_iteration_matches_baseline_solution():
+  """With or without per-iteration equilibration, the IPM should converge to
+  the same optimum on a well-conditioned problem (equilibration is purely
+  a numerical aid, not a problem transformation)."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate_per_iteration=False, verbose=False,
+  )
+  sol_perit = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate_per_iteration=True, verbose=False,
+  )
+  assert sol_baseline.status == qtqp.SolutionStatus.SOLVED
+  assert sol_perit.status == qtqp.SolutionStatus.SOLVED
+  obj_baseline = c @ sol_baseline.x + 0.5 * sol_baseline.x @ p @ sol_baseline.x
+  obj_perit = c @ sol_perit.x + 0.5 * sol_perit.x @ p @ sol_perit.x
+  np.testing.assert_allclose(obj_baseline, obj_perit, atol=1e-5, rtol=1e-5)
+
+
+def test_rescale_off_diagonals_matches_manual_skssym():
+  """LinearSolver.rescale_off_diagonals must produce S K S applied to the
+  scaffold's off-diagonals, where S = diag(r)."""
+  rng = np.random.default_rng(11)
+  m, n, z = 20, 12, 3
+  a, _, _, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+
+  ls = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=1,
+      atol=1e-12, rtol=1e-12,
+      solver=qtqp.LinearSolver.SCIPY.value(),
+  )
+  ls.update(mu=mu, s=s, y=y)
+
+  # Snapshot the full symmetric KKT before rescaling.
+  N = n + m
+  pre = ls._solver._kkt + ls._solver._kkt.T  # pylint: disable=protected-access
+  pre.setdiag(np.asarray(ls._solver._kkt.diagonal()).ravel())  # pylint: disable=protected-access
+  pre = pre.toarray()
+
+  r = rng.uniform(0.5, 2.0, size=N)
+  ls._solver.rescale_off_diagonals(r)  # pylint: disable=protected-access
+
+  post = ls._solver._kkt + ls._solver._kkt.T  # pylint: disable=protected-access
+  post.setdiag(np.asarray(ls._solver._kkt.diagonal()).ravel())  # pylint: disable=protected-access
+  post = post.toarray()
+
+  expected = (r[:, None] * pre) * r[None, :]
+  np.testing.assert_allclose(post, expected, rtol=1e-12, atol=1e-12)
+  ls.free()
+
+
+def test_rescale_off_diagonals_matches_manual_dense():
+  """The dense backend's rescale_off_diagonals must keep _A and _P_offdiag in
+  sync with the symmetric scaling applied to the scaffold."""
+  rng = np.random.default_rng(11)
+  m, n, z = 8, 5, 2
+  a, _, _, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+
+  ls = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=1,
+      atol=1e-12, rtol=1e-12,
+      solver=qtqp.LinearSolver.SCIPY_DENSE.value(),
+  )
+  ls.update(mu=mu, s=s, y=y)
+
+  pre_A = ls._solver._A.copy()  # pylint: disable=protected-access
+  pre_P = ls._solver._P_offdiag.copy()  # pylint: disable=protected-access
+
+  r = rng.uniform(0.5, 2.0, size=n + m)
+  r_x, r_y = r[:n], r[n:]
+  ls._solver.rescale_off_diagonals(r)  # pylint: disable=protected-access
+
+  np.testing.assert_allclose(
+      ls._solver._A, r_y[:, None] * pre_A * r_x[None, :],  # pylint: disable=protected-access
+      rtol=1e-12, atol=1e-12,
+  )
+  np.testing.assert_allclose(
+      ls._solver._P_offdiag, r_x[:, None] * pre_P * r_x[None, :],  # pylint: disable=protected-access
+      rtol=1e-12, atol=1e-12,
+  )
+  ls.free()
+
+
+def test_per_iteration_equilibration_unscales_solution_correctly():
+  """With per-iteration equilibration, DirectKktSolver runs IR in the scaled
+  frame but must return the solution in the IPM frame. Verify the returned
+  solution satisfies the original (unscaled) KKT system to high accuracy."""
+  rng = np.random.default_rng(7)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(size=m)
+  s[:z] = 0.0
+  y = rng.uniform(size=m)
+  mu = 1e-3
+
+  ls = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=20,
+      atol=1e-12, rtol=1e-12,
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      equilibrate_per_iteration=True,
+  )
+  ls.update(mu=mu, s=s, y=y)
+
+  q = np.concatenate([c, b])
+  sol, _ = ls.solve(rhs=q, warm_start=np.zeros(n + m))
+  ls.free()
+
+  d = np.concatenate([np.zeros(z), s[z:] / y[z:]])
+  np.testing.assert_allclose(
+      p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:], c, atol=1e-9, rtol=1e-9,
+  )
+  np.testing.assert_allclose(
+      -a @ sol[:n] + (d + mu) * sol[n:], b, atol=1e-9, rtol=1e-9,
   )
 
 

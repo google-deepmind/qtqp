@@ -108,6 +108,10 @@ class ScipySolver(LinearSolver):
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
 
+  def rescale_off_diagonals(self, r: np.ndarray) -> None:
+    super().rescale_off_diagonals(r)
+    self._rescale_csx_data(self._full_kkt, r)
+
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
 
@@ -344,6 +348,10 @@ class UmfpackSolver(LinearSolver):
   def update_diag(self, diag: np.ndarray) -> None:
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
+
+  def rescale_off_diagonals(self, r: np.ndarray) -> None:
+    super().rescale_off_diagonals(r)
+    self._rescale_csx_data(self._full_kkt, r)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
