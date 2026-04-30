@@ -15,6 +15,7 @@
 
 """Tests for QTQP solver."""
 
+import importlib
 import sys
 import types
 import numpy as np
@@ -25,11 +26,17 @@ from scipy import sparse
 _SOLVERS = [
     qtqp.LinearSolver.SCIPY,
     qtqp.LinearSolver.SCIPY_DENSE,
-    qtqp.LinearSolver.UMFPACK,
-    qtqp.LinearSolver.QDLDL,
-    qtqp.LinearSolver.CHOLMOD,
-    qtqp.LinearSolver.EIGEN,
 ]
+
+
+def _append_solver_if_available(linear_solver, module_name):
+  """Append an optional solver only when its import dependency is available."""
+  try:
+    importlib.import_module(module_name)
+  except (ImportError, ModuleNotFoundError, OSError) as e:
+    print(f'Skipping {linear_solver.name} tests: {e}')
+  else:
+    _SOLVERS.append(linear_solver)
 
 
 class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
@@ -174,23 +181,16 @@ def test_auto_caches_resolved_backend(monkeypatch):
       qtqp.LinearSolver.SCIPY,
   ]
 
-try:
-  import pymklpardiso  # noqa: F401
-  _SOLVERS.append(qtqp.LinearSolver.PARDISO)
-except (ImportError, ModuleNotFoundError) as e:
-  print(f'Skipping PARDISO tests: {e}')
+_append_solver_if_available(qtqp.LinearSolver.UMFPACK, 'scikits.umfpack')
+_append_solver_if_available(qtqp.LinearSolver.QDLDL, 'qdldl')
+_append_solver_if_available(qtqp.LinearSolver.CHOLMOD, 'sksparse.cholmod')
+_append_solver_if_available(qtqp.LinearSolver.EIGEN, 'nanoeigenpy')
+_append_solver_if_available(qtqp.LinearSolver.MUMPS, 'petsc4py.PETSc')
+_append_solver_if_available(qtqp.LinearSolver.PARDISO, 'pymklpardiso')
 
 # Accelerate is macOS only.
 if sys.platform == 'darwin':
-  _SOLVERS.append(qtqp.LinearSolver.ACCELERATE)
-
-# Petsc4py not available on windows; some conda builds also fail to load
-# (e.g. CUDA-linked builds on machines without a GPU).
-try:
-  import petsc4py.PETSc  # noqa: F401
-  _SOLVERS.append(qtqp.LinearSolver.MUMPS)
-except (ImportError, ModuleNotFoundError) as e:
-  print(f'Skipping MUMPS tests: {e}')
+  _append_solver_if_available(qtqp.LinearSolver.ACCELERATE, 'macldlt')
 
 try:
   import cupy  # noqa: F401
@@ -695,6 +695,46 @@ def test_raise_error_negative_invalid_shapes():
   with pytest.raises(ValueError):
     p_invalid = sparse.csc_matrix(np.ones((n + 1, n)))
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
+
+
+def test_solve_frees_linear_solver_on_exception(monkeypatch):
+  """Linear solver resources should be freed when an IPM step raises."""
+
+  class FailingSolver(qtqp.direct.LinearSolver):
+
+    def __init__(self):
+      self.freed = False
+
+    def factorize(self):
+      raise RuntimeError("forced factorization failure")
+
+    def solve(self, rhs):
+      del rhs
+      raise AssertionError("factorization should fail before solve")
+
+    def format(self):
+      return 'csc'
+
+    def free(self):
+      self.freed = True
+
+  backend = FailingSolver()
+  monkeypatch.setattr(
+      qtqp,
+      '_resolve_linear_solver',
+      lambda linear_solver: (linear_solver, backend),
+  )
+
+  rng = np.random.default_rng(842)
+  m, n, z = 20, 10, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+
+  with pytest.raises(RuntimeError, match='forced factorization failure'):
+    solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+
+  assert backend.freed
+  assert solver._linear_solver is None  # pylint: disable=protected-access
 
 
 @pytest.mark.parametrize('seed', 842 + np.arange(10))
