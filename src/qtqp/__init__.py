@@ -233,8 +233,16 @@ class QTQP:
         raise TypeError("QP matrix 'p' must be in CSC format.")
       if p.shape != (self.n, self.n):
         raise ValueError(
-            f"p must have shape ({self.n}, {self.n}, got {p.shape})"
+            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
         )
+      if not np.all(np.isfinite(p.data)):
+        raise ValueError("QP matrix 'p' must contain only finite values.")
+      asymmetry = p - p.T
+      if (
+          asymmetry.nnz
+          and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12
+      ):
+        raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
   def _presolve(self, inf_bound: float = 1e20):
