@@ -37,12 +37,15 @@ import logging
 import math
 import sys
 import timeit
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import numpy as np
 import scipy.sparse as sp
 
 from . import direct
+
+
+EquilibrationMethod = Literal["ruiz", "curtis_reid"]
 
 __version__ = "0.0.5"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -172,6 +175,140 @@ class Solution:
   s: np.ndarray
   stats: List[Dict[str, Any]]
   status: SolutionStatus
+
+
+def _curtis_reid_balance(
+    a: sp.spmatrix,
+    p: sp.spmatrix,
+    *,
+    cg_rtol: float,
+    cg_maxiter: int,
+) -> np.ndarray:
+  """Curtis-Reid (1972) symmetric scaling of |[P, A.T; A, 0]|.
+
+  Finds positive scales x = exp(s), with s in R^(n+m), that minimize the
+  sum of squared log-magnitudes of the scaled nonzero entries:
+
+      L(s) = sum_{(i,j) in nz, i <= j}  ( log|K_ij| + s_i + s_j )^2
+
+  The first-order optimality conditions are linear in s and form the symmetric
+  positive-(semi)definite system
+
+      Q s = b,
+      Q[k,k] = N_k_off + 4 * 1[diag k nonzero]
+      Q[k,j] = 1 for j != k with K_{kj} nonzero
+      b[k]   = - sum_{j != k: nz} log|K_{kj}|  -  2 * 1[diag k nz] * log|K_{kk}|
+
+  where N_k_off counts off-diagonal nonzeros in row k. Solved via CG.
+
+  Memory-efficient implementation: the augmented |K| is never materialized.
+  We work directly with the input A and P matrices' data and index arrays,
+  scattering scalar quantities (row counts, log-sums, diagonal indicators)
+  into N-sized vectors, and apply Q implicitly via a LinearOperator that
+  composes matvecs against pattern-only views of A and P (sparse matrices
+  built with shared indices/indptr arrays and a fresh data array of ones).
+
+  Rows with no nonzero entries in K -- truly empty rows of A or P -- have
+  N_k_off = 0 and diag_indicator = 0, so Q's k-th row collapses to a single
+  diagonal entry of zero. We replace that entry with 1 so the CG system
+  stays nonsingular; the corresponding b entry is also 0, so CG produces
+  s_k = 0 (i.e., scale 1) automatically.
+
+  Returns x of length n + m. e = x[:n] scales the columns of A and the rows
+  /columns of P; d = x[n:] scales the rows of A.
+  """
+  n, m = p.shape[0], a.shape[0]
+  N = n + m
+
+  # Work in CSC throughout. Both .tocsc() calls are no-ops if already CSC.
+  a_csc = a.tocsc() if a.format != "csc" else a
+  p_csc = p.tocsc() if p.nnz > 0 and p.format != "csc" else p
+  has_p = p_csc.nnz > 0
+
+  if a_csc.nnz == 0 and not has_p:
+    return np.ones(N, dtype=np.float64)
+
+  # Per-row nonzero counts of K = [P, A.T; A, 0]. Top-n rows accumulate
+  # contributions from |P| rows and from |A.T| rows (= |A| columns); the
+  # bottom-m rows accumulate from |A| rows. CSC indices are row indices, so
+  # scatter-add on indices counts per-row; np.diff(indptr) counts per-column.
+  n_per_row = np.zeros(N, dtype=np.float64)
+  if has_p:
+    np.add.at(n_per_row[:n], p_csc.indices, 1.0)
+  n_per_row[:n] += np.diff(a_csc.indptr).astype(np.float64)  # |A| col counts
+  np.add.at(n_per_row[n:], a_csc.indices, 1.0)               # |A| row counts
+
+  # Diagonal indicator and log magnitudes of diagonal: only the top-n block
+  # can have a nonzero diagonal entry (bottom-right block is zero by
+  # construction).
+  diag_p = p_csc.diagonal() if has_p else np.zeros(n, dtype=np.float64)
+  diag_indicator = np.zeros(N, dtype=np.float64)
+  log_diag = np.zeros(N, dtype=np.float64)
+  diag_pos = np.abs(diag_p) > 0
+  diag_indicator[:n][diag_pos] = 1.0
+  log_diag[:n][diag_pos] = np.log(np.abs(diag_p[diag_pos]))
+
+  # Per-row sum of log magnitudes, including the diagonal contribution.
+  # Same scatter-add pattern as the row counts but weighted by log|.|.
+  total_log = np.zeros(N, dtype=np.float64)
+  if has_p:
+    log_p_data = np.log(np.abs(p_csc.data))
+    np.add.at(total_log[:n], p_csc.indices, log_p_data)
+    del log_p_data
+  log_a_data = np.log(np.abs(a_csc.data))
+  # |A| column-wise log sums into top-n: scatter by column index.
+  a_col_idx = np.repeat(np.arange(n, dtype=np.intp), np.diff(a_csc.indptr))
+  np.add.at(total_log[:n], a_col_idx, log_a_data)
+  del a_col_idx
+  np.add.at(total_log[n:], a_csc.indices, log_a_data)
+  del log_a_data
+
+  b_rhs = -(total_log + diag_indicator * log_diag)
+  del total_log, log_diag
+
+  # Q diagonal seen by the matvec: Q v = adj(K) v + adj_diag * v, where
+  # adj_diag = N_k_off + 3 * diag_indicator = n_per_row + 2 * diag_indicator.
+  # Empty rows (no entries in K) get adj_diag = 0; bump them to 1 so the
+  # CG system stays nonsingular and resolves s_k = b_k / 1 = 0 there.
+  adj_diag = n_per_row + 2.0 * diag_indicator
+  adj_diag[adj_diag == 0.0] = 1.0
+  del n_per_row, diag_indicator
+
+  # Pattern-only views of A and P: same indices/indptr arrays as the inputs
+  # (no copy), with the data array replaced by ones. These give us
+  # `pattern @ v` = "sum v[j] over non-zero columns j of each row" matvecs.
+  a_ones = sp.csc_matrix(
+      (np.ones(a_csc.nnz, dtype=np.float64), a_csc.indices, a_csc.indptr),
+      shape=a_csc.shape,
+  )
+  p_ones = sp.csc_matrix(
+      (np.ones(p_csc.nnz, dtype=np.float64), p_csc.indices, p_csc.indptr),
+      shape=p_csc.shape,
+  ) if has_p else None
+  a_ones_T = a_ones.T  # CSR view, no data copy
+
+  def Q_matvec(v: np.ndarray) -> np.ndarray:
+    out = np.empty(N, dtype=np.float64)
+    v_top, v_bot = v[:n], v[n:]
+    if p_ones is not None:
+      out[:n] = p_ones @ v_top
+      out[:n] += a_ones_T @ v_bot
+    else:
+      out[:n] = a_ones_T @ v_bot
+    out[n:] = a_ones @ v_top
+    out += adj_diag * v
+    return out
+
+  op = sp.linalg.LinearOperator(
+      (N, N), matvec=Q_matvec, dtype=np.float64,
+  )
+  s, info = sp.linalg.cg(op, b_rhs, rtol=cg_rtol, maxiter=cg_maxiter)
+  if info != 0:
+    logging.debug(
+        "Curtis-Reid CG returned info=%d (>0: maxiter, <0: breakdown)", info
+    )
+
+  return np.exp(s)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -479,6 +616,7 @@ class QTQP:
       equilibrate: bool = True,
       equilibrate_constant_d_in_cone: bool = False,
       equilibrate_separate_scales: bool = False,
+      equilibration_method: EquilibrationMethod = "ruiz",
       initialization: Initialization = Initialization.TRIVIAL,
       collect_stats: bool = False,
   ) -> Solution:
@@ -548,6 +686,13 @@ class QTQP:
         compute primal_scale (for c) and dual_scale (for b) independently from
         their inf-norms (the historical SCS behavior). If False, both equal a
         single sigma derived from max(||c||_inf, ||b||_inf) (current SCS).
+      equilibration_method ("ruiz" | "curtis_reid"): Algorithm used by the
+        one-shot equilibration of [P, A.T; A, 0] before the IPM starts.
+        "ruiz" (default) is the classical inf-norm fixed-point. "curtis_reid"
+        is the Curtis-Reid (1972) least-squares balancing in log-space, a
+        single CG solve on a symmetric positive-definite normal-equations
+        matrix. The downstream L2 polish and primal/dual scaling are
+        identical for both methods.
       initialization (Initialization): How to construct the starting iterate.
         TRIVIAL uses x = 0 and unit y, s in the cone interior. CVXOPT solves
         a Mehrotra-style auxiliary KKT system and shifts s, y into the cone
@@ -599,6 +744,7 @@ class QTQP:
        self.primal_scale, self.dual_scale) = self._equilibrate(
           constant_d_in_cone=equilibrate_constant_d_in_cone,
           separate_scales=equilibrate_separate_scales,
+          method=equilibration_method,
       )
     else:
       a, p, b, c = self.a, self.p, self.b, self.c
@@ -815,6 +961,9 @@ class QTQP:
       max_norm: float = 1e4,
       constant_d_in_cone: bool = False,
       separate_scales: bool = False,
+      method: EquilibrationMethod = "ruiz",
+      cr_cg_rtol: float = 1e-8,
+      cr_cg_maxiter: int = 200,
   ):
     """SCS-style Ruiz + ell_2 equilibration on [[P, A^T], [A, 0]] plus
     primal/dual scaling.
@@ -840,6 +989,16 @@ class QTQP:
       b and c, computed from max(||c||_inf, ||b||_inf). If True, primal_scale
       is computed from ||c||_inf and dual_scale from ||b||_inf independently
       (the historical SCS form before they were unified).
+
+    method:
+      "ruiz" (default) runs the classical Ruiz inf-norm fixed-point pass for
+      num_ruiz_passes iterations. "curtis_reid" runs the Curtis-Reid (1972)
+      least-squares balancing on |[P, A.T; A, 0]|, which finds positive scales
+      x such that the scaled nonzero entries cluster around magnitude one in
+      the log-mean-squared sense. CR is a single sparse linear solve (CG on a
+      symmetric positive-definite normal-equations matrix), not an iterative
+      pass. The downstream L2 polish and primal/dual scaling are identical
+      for both methods.
     """
     # Work on copies so self.a / self.p stay in original space for use in
     # _check_termination (which un-equilibrates iterates and compares against
@@ -863,21 +1022,44 @@ class QTQP:
         col_scale_p = np.repeat(e_step, np.diff(p.indptr))
         p.data *= e_step[p.indices] * col_scale_p
 
-    for i in range(num_ruiz_passes):
-      d_step = sp.linalg.norm(a, np.inf, axis=1)
-      e_step = np.maximum(
-          sp.linalg.norm(a, np.inf, axis=0),
-          sp.linalg.norm(p, np.inf, axis=0),
+    if method == "ruiz":
+      for i in range(num_ruiz_passes):
+        d_step = sp.linalg.norm(a, np.inf, axis=1)
+        e_step = np.maximum(
+            sp.linalg.norm(a, np.inf, axis=0),
+            sp.linalg.norm(p, np.inf, axis=0),
+        )
+        if constant_d_in_cone and m > z:
+          d_step[z:] = np.max(d_step[z:])
+        d_step, e_step = _to_scale(d_step), _to_scale(e_step)
+        _apply(d_step, e_step)
+        d *= d_step
+        e *= e_step
+        logging.debug(
+            "Ruiz pass %d: d err %s, e err %s",
+            i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
+        )
+    elif method == "curtis_reid":
+      x = _curtis_reid_balance(
+          a, p, cg_rtol=cr_cg_rtol, cg_maxiter=cr_cg_maxiter,
       )
+      e_step, d_step = x[: self.n], x[self.n :]
       if constant_d_in_cone and m > z:
         d_step[z:] = np.max(d_step[z:])
-      d_step, e_step = _to_scale(d_step), _to_scale(e_step)
+      lo, hi = 1.0 / math.sqrt(max_norm), 1.0 / math.sqrt(min_norm)
+      np.clip(d_step, lo, hi, out=d_step)
+      np.clip(e_step, lo, hi, out=e_step)
       _apply(d_step, e_step)
       d *= d_step
       e *= e_step
       logging.debug(
-          "Ruiz pass %d: d err %s, e err %s",
-          i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
+          "Curtis-Reid: d err %s, e err %s",
+          _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
+      )
+    else:
+      raise ValueError(
+          f"Unknown equilibration method {method!r}; "
+          "expected 'ruiz' or 'curtis_reid'."
       )
 
     for i in range(num_l2_passes):

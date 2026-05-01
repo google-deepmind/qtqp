@@ -2424,6 +2424,91 @@ def test_fgmres_beats_fixed_point_under_heavy_regularization():
 
 
 # =============================================================================
+# equilibration_method toggle: Ruiz vs Curtis-Reid.
+# =============================================================================
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+@pytest.mark.parametrize('method', ['ruiz', 'curtis_reid'])
+def test_equilibration_method_solves(method, linear_solver):
+  """End-to-end QP solve must succeed under either equilibration method on
+  every CPU backend."""
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method=method,
+      linear_solver=linear_solver,
+      verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('seed', 42 + np.arange(3))
+def test_equilibration_methods_match_optimum(seed):
+  """Ruiz and Curtis-Reid are different equilibration strategies for the same
+  problem; both should drive the IPM to the same optimum."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  sol_ruiz = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method='ruiz', verbose=False,
+  )
+  sol_cr = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method='curtis_reid', verbose=False,
+  )
+  assert sol_ruiz.status == qtqp.SolutionStatus.SOLVED
+  assert sol_cr.status == qtqp.SolutionStatus.SOLVED
+  obj_ruiz = c @ sol_ruiz.x + 0.5 * sol_ruiz.x @ p @ sol_ruiz.x
+  obj_cr = c @ sol_cr.x + 0.5 * sol_cr.x @ p @ sol_cr.x
+  np.testing.assert_allclose(obj_ruiz, obj_cr, atol=1e-5, rtol=1e-5)
+
+
+def test_curtis_reid_balance_reduces_log_magnitude_spread():
+  """Curtis-Reid minimizes the sum of squared log-magnitudes of the scaled
+  nonzero entries, so the standard deviation of log|K_scaled| should be no
+  larger (typically smaller) than that of log|K_original|."""
+  rng = np.random.default_rng(0)
+  n_dim = 8
+  a_dense = np.abs(rng.normal(size=(n_dim, n_dim)))
+  a_sym = (a_dense + a_dense.T) / 2
+  p_sp = sparse.csc_matrix(a_sym)
+  a_sp = sparse.csc_matrix((0, n_dim))
+
+  x = qtqp._curtis_reid_balance(  # pylint: disable=protected-access
+      a_sp, p_sp, cg_rtol=1e-12, cg_maxiter=100,
+  )
+  s_diag = np.diag(x)
+  k_scaled = s_diag @ abs(p_sp).toarray() @ s_diag
+  log_before = np.log(a_sym[a_sym > 0])
+  log_after = np.log(k_scaled[k_scaled > 0])
+  assert np.std(log_after) <= np.std(log_before)
+
+
+def test_curtis_reid_skips_zero_rows():
+  """If the input has zero rows (degenerate constraints), Curtis-Reid must
+  leave their scales at 1 and balance only the active sub-problem rather
+  than diverge or return NaNs."""
+  rng = np.random.default_rng(7)
+  m, n, z = 8, 5, 2
+  a_dense = rng.normal(size=(m, n))
+  a_dense[2, :] = 0.0  # force a zero row
+  a = sparse.csc_matrix(a_dense)
+  p = sparse.csc_matrix(np.diag(rng.uniform(0.1, 1.0, size=n)))
+
+  x = qtqp._curtis_reid_balance(  # pylint: disable=protected-access
+      a, p, cg_rtol=1e-10, cg_maxiter=200,
+  )
+  assert np.all(np.isfinite(x))
+  assert np.all(x > 0)
+  # The zero row of A is at row 2 of A, which corresponds to KKT row n + 2.
+  assert x[n + 2] == 1.0
+
+
+# =============================================================================
 # Per-iteration equilibration: opt-in symmetric Ruiz pass at every IPM step.
 # =============================================================================
 
