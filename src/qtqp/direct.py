@@ -159,7 +159,7 @@ class DirectKktSolver:
       refinement_strategy: RefinementStrategy = "fixed_point",
       fgmres_restart: int = 10,
       legacy_stall_check: bool = False,
-      equilibrate_per_iteration: bool = False,
+      equilibrate_per_iteration: int = 0,
   ):
     """Initializes the DirectKktSolver.
 
@@ -191,16 +191,17 @@ class DirectKktSolver:
         (default), use a ratio-and-window criterion that is robust to small
         non-monotonic blips at the roundoff floor and only halts when progress
         truly stops or the residual blows up. Exposed for A/B comparison.
-      equilibrate_per_iteration: When True, apply one symmetric Ruiz-style
-        rescaling of the full KKT matrix at every ``update`` call (in addition
-        to whatever one-shot equilibration the caller already applied to A and
-        P). The scaling is incremental: each iteration reads the current row
+      equilibrate_per_iteration: Number of symmetric Ruiz-style rescalings
+        of the full KKT matrix to apply at every ``update`` call (in addition
+        to whatever one-shot equilibration the caller already applied to A
+        and P). 0 (default) disables per-iteration equilibration entirely;
+        N > 0 runs N consecutive Ruiz passes. Each pass reads the current row
         inf-norms of the stored KKT, derives a per-row factor 1/sqrt(row_inf),
         applies it symmetrically as ``S K S``, and accumulates the cumulative
         scale. The IPM continues to operate in its original frame; the per-
         iteration scaling is invisible outside DirectKktSolver. Reported
         residual norms are in the equilibrated frame, so they are not directly
-        comparable across iterations or against runs with the flag off.
+        comparable across iterations or against runs with this set to 0.
         Backends with private off-diagonal storage must implement
         ``rescale_off_diagonals``; the dense and CPU sparse backends do, the
         GPU backends do not.
@@ -229,6 +230,8 @@ class DirectKktSolver:
     self.refinement_strategy = refinement_strategy
     self.fgmres_restart = fgmres_restart
     self.legacy_stall_check = legacy_stall_check
+    if equilibrate_per_iteration < 0:
+      raise ValueError("equilibrate_per_iteration must be >= 0.")
     self.equilibrate_per_iteration = equilibrate_per_iteration
     self._solver.set_dims(n=self.n, m=self.m, z=self.z)
 
@@ -286,12 +289,21 @@ class DirectKktSolver:
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
 
     if self.equilibrate_per_iteration:
-      # Apply one Ruiz pass to the full KKT, in place. This rescales the
+      # Snapshot the IPM's positive unscaled diagonals once, before applying
+      # any Ruiz passes. Each pass needs the original unscaled values to
+      # rebuild the scaled diagonals as ``cum_sq * unscaled``; if we instead
+      # re-snapshotted from self._true_diags inside the pass, the second pass
+      # would treat already-scaled diagonals as unscaled and the cumulative
+      # scale would compound twice.
+      np.copyto(self._true_diags_unscaled, self._true_diags)
+      np.copyto(self._reg_diags_unscaled, self._reg_diags)
+      # Apply N Ruiz passes to the full KKT, in place. Each pass rescales the
       # scaffold's off-diagonals via the backend, advances cumulative_scale,
       # and leaves self._true_diags / self._reg_diags scaled into the new
       # cumulative frame (still positive; the quasidefinite negation below
       # applies to the scaled values).
-      self._equilibrate_one_pass()
+      for _ in range(self.equilibrate_per_iteration):
+        self._equilibrate_one_pass()
 
     # Flip the sign of the cone variables.
     self._true_diags[self.n :] *= -1.0
@@ -309,16 +321,15 @@ class DirectKktSolver:
   def _equilibrate_one_pass(self) -> None:
     """One Ruiz-style symmetric rescaling of the stored KKT.
 
-    Reads ``self._true_diags`` / ``self._reg_diags`` as the current iteration's
-    unscaled positive diagonals, and on exit leaves them rescaled into the
-    new cumulative frame (still positive; caller applies the quasidefinite
+    Reads the IPM's positive unscaled diagonals from
+    ``self._true_diags_unscaled`` / ``self._reg_diags_unscaled`` (snapshotted
+    by ``update`` before the pass loop) and on exit leaves
+    ``self._true_diags`` / ``self._reg_diags`` rescaled into the new
+    cumulative frame (still positive; caller applies the quasidefinite
     negation). Rescales the scaffold's off-diagonals via the backend and
     advances ``self._cumulative_scale``.
     """
     n = self.n
-    np.copyto(self._true_diags_unscaled, self._true_diags)
-    np.copyto(self._reg_diags_unscaled, self._reg_diags)
-
     # Write the current iteration's diagonal in the current cumulative frame
     # to the scaffold so that row inf-norms reflect this iteration's KKT.
     # Use self._reg_diags as scratch for the negated, scaled diagonal.

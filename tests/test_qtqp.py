@@ -1392,6 +1392,105 @@ def test_equivalent_equilibration(seed, constant_d, separate):
   np.testing.assert_allclose(dual, dual_ref, atol=1e-14, rtol=1e-14)
 
 
+def _equilibrate_reference_augmented(
+    a, p, b, c, z, num_ruiz_passes=25, num_l2_passes=1,
+    min_norm=1e-4, max_norm=1e4, constant_d_in_cone=False,
+):
+  """Reference Ruiz + L2 equilibration on the SCS augmented KKT matrix
+  [[P, A^T, c], [A, 0, b], [c^T, b^T, 0]] using sparse matmul.
+  """
+  a, p = a.copy(), p.copy()
+  b, c = b.copy(), c.copy()
+  m, n = a.shape
+  d, e = np.ones(m), np.ones(n)
+  sigma = 1.0
+
+  def to_scale(v):
+    v = np.where(v < min_norm, 1.0, np.minimum(v, max_norm))
+    return 1.0 / np.sqrt(v)
+
+  def to_scalar_scale(v):
+    if v < min_norm:
+      v = 1.0
+    else:
+      v = min(v, max_norm)
+    return 1.0 / np.sqrt(v)
+
+  def apply_diag(d_step, e_step):
+    d_mat, e_mat = sparse.diags(d_step), sparse.diags(e_step)
+    return d_mat @ a @ e_mat, e_mat @ p @ e_mat
+
+  for _ in range(num_ruiz_passes):
+    e_norm = np.maximum.reduce([
+        sparse.linalg.norm(a, np.inf, axis=0),
+        sparse.linalg.norm(p, np.inf, axis=0),
+        np.abs(c),
+    ])
+    d_norm = np.maximum(sparse.linalg.norm(a, np.inf, axis=1), np.abs(b))
+    sigma_norm = max(np.linalg.norm(c, np.inf), np.linalg.norm(b, np.inf))
+    if constant_d_in_cone and m > z:
+      d_norm[z:] = np.max(d_norm[z:])
+    d_step, e_step = to_scale(d_norm), to_scale(e_norm)
+    sigma_step = to_scalar_scale(sigma_norm)
+    a, p = apply_diag(d_step, e_step)
+    c = e_step * c * sigma_step
+    b = d_step * b * sigma_step
+    d *= d_step
+    e *= e_step
+    sigma *= sigma_step
+
+  for _ in range(num_l2_passes):
+    d_norm = np.sqrt(sparse.linalg.norm(a, ord=2, axis=1) ** 2 + b ** 2)
+    e_norm = np.sqrt(
+        sparse.linalg.norm(a, ord=2, axis=0) ** 2
+        + sparse.linalg.norm(p, ord=2, axis=0) ** 2
+        + c ** 2
+    )
+    sigma_norm = np.sqrt(np.linalg.norm(c, 2) ** 2 + np.linalg.norm(b, 2) ** 2)
+    if constant_d_in_cone and m > z:
+      d_norm[z:] = np.mean(d_norm[z:])
+    d_step, e_step = to_scale(d_norm), to_scale(e_norm)
+    sigma_step = to_scalar_scale(sigma_norm)
+    a, p = apply_diag(d_step, e_step)
+    c = e_step * c * sigma_step
+    b = d_step * b * sigma_step
+    d *= d_step
+    e *= e_step
+    sigma *= sigma_step
+
+  return a, p, b, c, d, e, sigma, sigma
+
+
+@pytest.mark.parametrize('constant_d', [False, True])
+@pytest.mark.parametrize('seed', 2142 + np.arange(10))
+def test_equivalent_equilibration_augmented(seed, constant_d):
+  """In-place augmented-Ruiz equilibration matches the reference sparse
+  matmul implementation on the augmented KKT matrix."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  a_eq, p_eq, b_eq, c_eq, d, e, primal, dual = solver._equilibrate(  # pylint: disable=protected-access
+      method='augmented_kkt', constant_d_in_cone=constant_d,
+  )
+
+  ref = _equilibrate_reference_augmented(
+      a, p, b, c, z, constant_d_in_cone=constant_d,
+  )
+  a_ref, p_ref, b_ref, c_ref, d_ref, e_ref, primal_ref, dual_ref = ref
+
+  np.testing.assert_allclose(a_eq.toarray(), a_ref.toarray(), atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(b_eq, b_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(c_eq, c_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(primal, primal_ref, atol=1e-14, rtol=1e-14)
+  np.testing.assert_allclose(dual, dual_ref, atol=1e-14, rtol=1e-14)
+  assert primal == dual
+
+
 def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
                               d_tau, d_s):
   """Reference sigma using _normalize then mu = (y @ s) / (m - z), as in the
@@ -2165,12 +2264,11 @@ def test_initialization_yields_cone_interior(init):
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  # _init_variables touches self.equilibrate / self.initialization but not the
-  # KKT solver, so we set just the attributes it needs.
-  solver.equilibrate = False
   solver.initialization = init
 
-  x, y, s, tau, _ = solver._init_variables()  # pylint: disable=protected-access
+  x, y, s, tau, _ = solver._init_variables(  # pylint: disable=protected-access
+      solver.a, solver.p, solver.b, solver.c
+  )
   assert x.shape == (n,)
   assert y.shape == (m,)
   assert s.shape == (m,)
@@ -2424,12 +2522,88 @@ def test_fgmres_beats_fixed_point_under_heavy_regularization():
 
 
 # =============================================================================
-# equilibration_method toggle: Ruiz vs Curtis-Reid.
+# Clarabel: parity with QTQP for init + refinement options.
+# =============================================================================
+
+
+@pytest.mark.parametrize('initialization', [
+    qtqp.Initialization.TRIVIAL,
+    qtqp.Initialization.CVXOPT,
+    qtqp.Initialization.LEAST_SQUARES,
+])
+def test_clarabel_accepts_all_initializations(initialization):
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+      initialization=initialization, verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('refinement_strategy', ['fixed_point', 'fgmres'])
+def test_clarabel_accepts_refinement_strategies(refinement_strategy):
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+      refinement_strategy=refinement_strategy,
+      fgmres_restart=10,
+      verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('passes', [0, 1, 2])
+def test_clarabel_accepts_equilibrate_per_iteration(passes):
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibrate_per_iteration=passes, verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_clarabel_accepts_legacy_stall_check(legacy):
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+      legacy_stall_check=legacy, verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+@pytest.mark.parametrize('equilibration_method', ['kkt', 'augmented_kkt'])
+def test_clarabel_accepts_equilibration_method(equilibration_method):
+  rng = np.random.default_rng(42)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  solution = qtqp.Clarabel(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method=equilibration_method, verbose=False,
+  )
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# equilibration_method toggle: Ruiz on KKT vs Ruiz on augmented KKT.
 # =============================================================================
 
 
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-@pytest.mark.parametrize('method', ['ruiz', 'curtis_reid'])
+@pytest.mark.parametrize('method', ['kkt', 'augmented_kkt'])
 def test_equilibration_method_solves(method, linear_solver):
   """End-to-end QP solve must succeed under either equilibration method on
   every CPU backend."""
@@ -2448,64 +2622,49 @@ def test_equilibration_method_solves(method, linear_solver):
 
 @pytest.mark.parametrize('seed', 42 + np.arange(3))
 def test_equilibration_methods_match_optimum(seed):
-  """Ruiz and Curtis-Reid are different equilibration strategies for the same
-  problem; both should drive the IPM to the same optimum."""
+  """Ruiz on the bare KKT and Ruiz on the SCS-style augmented KKT are
+  different equilibration strategies for the same problem; both should drive
+  the IPM to the same optimum."""
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  sol_ruiz = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibration_method='ruiz', verbose=False,
+  sol_kkt = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method='kkt', verbose=False,
   )
-  sol_cr = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibration_method='curtis_reid', verbose=False,
+  sol_aug = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_method='augmented_kkt', verbose=False,
   )
-  assert sol_ruiz.status == qtqp.SolutionStatus.SOLVED
-  assert sol_cr.status == qtqp.SolutionStatus.SOLVED
-  obj_ruiz = c @ sol_ruiz.x + 0.5 * sol_ruiz.x @ p @ sol_ruiz.x
-  obj_cr = c @ sol_cr.x + 0.5 * sol_cr.x @ p @ sol_cr.x
-  np.testing.assert_allclose(obj_ruiz, obj_cr, atol=1e-5, rtol=1e-5)
+  assert sol_kkt.status == qtqp.SolutionStatus.SOLVED
+  assert sol_aug.status == qtqp.SolutionStatus.SOLVED
+  obj_kkt = c @ sol_kkt.x + 0.5 * sol_kkt.x @ p @ sol_kkt.x
+  obj_aug = c @ sol_aug.x + 0.5 * sol_aug.x @ p @ sol_aug.x
+  np.testing.assert_allclose(obj_kkt, obj_aug, atol=1e-5, rtol=1e-5)
 
 
-def test_curtis_reid_balance_reduces_log_magnitude_spread():
-  """Curtis-Reid minimizes the sum of squared log-magnitudes of the scaled
-  nonzero entries, so the standard deviation of log|K_scaled| should be no
-  larger (typically smaller) than that of log|K_original|."""
+def test_augmented_kkt_rejects_separate_scales():
+  """The augmented Ruiz iteration produces a single shared sigma, so asking
+  for separate primal/dual scales is incompatible and must raise."""
   rng = np.random.default_rng(0)
-  n_dim = 8
-  a_dense = np.abs(rng.normal(size=(n_dim, n_dim)))
-  a_sym = (a_dense + a_dense.T) / 2
-  p_sp = sparse.csc_matrix(a_sym)
-  a_sp = sparse.csc_matrix((0, n_dim))
-
-  x = qtqp._curtis_reid_balance(  # pylint: disable=protected-access
-      a_sp, p_sp, cg_rtol=1e-12, cg_maxiter=100,
-  )
-  s_diag = np.diag(x)
-  k_scaled = s_diag @ abs(p_sp).toarray() @ s_diag
-  log_before = np.log(a_sym[a_sym > 0])
-  log_after = np.log(k_scaled[k_scaled > 0])
-  assert np.std(log_after) <= np.std(log_before)
+  m, n, z = 10, 5, 2
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError, match="separate_scales"):
+    qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibration_method='augmented_kkt',
+        equilibrate_separate_scales=True,
+        verbose=False,
+    )
 
 
-def test_curtis_reid_skips_zero_rows():
-  """If the input has zero rows (degenerate constraints), Curtis-Reid must
-  leave their scales at 1 and balance only the active sub-problem rather
-  than diverge or return NaNs."""
-  rng = np.random.default_rng(7)
-  m, n, z = 8, 5, 2
-  a_dense = rng.normal(size=(m, n))
-  a_dense[2, :] = 0.0  # force a zero row
-  a = sparse.csc_matrix(a_dense)
-  p = sparse.csc_matrix(np.diag(rng.uniform(0.1, 1.0, size=n)))
-
-  x = qtqp._curtis_reid_balance(  # pylint: disable=protected-access
-      a, p, cg_rtol=1e-10, cg_maxiter=200,
-  )
-  assert np.all(np.isfinite(x))
-  assert np.all(x > 0)
-  # The zero row of A is at row 2 of A, which corresponds to KKT row n + 2.
-  assert x[n + 2] == 1.0
+def test_unknown_equilibration_method_raises():
+  """Unknown equilibration methods must be rejected at the dispatch site."""
+  rng = np.random.default_rng(0)
+  m, n, z = 10, 5, 2
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises(ValueError, match="Unknown equilibration method"):
+    qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibration_method='not_a_method', verbose=False,
+    )
 
 
 # =============================================================================
@@ -2514,15 +2673,17 @@ def test_curtis_reid_skips_zero_rows():
 
 
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_equilibrate_per_iteration_solves(linear_solver):
-  """End-to-end QP solve with equilibrate_per_iteration=True must succeed on
-  every CPU backend (sparse and dense)."""
+@pytest.mark.parametrize('passes', [1, 3])
+def test_equilibrate_per_iteration_solves(passes, linear_solver):
+  """End-to-end QP solve with equilibrate_per_iteration > 0 must succeed on
+  every CPU backend (sparse and dense), regardless of how many Ruiz passes
+  per IPM iteration are requested."""
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate_per_iteration=True,
+      equilibrate_per_iteration=passes,
       linear_solver=linear_solver,
       verbose=False,
   )
@@ -2530,25 +2691,38 @@ def test_equilibrate_per_iteration_solves(linear_solver):
   _assert_solution(solution, a, b, c, p, z)
 
 
-def test_equilibrate_per_iteration_matches_baseline_solution():
+@pytest.mark.parametrize('passes', [1, 3])
+def test_equilibrate_per_iteration_matches_baseline_solution(passes):
   """With or without per-iteration equilibration, the IPM should converge to
   the same optimum on a well-conditioned problem (equilibration is purely
-  a numerical aid, not a problem transformation)."""
+  a numerical aid, not a problem transformation). Verified across multiple
+  values of equilibrate_per_iteration."""
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   sol_baseline = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate_per_iteration=False, verbose=False,
+      equilibrate_per_iteration=0, verbose=False,
   )
   sol_perit = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate_per_iteration=True, verbose=False,
+      equilibrate_per_iteration=passes, verbose=False,
   )
   assert sol_baseline.status == qtqp.SolutionStatus.SOLVED
   assert sol_perit.status == qtqp.SolutionStatus.SOLVED
   obj_baseline = c @ sol_baseline.x + 0.5 * sol_baseline.x @ p @ sol_baseline.x
   obj_perit = c @ sol_perit.x + 0.5 * sol_perit.x @ p @ sol_perit.x
   np.testing.assert_allclose(obj_baseline, obj_perit, atol=1e-5, rtol=1e-5)
+
+
+def test_equilibrate_per_iteration_rejects_negative():
+  """Negative pass counts are nonsensical and must be rejected."""
+  rng = np.random.default_rng(0)
+  m, n, z = 10, 5, 2
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  with pytest.raises((AssertionError, ValueError)):
+    qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibrate_per_iteration=-1, verbose=False,
+    )
 
 
 def test_rescale_off_diagonals_matches_manual_skssym():
@@ -2645,7 +2819,7 @@ def test_per_iteration_equilibration_unscales_solution_correctly():
       max_iterative_refinement_steps=20,
       atol=1e-12, rtol=1e-12,
       solver=qtqp.LinearSolver.SCIPY.value(),
-      equilibrate_per_iteration=True,
+      equilibrate_per_iteration=1,
   )
   ls.update(mu=mu, s=s, y=y)
 

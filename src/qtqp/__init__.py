@@ -45,7 +45,7 @@ import scipy.sparse as sp
 from . import direct
 
 
-EquilibrationMethod = Literal["ruiz", "curtis_reid"]
+EquilibrationMethod = Literal["kkt", "augmented_kkt"]
 
 __version__ = "0.0.5"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -175,140 +175,6 @@ class Solution:
   s: np.ndarray
   stats: List[Dict[str, Any]]
   status: SolutionStatus
-
-
-def _curtis_reid_balance(
-    a: sp.spmatrix,
-    p: sp.spmatrix,
-    *,
-    cg_rtol: float,
-    cg_maxiter: int,
-) -> np.ndarray:
-  """Curtis-Reid (1972) symmetric scaling of |[P, A.T; A, 0]|.
-
-  Finds positive scales x = exp(s), with s in R^(n+m), that minimize the
-  sum of squared log-magnitudes of the scaled nonzero entries:
-
-      L(s) = sum_{(i,j) in nz, i <= j}  ( log|K_ij| + s_i + s_j )^2
-
-  The first-order optimality conditions are linear in s and form the symmetric
-  positive-(semi)definite system
-
-      Q s = b,
-      Q[k,k] = N_k_off + 4 * 1[diag k nonzero]
-      Q[k,j] = 1 for j != k with K_{kj} nonzero
-      b[k]   = - sum_{j != k: nz} log|K_{kj}|  -  2 * 1[diag k nz] * log|K_{kk}|
-
-  where N_k_off counts off-diagonal nonzeros in row k. Solved via CG.
-
-  Memory-efficient implementation: the augmented |K| is never materialized.
-  We work directly with the input A and P matrices' data and index arrays,
-  scattering scalar quantities (row counts, log-sums, diagonal indicators)
-  into N-sized vectors, and apply Q implicitly via a LinearOperator that
-  composes matvecs against pattern-only views of A and P (sparse matrices
-  built with shared indices/indptr arrays and a fresh data array of ones).
-
-  Rows with no nonzero entries in K -- truly empty rows of A or P -- have
-  N_k_off = 0 and diag_indicator = 0, so Q's k-th row collapses to a single
-  diagonal entry of zero. We replace that entry with 1 so the CG system
-  stays nonsingular; the corresponding b entry is also 0, so CG produces
-  s_k = 0 (i.e., scale 1) automatically.
-
-  Returns x of length n + m. e = x[:n] scales the columns of A and the rows
-  /columns of P; d = x[n:] scales the rows of A.
-  """
-  n, m = p.shape[0], a.shape[0]
-  N = n + m
-
-  # Work in CSC throughout. Both .tocsc() calls are no-ops if already CSC.
-  a_csc = a.tocsc() if a.format != "csc" else a
-  p_csc = p.tocsc() if p.nnz > 0 and p.format != "csc" else p
-  has_p = p_csc.nnz > 0
-
-  if a_csc.nnz == 0 and not has_p:
-    return np.ones(N, dtype=np.float64)
-
-  # Per-row nonzero counts of K = [P, A.T; A, 0]. Top-n rows accumulate
-  # contributions from |P| rows and from |A.T| rows (= |A| columns); the
-  # bottom-m rows accumulate from |A| rows. CSC indices are row indices, so
-  # scatter-add on indices counts per-row; np.diff(indptr) counts per-column.
-  n_per_row = np.zeros(N, dtype=np.float64)
-  if has_p:
-    np.add.at(n_per_row[:n], p_csc.indices, 1.0)
-  n_per_row[:n] += np.diff(a_csc.indptr).astype(np.float64)  # |A| col counts
-  np.add.at(n_per_row[n:], a_csc.indices, 1.0)               # |A| row counts
-
-  # Diagonal indicator and log magnitudes of diagonal: only the top-n block
-  # can have a nonzero diagonal entry (bottom-right block is zero by
-  # construction).
-  diag_p = p_csc.diagonal() if has_p else np.zeros(n, dtype=np.float64)
-  diag_indicator = np.zeros(N, dtype=np.float64)
-  log_diag = np.zeros(N, dtype=np.float64)
-  diag_pos = np.abs(diag_p) > 0
-  diag_indicator[:n][diag_pos] = 1.0
-  log_diag[:n][diag_pos] = np.log(np.abs(diag_p[diag_pos]))
-
-  # Per-row sum of log magnitudes, including the diagonal contribution.
-  # Same scatter-add pattern as the row counts but weighted by log|.|.
-  total_log = np.zeros(N, dtype=np.float64)
-  if has_p:
-    log_p_data = np.log(np.abs(p_csc.data))
-    np.add.at(total_log[:n], p_csc.indices, log_p_data)
-    del log_p_data
-  log_a_data = np.log(np.abs(a_csc.data))
-  # |A| column-wise log sums into top-n: scatter by column index.
-  a_col_idx = np.repeat(np.arange(n, dtype=np.intp), np.diff(a_csc.indptr))
-  np.add.at(total_log[:n], a_col_idx, log_a_data)
-  del a_col_idx
-  np.add.at(total_log[n:], a_csc.indices, log_a_data)
-  del log_a_data
-
-  b_rhs = -(total_log + diag_indicator * log_diag)
-  del total_log, log_diag
-
-  # Q diagonal seen by the matvec: Q v = adj(K) v + adj_diag * v, where
-  # adj_diag = N_k_off + 3 * diag_indicator = n_per_row + 2 * diag_indicator.
-  # Empty rows (no entries in K) get adj_diag = 0; bump them to 1 so the
-  # CG system stays nonsingular and resolves s_k = b_k / 1 = 0 there.
-  adj_diag = n_per_row + 2.0 * diag_indicator
-  adj_diag[adj_diag == 0.0] = 1.0
-  del n_per_row, diag_indicator
-
-  # Pattern-only views of A and P: same indices/indptr arrays as the inputs
-  # (no copy), with the data array replaced by ones. These give us
-  # `pattern @ v` = "sum v[j] over non-zero columns j of each row" matvecs.
-  a_ones = sp.csc_matrix(
-      (np.ones(a_csc.nnz, dtype=np.float64), a_csc.indices, a_csc.indptr),
-      shape=a_csc.shape,
-  )
-  p_ones = sp.csc_matrix(
-      (np.ones(p_csc.nnz, dtype=np.float64), p_csc.indices, p_csc.indptr),
-      shape=p_csc.shape,
-  ) if has_p else None
-  a_ones_T = a_ones.T  # CSR view, no data copy
-
-  def Q_matvec(v: np.ndarray) -> np.ndarray:
-    out = np.empty(N, dtype=np.float64)
-    v_top, v_bot = v[:n], v[n:]
-    if p_ones is not None:
-      out[:n] = p_ones @ v_top
-      out[:n] += a_ones_T @ v_bot
-    else:
-      out[:n] = a_ones_T @ v_bot
-    out[n:] = a_ones @ v_top
-    out += adj_diag * v
-    return out
-
-  op = sp.linalg.LinearOperator(
-      (N, N), matvec=Q_matvec, dtype=np.float64,
-  )
-  s, info = sp.linalg.cg(op, b_rhs, rtol=cg_rtol, maxiter=cg_maxiter)
-  if info != 0:
-    logging.debug(
-        "Curtis-Reid CG returned info=%d (>0: maxiter, <0: breakdown)", info
-    )
-
-  return np.exp(s)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -451,32 +317,37 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
-  def _init_variables(self):
-    """Build the IPM starting iterate in original (un-equilibrated) space and
-    map to equilibrated space if applicable. tau is always 1.
+  def _init_variables(self, a, p, b, c):
+    """Build the IPM starting iterate from the given problem data. tau is
+    always 1.
+
+    Callers pass either the original (self.a, self.p, self.b, self.c) when
+    equilibration is off, or the equilibrated copies when it is on, so init
+    runs directly in the same space the IPM iterates in (the auxiliary KKT
+    and least-squares systems benefit from Ruiz-normalized A, P, b, c).
     """
     match self.initialization:
       case Initialization.TRIVIAL:
-        x, y, s = self._init_trivial()
+        x, y, s = self._init_trivial(b, c)
       case Initialization.CVXOPT:
-        x, y, s = self._init_cvxopt()
+        x, y, s = self._init_cvxopt(a, p, b, c)
       case Initialization.LEAST_SQUARES:
-        x, y, s = self._init_least_squares()
+        x, y, s = self._init_least_squares(a, p, b, c)
       case _:
         raise ValueError(f"Unknown initialization: {self.initialization}")
-    if self.equilibrate:
-      x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
 
-  def _init_trivial(self):
+  def _init_trivial(self, b, c):
+    sigma_p = max(1.0, _norm(b, np.inf))
+    sigma_d = max(1.0, _norm(c, np.inf))
     x = np.zeros(self.n)
     y = np.zeros(self.m)
     s = np.zeros(self.m)
-    y[self.z :] = 1.0
-    s[self.z :] = 1.0
+    y[self.z :] = sigma_d
+    s[self.z :] = sigma_p
     return x, y, s
 
-  def _init_cvxopt(self, reg: float = 1e-10, shift_buffer: float = 1.0):
+  def _init_cvxopt(self, a, p, b, c, reg: float = 1e-10):
     """Mehrotra/CVXOPT-style starting point.
 
     Solve the auxiliary saddle-point KKT system directly:
@@ -484,7 +355,9 @@ class QTQP:
         [A,          -I ] [y] = [ b]
     From the second block y = A x - b and Ax + s = b gives s = b - A x = -y on
     the inequality slice; both y[z:] and s[z:] are then shifted into the cone
-    interior with a +1 buffer (Mehrotra heuristic).
+    interior using Mehrotra (1992) eqs. (9)-(12): a ratio shift to ensure
+    strict positivity, followed by a centering shift so element-wise products
+    s_i * y_i cluster around mu_init.
 
     Eliminating y collapses to (P + A^T A + reg*I) x = A^T b - c, but we never
     form A^T A: it is typically much denser than A and P themselves and can be
@@ -493,49 +366,53 @@ class QTQP:
     elimination still matches the (P + A^T A + reg*I) formulation exactly.
     """
     z, m, n = self.z, self.m, self.n
-    a, p = self.a, self.p
     p_reg = p + reg * sp.eye(n, format="csc") if reg > 0 else p
     kkt = sp.bmat(
         [[p_reg, a.T], [a, -sp.eye(m, format="csc")]],
         format="csc",
     )
-    sol = sp.linalg.spsolve(kkt, np.concatenate([-self.c, self.b]))
+    sol = sp.linalg.spsolve(kkt, np.concatenate([-c, b]))
     x = sol[:n]
     y = sol[n:]
     s = -y.copy()
     if m > z:
-      ts = -np.min(s[z:])
-      if ts >= 0:
-        s[z:] += shift_buffer + ts
-      ty = -np.min(y[z:])
-      if ty >= 0:
-        y[z:] += shift_buffer + ty
+      # Mehrotra (1992) two-step shift, eqs. (9)-(12).
+      # Stage 1: ratio shift to ensure strict positivity.
+      s[z:] += max(-1.5 * np.min(s[z:]), 0.0)
+      y[z:] += max(-1.5 * np.min(y[z:]), 0.0)
+      # Stage 2: centering shift so s_i * y_i clusters around mu_init.
+      sy = s[z:] @ y[z:]
+      s[z:] += 0.5 * sy / max(_EPS, np.sum(y[z:]))
+      y[z:] += 0.5 * sy / max(_EPS, np.sum(s[z:]))
     s[:z] = 0.0
     return x, y, s
 
   def _init_least_squares(
-      self, reg: float = 1e-10, atol: float = 1e-6, btol: float = 1e-6,
+      self, a, p, b, c, reg: float = 1e-10,
+      atol: float = 1e-6, btol: float = 1e-6,
   ):
     """Fix s, y in the cone interior and solve for x via iterative least squares.
 
-    Sets s[z:] = y[z:] = 1 and solves
+    Sets s[z:] = y[z:] = scale-aware constants derived from ||b||_inf, ||c||_inf
+    and solves
         x = argmin (1/2) ||A x + s - b||^2 + (1/2) ||P x + A^T y + c||^2
     by treating it as the sparse least-squares problem
         min ||M x - d||^2 + reg*||x||^2,   M = [A; P], d = [b-s; -(A^T y + c)]
-    and applying LSQR (Paige/Saunders). LSQR only requires matvecs with M and
-    M^T, so we expose M as a LinearOperator: A^T A, P^2, the stacked matrix,
-    and any direct factorization are all avoided. This keeps peak memory at
-    O(nnz(A) + nnz(P)) — suitable for very large problems where even an
-    augmented KKT factorization would exhaust memory. Initialization tolerance
-    is loose (atol/btol = 1e-6) since the IPM only needs a feasible interior
-    starting point, not a high-accuracy least-squares solution.
+    and applying LSMR (Fong & Saunders 2011). LSMR only requires matvecs with
+    M and M^T, so we expose M as a LinearOperator: A^T A, P^2, the stacked
+    matrix, and any direct factorization are all avoided. This keeps peak
+    memory at O(nnz(A) + nnz(P)) — suitable for very large problems where
+    even an augmented KKT factorization would exhaust memory. Initialization
+    tolerance is loose (atol/btol = 1e-6) since the IPM only needs a feasible
+    interior starting point, not a high-accuracy least-squares solution.
     """
     z, m, n = self.z, self.m, self.n
-    a, p = self.a, self.p
+    sigma_p = max(1.0, _norm(b, np.inf))
+    sigma_d = max(1.0, _norm(c, np.inf))
     s = np.zeros(m)
     y = np.zeros(m)
-    s[z:] = 1.0
-    y[z:] = 1.0
+    s[z:] = sigma_p
+    y[z:] = sigma_d
 
     def matvec(v):
       return np.concatenate([a @ v, p @ v])
@@ -546,9 +423,9 @@ class QTQP:
     m_op = sp.linalg.LinearOperator(
         shape=(m + n, n), matvec=matvec, rmatvec=rmatvec, dtype=a.dtype,
     )
-    d = np.concatenate([self.b - s, -(a.T @ y + self.c)])
+    d = np.concatenate([b - s, -(a.T @ y + c)])
     damp = np.sqrt(reg) if reg > 0 else 0.0
-    x = sp.linalg.lsqr(m_op, d, damp=damp, atol=atol, btol=btol)[0]
+    x = sp.linalg.lsmr(m_op, d, damp=damp, atol=atol, btol=btol)[0]
     return x, y, s
 
   def solve(
@@ -566,28 +443,45 @@ class QTQP:
       linear_solver_atol: float = 1e-12,
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
+      refinement_strategy: direct.RefinementStrategy = "fixed_point",
+      fgmres_restart: int = 10,
+      legacy_stall_check: bool = False,
+      equilibrate_per_iteration: int = 0,
       verbose: bool = True,
       equilibrate: bool = True,
+      equilibrate_constant_d_in_cone: bool = False,
+      equilibrate_separate_scales: bool = False,
+      equilibration_method: EquilibrationMethod = "kkt",
+      initialization: Initialization = Initialization.TRIVIAL,
       collect_stats: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
     try:
       return self._solve_impl(
-          atol=atol,
-          rtol=rtol,
-          atol_infeas=atol_infeas,
-          rtol_infeas=rtol_infeas,
-          max_iter=max_iter,
-          step_size_scale=step_size_scale,
-          min_static_regularization=min_static_regularization,
-          max_iterative_refinement_steps=max_iterative_refinement_steps,
-          linear_solver_atol=linear_solver_atol,
-          linear_solver_rtol=linear_solver_rtol,
-          linear_solver=linear_solver,
-          verbose=verbose,
-          equilibrate=equilibrate,
-          collect_stats=collect_stats,
+        atol=atol,
+        rtol=rtol,
+        atol_infeas=atol_infeas,
+        rtol_infeas=rtol_infeas,
+        max_iter=max_iter,
+        time_limit_secs=time_limit_secs,
+        step_size_scale=step_size_scale,
+        min_static_regularization=min_static_regularization,
+        max_iterative_refinement_steps=max_iterative_refinement_steps,
+        linear_solver_atol=linear_solver_atol,
+        linear_solver_rtol=linear_solver_rtol,
+        linear_solver=linear_solver,
+        refinement_strategy=refinement_strategy,
+        fgmres_restart=fgmres_restart,
+        legacy_stall_check=legacy_stall_check,
+        equilibrate_per_iteration=equilibrate_per_iteration,
+        verbose=verbose,
+        equilibrate=equilibrate,
+        equilibrate_constant_d_in_cone=equilibrate_constant_d_in_cone,
+        equilibrate_separate_scales=equilibrate_separate_scales,
+        equilibration_method=equilibration_method,
+        initialization=initialization,
+        collect_stats=collect_stats,
       )
     finally:
       if self._linear_solver is not None:
@@ -595,30 +489,31 @@ class QTQP:
         self._linear_solver = None
 
   def _solve_impl(
-      self,
-      *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
-      atol_infeas: float = 1e-8,
-      rtol_infeas: float = 1e-9,
-      max_iter: int = 100,
-      step_size_scale: float = 0.99,
-      min_static_regularization: float = 1e-8,
-      max_iterative_refinement_steps: int = 20,
-      linear_solver_atol: float = 1e-12,
-      linear_solver_rtol: float = 1e-12,
-      linear_solver: LinearSolver = LinearSolver.AUTO,
-      refinement_strategy: direct.RefinementStrategy = "fixed_point",
-      fgmres_restart: int = 10,
-      legacy_stall_check: bool = False,
-      equilibrate_per_iteration: bool = False,
-      verbose: bool = True,
-      equilibrate: bool = True,
-      equilibrate_constant_d_in_cone: bool = False,
-      equilibrate_separate_scales: bool = False,
-      equilibration_method: EquilibrationMethod = "ruiz",
-      initialization: Initialization = Initialization.TRIVIAL,
-      collect_stats: bool = False,
+    self,
+    *,
+    atol: float = 1e-7,
+    rtol: float = 1e-8,
+    atol_infeas: float = 1e-8,
+    rtol_infeas: float = 1e-9,
+    max_iter: int = 100,
+    time_limit_secs: float | None = None,
+    step_size_scale: float = 0.99,
+    min_static_regularization: float = 1e-8,
+    max_iterative_refinement_steps: int = 20,
+    linear_solver_atol: float = 1e-12,
+    linear_solver_rtol: float = 1e-12,
+    linear_solver: LinearSolver = LinearSolver.AUTO,
+    refinement_strategy: direct.RefinementStrategy = "fixed_point",
+    fgmres_restart: int = 20,
+    legacy_stall_check: bool = False,
+    equilibrate_per_iteration: int = 0,
+    verbose: bool = True,
+    equilibrate: bool = True,
+    equilibrate_constant_d_in_cone: bool = False,
+    equilibrate_separate_scales: bool = False,
+    equilibration_method: EquilibrationMethod = "kkt",
+    initialization: Initialization = Initialization.TRIVIAL,
+    collect_stats: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -665,15 +560,16 @@ class QTQP:
         small non-monotonic blips at the roundoff floor. Exposed for
         A/B comparison; the rest of the iterative-refinement loop (best-
         iterate rollback) is unaffected by this flag.
-      equilibrate_per_iteration (bool): When True, apply one Ruiz-style
-        symmetric rescaling of the full KKT matrix at every IPM iteration,
+      equilibrate_per_iteration (int): Number of Ruiz-style symmetric
+        rescalings of the full KKT matrix to apply at every IPM iteration,
         on top of whatever one-shot equilibration was applied to A and P at
-        the start. The per-iteration scaling targets the cone-block diagonal
-        which spans many orders of magnitude as the active set separates;
-        it is invisible to the IPM. Reported linear-solve residual norms
-        are in the equilibrated frame and not directly comparable across
-        iterations or against runs with the flag off. Not supported with
-        GPU backends.
+        the start. 0 (default) disables per-iteration equilibration entirely;
+        N > 0 runs N consecutive Ruiz passes per IPM iteration. The
+        per-iteration scaling targets the cone-block diagonal which spans
+        many orders of magnitude as the active set separates; it is invisible
+        to the IPM. Reported linear-solve residual norms are in the
+        equilibrated frame and not directly comparable across iterations or
+        against runs with this set to 0. Not supported with GPU backends.
       verbose (bool): If True, prints a summary of each iteration.
       equilibrate (bool): If True, equilibrate the data for better numerical
         stability.
@@ -682,17 +578,20 @@ class QTQP:
         cone (SCS convention for preserving cone membership under arbitrary
         cones). For QTQP's non-negative orthant, any positive diagonal D
         already preserves cone membership, so the default is False.
-      equilibrate_separate_scales (bool): If True (and equilibrate is True),
-        compute primal_scale (for c) and dual_scale (for b) independently from
-        their inf-norms (the historical SCS behavior). If False, both equal a
-        single sigma derived from max(||c||_inf, ||b||_inf) (current SCS).
-      equilibration_method ("ruiz" | "curtis_reid"): Algorithm used by the
-        one-shot equilibration of [P, A.T; A, 0] before the IPM starts.
-        "ruiz" (default) is the classical inf-norm fixed-point. "curtis_reid"
-        is the Curtis-Reid (1972) least-squares balancing in log-space, a
-        single CG solve on a symmetric positive-definite normal-equations
-        matrix. The downstream L2 polish and primal/dual scaling are
-        identical for both methods.
+      equilibrate_separate_scales (bool): If True (and equilibrate is True
+        and equilibration_method is "kkt"), compute primal_scale (for c) and
+        dual_scale (for b) independently from their inf-norms (the historical
+        SCS behavior). If False, both equal a single sigma derived from
+        max(||c||_inf, ||b||_inf) (current SCS). Must be False with
+        equilibration_method="augmented_kkt", which produces a single shared
+        sigma directly from the augmented Ruiz iteration.
+      equilibration_method ("kkt" | "augmented_kkt"): Which matrix the Ruiz
+        equilibration targets. "kkt" (default) runs Ruiz + L2 on
+        [P, A.T; A, 0] and then derives primal/dual scales for c, b post-hoc
+        from their inf-norms. "augmented_kkt" runs Ruiz + L2 on the SCS-style
+        augmented matrix [P, A.T, c; A, 0, b; c.T, b.T, 0], so the shared
+        scalar sigma rescaling b and c is folded into the equilibration
+        iteration itself.
       initialization (Initialization): How to construct the starting iterate.
         TRIVIAL uses x = 0 and unit y, s in the cone interior. CVXOPT solves
         a Mehrotra-style auxiliary KKT system and shifts s, y into the cone
@@ -719,6 +618,7 @@ class QTQP:
     assert linear_solver_rtol >= 0
     assert refinement_strategy in ("fixed_point", "fgmres")
     assert fgmres_restart >= 1
+    assert equilibrate_per_iteration >= 0
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
@@ -782,7 +682,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, _ = self._init_variables()
+    x, y, s, tau, _ = self._init_variables(a, p, b, c)
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -961,21 +861,32 @@ class QTQP:
       max_norm: float = 1e4,
       constant_d_in_cone: bool = False,
       separate_scales: bool = False,
-      method: EquilibrationMethod = "ruiz",
-      cr_cg_rtol: float = 1e-8,
-      cr_cg_maxiter: int = 200,
+      method: EquilibrationMethod = "kkt",
   ):
-    """SCS-style Ruiz + ell_2 equilibration on [[P, A^T], [A, 0]] plus
-    primal/dual scaling.
+    """SCS-style Ruiz + ell_2 equilibration of the (augmented) KKT matrix
+    plus primal/dual scaling.
 
     Produces diagonal scales E (size n), D (size m) and positive scalars
-    primal_scale, dual_scale (equal in single-scale mode) such that:
+    primal_scale, dual_scale (equal for "augmented_kkt", and for "kkt" in
+    single-sigma mode) such that:
         P_hat = (rho_p / rho_d) E P E,  A_hat = D A E,
         c_hat = rho_p E c,             b_hat = rho_d D b.
     The (rho_p / rho_d) factor on P_hat keeps the equilibrated dual KKT in
     standard form when the two scales differ; when they are equal it is just
     E P E. The original solution is recovered as
         x = E x_hat / rho_d,  y = D y_hat / rho_p,  s = D^{-1} s_hat / rho_d.
+
+    method:
+      "kkt" (default) runs Ruiz + L2 on [[P, A^T], [A, 0]] (b and c are
+      ignored during the iterations) and then derives primal_scale /
+      dual_scale post-hoc from the inf-norms of the equilibrated b, c.
+      "augmented_kkt" runs Ruiz + L2 on the SCS-style augmented matrix
+        [[P,    A^T,  c],
+         [A,    0,    b],
+         [c^T,  b^T,  0]],
+      so the shared scalar sigma rescaling b and c is folded into the
+      equilibration iteration itself; primal_scale and dual_scale both equal
+      that sigma.
 
     constant_d_in_cone:
       If True, D is held constant across the positive-orthant cone (Ruiz uses
@@ -985,27 +896,31 @@ class QTQP:
       diagonal D, so the default is False (per-row scaling).
 
     separate_scales:
-      If False (default, current SCS behavior), one shared sigma rescales both
-      b and c, computed from max(||c||_inf, ||b||_inf). If True, primal_scale
-      is computed from ||c||_inf and dual_scale from ||b||_inf independently
-      (the historical SCS form before they were unified).
-
-    method:
-      "ruiz" (default) runs the classical Ruiz inf-norm fixed-point pass for
-      num_ruiz_passes iterations. "curtis_reid" runs the Curtis-Reid (1972)
-      least-squares balancing on |[P, A.T; A, 0]|, which finds positive scales
-      x such that the scaled nonzero entries cluster around magnitude one in
-      the log-mean-squared sense. CR is a single sparse linear solve (CG on a
-      symmetric positive-definite normal-equations matrix), not an iterative
-      pass. The downstream L2 polish and primal/dual scaling are identical
-      for both methods.
+      Only valid when method="kkt". If False (default), one shared sigma
+      rescales both b and c, computed from max(||c||_inf, ||b||_inf). If True,
+      primal_scale is computed from ||c||_inf and dual_scale from ||b||_inf
+      independently (the historical SCS form before they were unified). Must
+      be False when method="augmented_kkt", which produces a single shared
+      sigma directly.
     """
+    if method not in ("kkt", "augmented_kkt"):
+      raise ValueError(
+          f"Unknown equilibration method {method!r}; "
+          "expected 'kkt' or 'augmented_kkt'."
+      )
+    if method == "augmented_kkt" and separate_scales:
+      raise ValueError(
+          "separate_scales=True is incompatible with method='augmented_kkt'; "
+          "the augmented Ruiz iteration produces a single shared sigma."
+      )
+
     # Work on copies so self.a / self.p stay in original space for use in
     # _check_termination (which un-equilibrates iterates and compares against
     # the original problem data).
     a, p = self.a.copy(), self.p.copy()
     b, c = self.b.copy(), self.c.copy()
     d, e = np.ones(self.m), np.ones(self.n)
+    sigma_iter = 1.0  # only updated by the "augmented_kkt" path
     z, m = self.z, self.m
 
     def _to_scale(v):
@@ -1013,6 +928,13 @@ class QTQP:
       # L2 then take 1/sqrt as the scaling factor.
       v = np.where(v < min_norm, 1.0, np.minimum(v, max_norm))
       return 1.0 / np.sqrt(v)
+
+    def _to_scalar_scale(v):
+      if v < min_norm:
+        v = 1.0
+      else:
+        v = min(v, max_norm)
+      return 1.0 / math.sqrt(v)
 
     def _apply(d_step, e_step):
       # In-place D A E and E P E on CSC data arrays.
@@ -1022,7 +944,7 @@ class QTQP:
         col_scale_p = np.repeat(e_step, np.diff(p.indptr))
         p.data *= e_step[p.indices] * col_scale_p
 
-    if method == "ruiz":
+    if method == "kkt":
       for i in range(num_ruiz_passes):
         d_step = sp.linalg.norm(a, np.inf, axis=1)
         e_step = np.maximum(
@@ -1039,70 +961,103 @@ class QTQP:
             "Ruiz pass %d: d err %s, e err %s",
             i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
         )
-    elif method == "curtis_reid":
-      x = _curtis_reid_balance(
-          a, p, cg_rtol=cr_cg_rtol, cg_maxiter=cr_cg_maxiter,
-      )
-      e_step, d_step = x[: self.n], x[self.n :]
-      if constant_d_in_cone and m > z:
-        d_step[z:] = np.max(d_step[z:])
-      lo, hi = 1.0 / math.sqrt(max_norm), 1.0 / math.sqrt(min_norm)
-      np.clip(d_step, lo, hi, out=d_step)
-      np.clip(e_step, lo, hi, out=e_step)
-      _apply(d_step, e_step)
-      d *= d_step
-      e *= e_step
-      logging.debug(
-          "Curtis-Reid: d err %s, e err %s",
-          _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
-      )
-    else:
-      raise ValueError(
-          f"Unknown equilibration method {method!r}; "
-          "expected 'ruiz' or 'curtis_reid'."
-      )
+    else:  # method == "augmented_kkt"
+      for i in range(num_ruiz_passes):
+        # Row inf-norms of the SCS augmented KKT matrix
+        # [[P, A^T, c], [A, 0, b], [c^T, b^T, 0]].
+        e_norm = np.maximum.reduce([
+            sp.linalg.norm(a, np.inf, axis=0),
+            sp.linalg.norm(p, np.inf, axis=0),
+            np.abs(c),
+        ])
+        d_norm = np.maximum(
+            sp.linalg.norm(a, np.inf, axis=1),
+            np.abs(b),
+        )
+        sigma_norm = max(_norm(c, np.inf), _norm(b, np.inf))
+        if constant_d_in_cone and m > z:
+          d_norm[z:] = np.max(d_norm[z:])
+        d_step = _to_scale(d_norm)
+        e_step = _to_scale(e_norm)
+        sigma_step = _to_scalar_scale(sigma_norm)
+        _apply(d_step, e_step)
+        c *= e_step * sigma_step
+        b *= d_step * sigma_step
+        d *= d_step
+        e *= e_step
+        sigma_iter *= sigma_step
+        logging.debug(
+            "Augmented Ruiz pass %d: d err %s, e err %s, sigma err %s",
+            i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
+            abs(sigma_step - 1.0),
+        )
 
     for i in range(num_l2_passes):
-      d_step = sp.linalg.norm(a, ord=2, axis=1)
-      e_step = np.sqrt(
-          sp.linalg.norm(a, ord=2, axis=0) ** 2
-          + sp.linalg.norm(p, ord=2, axis=0) ** 2
-      )
-      if constant_d_in_cone and m > z:
-        d_step[z:] = np.mean(d_step[z:])
-      d_step, e_step = _to_scale(d_step), _to_scale(e_step)
-      _apply(d_step, e_step)
-      d *= d_step
-      e *= e_step
+      if method == "kkt":
+        d_step = sp.linalg.norm(a, ord=2, axis=1)
+        e_step = np.sqrt(
+            sp.linalg.norm(a, ord=2, axis=0) ** 2
+            + sp.linalg.norm(p, ord=2, axis=0) ** 2
+        )
+        if constant_d_in_cone and m > z:
+          d_step[z:] = np.mean(d_step[z:])
+        d_step, e_step = _to_scale(d_step), _to_scale(e_step)
+        _apply(d_step, e_step)
+        d *= d_step
+        e *= e_step
+      else:  # method == "augmented_kkt"
+        d_norm = np.sqrt(
+            sp.linalg.norm(a, ord=2, axis=1) ** 2 + b ** 2
+        )
+        e_norm = np.sqrt(
+            sp.linalg.norm(a, ord=2, axis=0) ** 2
+            + sp.linalg.norm(p, ord=2, axis=0) ** 2
+            + c ** 2
+        )
+        sigma_norm = math.sqrt(_norm(c, 2) ** 2 + _norm(b, 2) ** 2)
+        if constant_d_in_cone and m > z:
+          d_norm[z:] = np.mean(d_norm[z:])
+        d_step = _to_scale(d_norm)
+        e_step = _to_scale(e_norm)
+        sigma_step = _to_scalar_scale(sigma_norm)
+        _apply(d_step, e_step)
+        c *= e_step * sigma_step
+        b *= d_step * sigma_step
+        d *= d_step
+        e *= e_step
+        sigma_iter *= sigma_step
       logging.debug(
           "L2 pass %d: d err %s, e err %s",
           i, _norm(d_step - 1, np.inf), _norm(e_step - 1, np.inf),
       )
 
-    # primal_scale rescales c, dual_scale rescales b. Norms are taken on
-    # E*c and D*b, clipped to [min_norm, max_norm]; tiny values fall back to
-    # 1.0 to avoid amplifying noise.
-    c *= e
-    b *= d
+    if method == "kkt":
+      # primal_scale rescales c, dual_scale rescales b. Norms are taken on
+      # E*c and D*b, clipped to [min_norm, max_norm]; tiny values fall back to
+      # 1.0 to avoid amplifying noise.
+      c *= e
+      b *= d
 
-    def _scale_from_norm(nrm):
-      if nrm < min_norm:
-        nrm = 1.0
-      return 1.0 / min(nrm, max_norm)
+      def _scale_from_norm(nrm):
+        if nrm < min_norm:
+          nrm = 1.0
+        return 1.0 / min(nrm, max_norm)
 
-    if separate_scales:
-      primal_scale = _scale_from_norm(_norm(c, np.inf))
-      dual_scale = _scale_from_norm(_norm(b, np.inf))
-      # Absorb the (rho_p/rho_d) factor into P_hat so the IPM still sees a
-      # standard KKT system when the two scales differ.
-      if primal_scale != dual_scale and p.nnz > 0:
-        p.data *= primal_scale / dual_scale
-    else:
-      sigma = _scale_from_norm(max(_norm(c, np.inf), _norm(b, np.inf)))
-      primal_scale = dual_scale = sigma
+      if separate_scales:
+        primal_scale = _scale_from_norm(_norm(c, np.inf))
+        dual_scale = _scale_from_norm(_norm(b, np.inf))
+        # Absorb the (rho_p/rho_d) factor into P_hat so the IPM still sees a
+        # standard KKT system when the two scales differ.
+        if primal_scale != dual_scale and p.nnz > 0:
+          p.data *= primal_scale / dual_scale
+      else:
+        sigma = _scale_from_norm(max(_norm(c, np.inf), _norm(b, np.inf)))
+        primal_scale = dual_scale = sigma
 
-    c *= primal_scale
-    b *= dual_scale
+      c *= primal_scale
+      b *= dual_scale
+    else:  # method == "augmented_kkt": sigma already folded into b, c above.
+      primal_scale = dual_scale = sigma_iter
 
     return a, p, b, c, d, e, primal_scale, dual_scale
 
@@ -1496,3 +1451,6 @@ class QTQP:
   def _log_footer(self, message: str):
     if self.verbose:
       print(f"{_SEPARA}\n| {message}")
+
+
+from .clarabel import Clarabel  # noqa: E402
