@@ -2663,6 +2663,41 @@ def test_direct_kkt_solver_gmres_restart_path():
   assert stats['solves'] <= 15
 
 
+def test_gmres_deep_krylov_residual_matches_internal_estimate():
+  """At high Krylov dimension, MGS-only Arnoldi loses orthogonality and the
+  Givens-based internal 2-norm residual estimate diverges from the true
+  ||b - A x||_inf. DGKS reorthogonalization fixes this; the outer-loop
+  recomputed residual (in inf-norm) must actually be small."""
+  rng = np.random.default_rng(7000)
+  m, n, z = 40, 25, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  # Tiny mu drives the preconditioner close to exact -- successive Arnoldi
+  # vectors are then dominated by the existing basis, so MGS projects out
+  # most of each new w. Exactly the regime DGKS is designed to repair.
+  mu = 1e-12
+  s = rng.uniform(0.5, 1.5, size=m); s[:z] = 0.0
+  y = rng.uniform(0.5, 1.5, size=m)
+  rhs = np.concatenate([c, b])
+  warm = np.zeros(n + m)
+
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-12,
+      max_iterative_refinement_steps=25,
+      atol=0.0, rtol=0.0,  # force the full Krylov build
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES,
+      gmres_restart=24,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  _, stats = solver.solve(rhs=rhs, warm_start=warm)
+  solver.free()
+  # Outer loop's final residual is recomputed against kkt_true in inf-norm.
+  # With DGKS, this stays at machine precision; without, it can drift orders
+  # of magnitude away from the (fictitious) internal estimate.
+  assert stats['final_residual_norm'] < 1e-9, stats
+
+
 def test_gmres_restart_validation():
   """gmres_restart must be >= 1."""
   a = sparse.eye(2, format='csc')
@@ -2709,3 +2744,87 @@ def test_gmres_rollback_on_stalled_refinement():
   # Either we converged immediately, or the returned residual is no worse
   # than what one direct factor-solve from warm_start would give.
   assert stats['final_residual_norm'] < 1e-6
+
+
+# =============================================================================
+# central_path_exponent: generalized central path
+# =============================================================================
+
+@pytest.mark.parametrize('central_path_exponent', [0.5, 1.0, 1.5, 2.0])
+@pytest.mark.parametrize('seed', 6000 + np.arange(3))
+def test_central_path_exponent_solve(central_path_exponent, seed):
+  """All positive exponents must converge to the same optimal solution."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      central_path_exponent=central_path_exponent, verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_central_path_exponent_default_unchanged():
+  """central_path_exponent=1.0 must give the same solution as the default.
+
+  The two paths drift by ~1 ULP per iteration because mu**1.0 is not
+  bit-identical to mu in IEEE math; this test just guards against any
+  larger semantic divergence on the default path.
+  """
+  rng = np.random.default_rng(6100)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      central_path_exponent=1.0, verbose=False
+  )
+  np.testing.assert_allclose(sol_a.x, sol_b.x, atol=1e-6, rtol=1e-6)
+  np.testing.assert_allclose(sol_a.y, sol_b.y, atol=1e-6, rtol=1e-6)
+  np.testing.assert_allclose(sol_a.s, sol_b.s, atol=1e-6, rtol=1e-6)
+
+
+def test_central_path_exponent_solutions_agree():
+  """Different exponents converge to the same QP optimum (within tol)."""
+  rng = np.random.default_rng(6200)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  objs = []
+  for cpe in (0.5, 1.0, 1.5, 2.0):
+    sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        central_path_exponent=cpe, verbose=False
+    )
+    _assert_solution(sol, a, b, c, p, z)
+    objs.append(c @ sol.x + 0.5 * sol.x @ p @ sol.x)
+  ref = objs[1]  # the p=1 case is the reference
+  for obj in objs:
+    np.testing.assert_allclose(obj, ref, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize('bad_value', [0.0, -1.0, -0.5, float('nan'), float('inf')])
+def test_central_path_exponent_rejects_invalid(bad_value):
+  """Non-positive or non-finite central_path_exponent must raise."""
+  rng = np.random.default_rng(6300)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  with pytest.raises(ValueError, match='central_path_exponent'):
+    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
+        central_path_exponent=bad_value, verbose=False
+    )
+
+
+def test_central_path_exponent_infeasible():
+  """Non-default exponent must still detect primal infeasibility."""
+  rng = np.random.default_rng(6400)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      central_path_exponent=1.5, verbose=False
+  )
+  _assert_infeasible(solution, a, b, 5)
+
+
+def test_central_path_exponent_unbounded():
+  """Non-default exponent must still detect primal unboundedness."""
+  rng = np.random.default_rng(6500)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      central_path_exponent=0.7, verbose=False
+  )
+  _assert_unbounded(solution, a, c, p, 5)

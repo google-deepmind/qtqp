@@ -25,11 +25,19 @@ followed by ``direct.ScipySolver`` continues to work.
 
 import enum
 import logging
+import math
 from typing import Any, Literal
 
 import numpy as np
 import scipy.sparse as sp
 from scipy.linalg import solve_triangular
+
+
+# DGKS reorthogonalization threshold (Daniel-Gragg-Kaufman-Stewart, 1976):
+# if ||w||_after / ||w||_before falls below this, the MGS pass lost a lot of
+# mass to projection so re-orthogonalize once more. One pass is sufficient
+# (Bjorck/Paige): orthogonality is recovered to working precision.
+_DGKS_REORTH_THRESHOLD = 1.0 / math.sqrt(2.0)
 
 
 class RefinementStrategy(enum.Enum):
@@ -390,7 +398,6 @@ class DirectKktSolver:
     best_residual_norm = residual_norm
     status = "non-converged"
     solves = 0
-    prev_ratio_high = False  # consecutive sluggish-step tracker
 
     if residual_norm < tolerance:
       status = "converged"
@@ -428,23 +435,15 @@ class DirectKktSolver:
         status = "stalled"
         break
 
-      # Stall check: bail on residual blow-up vs best, or on two consecutive
-      # cycles with ratio > 0.95 (i.e. crawling at <5% improvement per cycle).
+      # Stall check: bail only on outright residual blow-up vs the best
+      # iterate seen. Slow-but-monotone progress is not a stall.
       if residual_norm > 2.0 * best_residual_norm:
-        status = "stalled"
-        break
-      ratio_high = (
-          old_residual_norm > 0.0
-          and (residual_norm / old_residual_norm) > 0.95
-      )
-      if ratio_high and prev_ratio_high:
         logging.debug(
             "GMRES stalled after %d solves. Old res: %e, New res: %e",
             solves, old_residual_norm, residual_norm,
         )
         status = "stalled"
         break
-      prev_ratio_high = ratio_high
     else:
       if status == "non-converged":
         logging.debug(
@@ -504,11 +503,20 @@ class DirectKktSolver:
       z_j = self._solver.solve(v[j])
       w = self._solver @ z_j - self._diag_correction * z_j
 
-      # Modified Gram-Schmidt against the existing basis.
+      # Modified Gram-Schmidt against the existing basis, with DGKS
+      # reorthogonalization if the orthogonalization pass projected out
+      # too much mass (the new direction is nearly in span(v[0..j])).
+      w_norm_before = float(np.linalg.norm(w))
       for i in range(j + 1):
         h[i, j] = v[i] @ w
         w -= h[i, j] * v[i]
       h_next = float(np.linalg.norm(w))
+      if h_next < _DGKS_REORTH_THRESHOLD * w_norm_before:
+        for i in range(j + 1):
+          delta = v[i] @ w
+          h[i, j] += delta
+          w -= delta * v[i]
+        h_next = float(np.linalg.norm(w))
       h[j + 1, j] = h_next
 
       breakdown = h_next == 0.0

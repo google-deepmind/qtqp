@@ -312,6 +312,10 @@ class QTQP:
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
+    # Default exponent so _newton_step works in tests that call it directly
+    # before solve() has overridden the attribute.
+    self._central_path_exponent = 1.0
+
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
@@ -476,6 +480,7 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      central_path_exponent: float = 1.0,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -499,6 +504,7 @@ class QTQP:
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
+          central_path_exponent=central_path_exponent,
       )
     finally:
       if self._linear_solver is not None:
@@ -526,6 +532,7 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      central_path_exponent: float = 1.0,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -573,6 +580,13 @@ class QTQP:
         plus one final M^{-1} apply). Smaller values reduce per-cycle
         cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
+      central_path_exponent (float): Exponent p > 0 in the generalized
+        central-path equation r + mu^p * u = 0 (cone products s_i * y_i =
+        mu and tau * kappa = mu are unchanged). Default 1.0 recovers the
+        standard primal-dual central path. p > 1 makes the linear residual
+        vanish faster than mu as mu -> 0; p < 1 the reverse. mu^p enters
+        the KKT diagonal regularization and the Newton-step linear-residual
+        RHS; cone-product targets keep the unmodified mu.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -592,6 +606,12 @@ class QTQP:
           f"init_mu_scale must be a positive finite float,"
           f" got {init_mu_scale}"
       )
+    if not (np.isfinite(central_path_exponent) and central_path_exponent > 0):
+      raise ValueError(
+          "central_path_exponent must be a positive finite float (got"
+          f" {central_path_exponent}); p <= 0 is incompatible with the IPM."
+      )
+    self._central_path_exponent = float(central_path_exponent)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
@@ -663,9 +683,13 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       mu = (y @ s) / (self.m - self.z)
+      # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
+      # diagonal and the Newton-step linear-residual RHS; cone-product
+      # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
+      mu_p = mu ** self._central_path_exponent
 
       # --- Take an IPM step ---
-      self._linear_solver.update(mu=mu, s=s, y=y)
+      self._linear_solver.update(mu=mu_p, s=s, y=y)
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
       # This is reused for both predictor and corrector parts of the step.
@@ -995,12 +1019,21 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
+    The central-path equation r + mu^p * u = 0 contributes the
+    (mu^p - mu_target^p) coefficient on the linear-residual side; cone-product
+    corrections (s_i * y_i = mu_target, tau * kappa = mu_target) keep the
+    unmodified mu_target.
+
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
     linearized fallback (avoids squaring solver noise) when it's noisy or the
     quadratic residual check fails.
     """
+    cpe = self._central_path_exponent
+    # 0**cpe = 0 for cpe > 0, so mu_target = 0 (predictor) yields mu_target_p = 0.
+    mu_p = mu ** cpe
+    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
     # Prepare RHS for the linear system.
-    r = (mu - mu_target) * r_anchor
+    r = (mu_p - mu_target_p) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -1017,7 +1050,7 @@ class QTQP:
     tau_plus = None
     if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
-        r_tau = (mu - mu_target) * tau_anchor
+        r_tau = (mu_p - mu_target_p) * tau_anchor
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
@@ -1049,12 +1082,17 @@ class QTQP:
     the positive root since tau >= 0 is required for the embedding to represent
     a feasible point (tau=0 corresponds to a certificate of infeasibility or
     unboundedness, which is handled separately at termination).
+
+    Generalized central path: t_a's mu term becomes mu^cpe (the linear-residual
+    coefficient on tau); t_c = -mu_target keeps the unmodified mu_target since
+    it comes from the cone-product equation tau * kappa = mu_target.
     """
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
+    mu_p = mu ** self._central_path_exponent
 
-    t_a = mu + kinv_q @ q
+    t_a = mu_p + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -1104,9 +1142,16 @@ class QTQP:
     and tau_curr. P only multiplies the safe current iterate x, so KKT noise
     enters linearly rather than quadratically. A [0.1x, 10x] trust region
     prevents manifold drift from the first-order approximation.
+
+    Linear-residual coefficients on tau use mu^cpe and mu_target^cpe (the
+    generalized central path); the cone-product constant -mu_target keeps the
+    unmodified mu_target.
     """
     n = self.n
     q, kinv_q = self.q, self.kinv_q
+    cpe = self._central_path_exponent
+    mu_p = mu ** cpe
+    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
 
@@ -1120,12 +1165,13 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr * tau_curr + (mu_target - mu) * tau_anchor * tau_curr -
-         tau_curr * q_z - mu_target - x_px)
+    g = (mu_p * tau_curr * tau_curr
+         + (mu_target_p - mu_p) * tau_anchor * tau_curr
+         - tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
+    den = (2.0 * mu_p * tau_curr + (mu_target_p - mu_p) * tau_anchor - q_z +
            tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
