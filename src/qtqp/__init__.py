@@ -475,6 +475,7 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
+      gmres_restart: int = 10,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -497,6 +498,7 @@ class QTQP:
           init_strategy=init_strategy,
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
+          gmres_restart=gmres_restart,
       )
     finally:
       if self._linear_solver is not None:
@@ -523,6 +525,7 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
+      gmres_restart: int = 10,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -565,6 +568,11 @@ class QTQP:
       refinement_strategy (RefinementStrategy): Which iterative-refinement
         scheme drives each KKT solve. See RefinementStrategy for descriptions.
         Defaults to RICHARDSON.
+      gmres_restart (int): Krylov dimension per GMRES restart cycle. Each
+        cycle uses gmres_restart + 1 factor-solves (inner Arnoldi steps
+        plus one final M^{-1} apply). Smaller values reduce per-cycle
+        cost at the price of more restarts. Ignored when
+        refinement_strategy is RICHARDSON.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -631,6 +639,7 @@ class QTQP:
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
         refinement_strategy=refinement_strategy,
+        gmres_restart=gmres_restart,
     )
 
     stats = []

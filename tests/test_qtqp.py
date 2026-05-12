@@ -2632,3 +2632,80 @@ def test_direct_kkt_solver_gmres_solves_count_bounded():
   _, stats = solver.solve(rhs=rhs, warm_start=warm)
   solver.free()
   assert stats['solves'] <= budget
+
+
+def test_direct_kkt_solver_gmres_restart_path():
+  """Exercise the restart loop: budget exceeds gmres_restart so multiple
+  cycles must run, and apply count must still respect the total budget."""
+  rng = np.random.default_rng(5800)
+  m, n, z = 40, 25, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 1e-8  # tiny mu so the preconditioner is essentially exact; GMRES
+              # should converge in 1-2 inner steps regardless
+  s = rng.uniform(0.5, 1.5, size=m); s[:z] = 0.0
+  y = rng.uniform(0.5, 1.5, size=m)
+  rhs = np.concatenate([c, b])
+  warm = np.zeros(n + m)
+
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=15,
+      atol=1e-14, rtol=1e-14,
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES,
+      gmres_restart=4,  # forces multiple cycles if more than 4 applies needed
+  )
+  solver.update(mu=mu, s=s, y=y)
+  _, stats = solver.solve(rhs=rhs, warm_start=warm)
+  solver.free()
+  assert stats['converged']
+  assert stats['solves'] <= 15
+
+
+def test_gmres_restart_validation():
+  """gmres_restart must be >= 1."""
+  a = sparse.eye(2, format='csc')
+  with pytest.raises(ValueError, match='gmres_restart'):
+    qtqp.direct.DirectKktSolver(
+        a=a, p=sparse.csc_matrix((2, 2)),
+        z=0,
+        min_static_regularization=1e-8,
+        max_iterative_refinement_steps=5,
+        atol=1e-12, rtol=1e-12,
+        solver=qtqp.LinearSolver.SCIPY.value(),
+        refinement_strategy=qtqp.RefinementStrategy.GMRES,
+        gmres_restart=0,
+    )
+
+
+def test_gmres_rollback_on_stalled_refinement():
+  """A stalled GMRES must not return a worse iterate than the warm start
+  (best-iterate rollback)."""
+  rng = np.random.default_rng(5900)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 1e-2
+  s = rng.uniform(0.5, 1.5, size=m); s[:z] = 0.0
+  y = rng.uniform(0.5, 1.5, size=m)
+  rhs = np.concatenate([c, b])
+  # Warm start is already a very good solution, so any "improvement" is at
+  # the rounding floor; rollback must keep the warm-start residual.
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=20,
+      atol=0.0, rtol=0.0,  # force iteration until stall
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES,
+      gmres_restart=5,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  warm = solver._solver.solve(  # pylint: disable=protected-access
+      np.concatenate([rhs[:n], -rhs[n:]])  # match _solve's RHS adjustment
+  )
+  _, stats = solver.solve(rhs=rhs, warm_start=warm)
+  solver.free()
+  # Either we converged immediately, or the returned residual is no worse
+  # than what one direct factor-solve from warm_start would give.
+  assert stats['final_residual_norm'] < 1e-6

@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
+from scipy.linalg import solve_triangular
 
 
 class RefinementStrategy(enum.Enum):
@@ -46,12 +46,17 @@ class RefinementStrategy(enum.Enum):
     no longer improves or falls below atol + rtol * ||b||_inf.
 
   GMRES:
-    Restarted GMRES on the unregularized system A_true x = b, using the same
-    factorization M as a left preconditioner. Builds a Krylov subspace of
-    dimension up to max_iterative_refinement_steps; each Krylov step costs
-    one factor-solve plus one matvec, matching Richardson's per-iteration
-    cost. When the preconditioner is reasonable but not exact GMRES
-    typically reaches a target residual in fewer iterations than Richardson.
+    Right-preconditioned restarted GMRES on A_true x = b, using the same
+    factorization M as the preconditioner. Each inner Arnoldi step costs
+    one factor-solve plus one matvec; each restart cycle then does one
+    final factor-solve to map the Krylov-space least-squares solution back
+    to a primal-space correction. Right preconditioning is the key
+    difference vs. a stock left-preconditioned GMRES: the least-squares
+    problem minimizes the *true* residual ||b - A_true x||, not the
+    preconditioned residual ||M^{-1}(b - A_true x)||, so convergence isn't
+    fooled when M distorts the residual norm (which is exactly the regime
+    where pure IR stalls). Restarts every gmres_restart inner steps; the
+    apply budget is capped at max_iterative_refinement_steps total.
   """
 
   RICHARDSON = "richardson"
@@ -158,6 +163,7 @@ class DirectKktSolver:
       rtol: float,
       solver: LinearSolver,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
+      gmres_restart: int = 10,
   ):
     """Initializes the DirectKktSolver.
 
@@ -174,8 +180,15 @@ class DirectKktSolver:
       solver: An instance of a direct solver class (e.g., MklPardisoSolver).
       refinement_strategy: Which iterative-refinement scheme to drive the KKT
         solve with. See RefinementStrategy for descriptions.
+      gmres_restart: Krylov dimension per restart cycle (inner Arnoldi steps
+        before restart). Each cycle uses gmres_restart + 1 factor-solves
+        (Arnoldi steps + one final M^{-1} apply to convert the Krylov-space
+        solution back). Ignored when refinement_strategy is RICHARDSON.
     """
+    if gmres_restart < 1:
+      raise ValueError("gmres_restart must be >= 1.")
     self.refinement_strategy = refinement_strategy
+    self.gmres_restart = gmres_restart
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
@@ -354,68 +367,181 @@ class DirectKktSolver:
     }
 
   def _solve_gmres(self, rhs_norm, tolerance, warm_start):
-    """GMRES on kkt_true x = b, preconditioned by the kkt_reg factorization.
+    """Restarted right-preconditioned GMRES.
 
-    Each Krylov step costs one factor-solve (preconditioner apply) plus one
-    matvec against the true KKT matrix; we cap the total budget at
-    max_iterative_refinement_steps to match Richardson's per-call cost.
+    Operator      A x  = self._solver @ x - self._diag_correction * x  (=
+                          kkt_true x).
+    Preconditioner M^-1 x = self._solver.solve(x)  (the direct factor).
+
+    Each inner Arnoldi step costs one factor-solve plus one matvec; each
+    cycle does one additional factor-solve at the end to convert the
+    Krylov-space solution back to a primal-space correction. Total
+    preconditioner applies are bounded by max_iterative_refinement_steps.
+    The best iterate seen across restarts is tracked and returned, so a
+    stalled refinement never returns a worse solution than the warm start.
     """
-    n_total = self._kkt_rhs.shape[0]
-    state = {"solves": 0}
-
-    def matvec_A(x):
-      # kkt_true @ x = kkt_reg @ x - diag_correction * x.
-      return self._solver @ x - self._diag_correction * x
-
-    def matvec_M(b):
-      # Apply the regularized-KKT factorization as the preconditioner.
-      state["solves"] += 1
-      return self._solver.solve(b)
-
-    a_op = spla.LinearOperator(
-        (n_total, n_total), matvec=matvec_A, dtype=np.float64
+    sol = warm_start.copy()
+    residual = (
+        self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
     )
-    m_op = spla.LinearOperator(
-        (n_total, n_total), matvec=matvec_M, dtype=np.float64
-    )
+    residual_norm = float(np.linalg.norm(residual, np.inf))
 
-    # scipy's gmres tests convergence in the (preconditioned) 2-norm, which
-    # is at least as strict as the inf-norm criterion we report, so passing
-    # atol/rtol through is conservative. restart=maxiter with maxiter=1
-    # means one Arnoldi cycle of up to max_iterative_refinement_steps inner
-    # iterations -- bounded preconditioner apply count.
-    sol, info = spla.gmres(
-        a_op,
-        self._kkt_rhs,
-        x0=warm_start.copy(),
-        rtol=self._rtol,
-        atol=self._atol,
-        restart=self.max_iterative_refinement_steps,
-        maxiter=1,
-        M=m_op,
-    )
-
-    # Compute the final residual in inf-norm for stats consistency with the
-    # Richardson path.
-    residual_norm = float(np.linalg.norm(self._kkt_rhs - matvec_A(sol), np.inf))
+    best_sol = sol.copy()
+    best_residual_norm = residual_norm
+    status = "non-converged"
+    solves = 0
+    prev_ratio_high = False  # consecutive sluggish-step tracker
 
     if residual_norm < tolerance:
       status = "converged"
-    elif info < 0:
-      # Negative info from scipy.gmres indicates illegal input / breakdown.
-      status = "stalled"
+
+    while (
+        status == "non-converged"
+        and self.max_iterative_refinement_steps - solves >= 2
+    ):
+      # Each cycle uses (inner + 1) factor-solves: inner Arnoldi steps plus
+      # one final M^{-1} apply. Cap inner so total cycle cost <= remaining.
+      remaining = self.max_iterative_refinement_steps - solves
+      max_inner = min(self.gmres_restart, remaining - 1)
+      old_residual_norm = residual_norm
+      used = self._gmres_cycle(sol, residual, max_inner, tolerance)
+      solves += used
+
+      # Recompute the exact inf-norm residual; the per-cycle running check
+      # is in 2-norm.
+      residual = (
+          self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
+      )
+      residual_norm = float(np.linalg.norm(residual, np.inf))
+
+      if residual_norm < best_residual_norm:
+        best_residual_norm = residual_norm
+        np.copyto(best_sol, sol)
+
+      if residual_norm < tolerance:
+        status = "converged"
+        break
+
+      # Lucky breakdown (cycle exited early via Arnoldi breakdown) means
+      # GMRES exhausted the Krylov subspace; further restarts cannot help.
+      if used < max_inner + 1:
+        status = "stalled"
+        break
+
+      # Stall check: bail on residual blow-up vs best, or on two consecutive
+      # cycles with ratio > 0.95 (i.e. crawling at <5% improvement per cycle).
+      if residual_norm > 2.0 * best_residual_norm:
+        status = "stalled"
+        break
+      ratio_high = (
+          old_residual_norm > 0.0
+          and (residual_norm / old_residual_norm) > 0.95
+      )
+      if ratio_high and prev_ratio_high:
+        logging.debug(
+            "GMRES stalled after %d solves. Old res: %e, New res: %e",
+            solves, old_residual_norm, residual_norm,
+        )
+        status = "stalled"
+        break
+      prev_ratio_high = ratio_high
     else:
-      # info > 0: hit maxiter without converging.
-      status = "non-converged"
+      if status == "non-converged":
+        logging.debug(
+            "GMRES did not converge after %d solves."
+            " Final residual: %e > tolerance: %e",
+            solves, residual_norm, tolerance,
+        )
+
+    # Roll back to the best iterate if a later cycle worsened the residual.
+    if best_residual_norm < residual_norm:
+      np.copyto(sol, best_sol)
+      residual_norm = best_residual_norm
 
     return sol, {
-        "solves": state["solves"],
+        "solves": solves,
         "final_residual_norm": residual_norm,
         "rhs_norm": rhs_norm,
         "tolerance": tolerance,
         "converged": status == "converged",
         "status": status,
     }
+
+  def _gmres_cycle(
+      self,
+      sol: np.ndarray,
+      residual: np.ndarray,
+      max_inner: int,
+      tolerance: float,
+  ) -> int:
+    """One restart cycle of right-preconditioned GMRES.
+
+    Updates ``sol`` in place. Returns the total factor-solves consumed
+    (= inner Arnoldi steps + 1 final M^{-1} apply, or 0 if the input
+    residual is already zero). Early-exits when the running 2-norm residual
+    estimate falls below ``tolerance``; the inf-norm is at most the 2-norm,
+    so this is a safe (slightly conservative) trigger for the inf-norm
+    convergence test the outer loop applies.
+    """
+    n = sol.size
+    v = np.empty((max_inner + 1, n))
+    h = np.zeros((max_inner + 1, max_inner))
+    cs = np.zeros(max_inner)
+    sn = np.zeros(max_inner)
+    g = np.zeros(max_inner + 1)
+
+    beta = float(np.linalg.norm(residual))
+    if beta == 0.0:
+      return 0
+
+    v[0] = residual / beta
+    g[0] = beta
+
+    j_done = 0
+    breakdown = False
+    for j in range(max_inner):
+      # Right preconditioning: build the Krylov subspace of A M^{-1}.
+      z_j = self._solver.solve(v[j])
+      w = self._solver @ z_j - self._diag_correction * z_j
+
+      # Modified Gram-Schmidt against the existing basis.
+      for i in range(j + 1):
+        h[i, j] = v[i] @ w
+        w -= h[i, j] * v[i]
+      h_next = float(np.linalg.norm(w))
+      h[j + 1, j] = h_next
+
+      breakdown = h_next == 0.0
+      if not breakdown:
+        v[j + 1] = w / h_next
+
+      # Apply previously computed Givens rotations to the new column of H.
+      for i in range(j):
+        t = cs[i] * h[i, j] + sn[i] * h[i + 1, j]
+        h[i + 1, j] = -sn[i] * h[i, j] + cs[i] * h[i + 1, j]
+        h[i, j] = t
+
+      # New Givens rotation to zero out h[j+1, j].
+      rho = float(np.hypot(h[j, j], h[j + 1, j]))
+      cs[j] = h[j, j] / rho
+      sn[j] = h[j + 1, j] / rho
+      h[j, j] = rho
+      h[j + 1, j] = 0.0
+
+      # |g[j+1]| is the 2-norm of the least-squares residual after step j.
+      g[j + 1] = -sn[j] * g[j]
+      g[j] = cs[j] * g[j]
+
+      j_done = j + 1
+      if abs(g[j + 1]) < tolerance or breakdown:
+        break
+
+    # Solve in Krylov space and convert back to primal space via one M^{-1}
+    # apply -- the single extra factor-solve per cycle vs the FGMRES-style
+    # variant that stores Z = M^{-1} V column-by-column.
+    y = solve_triangular(h[:j_done, :j_done], g[:j_done])
+    sol += self._solver.solve(v[:j_done].T @ y)
+    return j_done + 1
 
   def free(self):
     """Frees the solver resources."""
