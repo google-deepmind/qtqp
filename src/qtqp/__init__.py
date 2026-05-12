@@ -43,6 +43,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import direct
+from .direct import RefinementStrategy
 
 __version__ = "0.0.5"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -473,6 +474,7 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
+      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -494,6 +496,7 @@ class QTQP:
           collect_stats=collect_stats,
           init_strategy=init_strategy,
           init_mu_scale=init_mu_scale,
+          refinement_strategy=refinement_strategy,
       )
     finally:
       if self._linear_solver is not None:
@@ -519,6 +522,7 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
+      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -558,6 +562,9 @@ class QTQP:
         InitStrategy.ORTHANT. Larger values produce iterates closer to the
         canonical center; smaller values produce more aggressive starts. Must
         be positive and finite. Ignored for other strategies.
+      refinement_strategy (RefinementStrategy): Which iterative-refinement
+        scheme drives each KKT solve. See RefinementStrategy for descriptions.
+        Defaults to RICHARDSON.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -623,6 +630,7 @@ class QTQP:
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
+        refinement_strategy=refinement_strategy,
     )
 
     stats = []

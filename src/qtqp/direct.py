@@ -23,11 +23,39 @@ All backend classes are re-exported here so that ``from . import direct``
 followed by ``direct.ScipySolver`` continues to work.
 """
 
+import enum
 import logging
 from typing import Any, Literal
 
 import numpy as np
 import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+
+class RefinementStrategy(enum.Enum):
+  """Available iterative refinement strategies for DirectKktSolver.
+
+  RICHARDSON:
+    Classical iterative refinement, i.e. preconditioned Richardson iteration
+
+        x_{k+1} = x_k + M^{-1} (b - A_true x_k)
+
+    where M is the factorized regularized KKT matrix and A_true is the
+    unregularized KKT matrix. Each iteration costs one preconditioner apply
+    (a factor-solve) and one matvec. Stops when the inf-norm of the residual
+    no longer improves or falls below atol + rtol * ||b||_inf.
+
+  GMRES:
+    Restarted GMRES on the unregularized system A_true x = b, using the same
+    factorization M as a left preconditioner. Builds a Krylov subspace of
+    dimension up to max_iterative_refinement_steps; each Krylov step costs
+    one factor-solve plus one matvec, matching Richardson's per-iteration
+    cost. When the preconditioner is reasonable but not exact GMRES
+    typically reaches a target residual in fewer iterations than Richardson.
+  """
+
+  RICHARDSON = "richardson"
+  GMRES = "gmres"
 
 
 def diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
@@ -129,6 +157,7 @@ class DirectKktSolver:
       atol: float,
       rtol: float,
       solver: LinearSolver,
+      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
   ):
     """Initializes the DirectKktSolver.
 
@@ -143,7 +172,10 @@ class DirectKktSolver:
       atol: Absolute tolerance for iterative refinement.
       rtol: Relative tolerance for iterative refinement.
       solver: An instance of a direct solver class (e.g., MklPardisoSolver).
+      refinement_strategy: Which iterative-refinement scheme to drive the KKT
+        solve with. See RefinementStrategy for descriptions.
     """
+    self.refinement_strategy = refinement_strategy
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
@@ -220,22 +252,21 @@ class DirectKktSolver:
   ) -> tuple[np.ndarray, dict[str, Any]]:
     """Solves the linear system with the given factorization.
 
-    Performs iterative refinement to improve the solution accuracy.
+    Performs iterative refinement (Richardson or GMRES, see
+    RefinementStrategy) to improve solution accuracy.
 
     Args:
       rhs: The right-hand side of the linear system.
       warm_start: A warm-start for the solution.
 
     Returns:
-      A tuple containing:
-        - sol: The solution vector.
-        - A dictionary with solve statistics including:
-          - "solves": The number of linear solves performed.
-          - "final_residual_norm": The final infinity norm of the residual.
-          - "rhs_norm": The infinity norm of the KKT right-hand side.
-          - "tolerance": The absolute/relative IR stopping threshold.
-          - "status": The status of the iterative refinement ("converged",
-            "non-converged", or "stalled").
+      A tuple (sol, stats) where stats has the keys
+        - "solves": number of preconditioner applications performed.
+        - "final_residual_norm": ||r||_inf after the last step.
+        - "rhs_norm": ||rhs||_inf.
+        - "tolerance": atol + rtol * rhs_norm.
+        - "converged": bool.
+        - "status": "converged", "stalled", or "non-converged".
 
     Raises:
       ValueError: If the solution contains NaN values.
@@ -247,6 +278,29 @@ class DirectKktSolver:
     rhs_norm = np.linalg.norm(self._kkt_rhs, np.inf)
     tolerance = self._atol + self._rtol * rhs_norm
 
+    if self.refinement_strategy is RefinementStrategy.RICHARDSON:
+      sol, stats = self._solve_richardson(rhs_norm, tolerance, warm_start)
+    elif self.refinement_strategy is RefinementStrategy.GMRES:
+      sol, stats = self._solve_gmres(rhs_norm, tolerance, warm_start)
+    else:
+      raise ValueError(
+          f"Unknown refinement strategy: {self.refinement_strategy}"
+      )
+
+    if np.any(np.isnan(sol)):
+      raise ValueError("Linear solver returned NaNs.")
+
+    logging.debug(
+        "KKT solve: strategy=%s, status=%s, solves=%d, res=%e",
+        self.refinement_strategy.name,
+        stats["status"],
+        stats["solves"],
+        stats["final_residual_norm"],
+    )
+    return sol, stats
+
+  def _solve_richardson(self, rhs_norm, tolerance, warm_start):
+    """Classical iterative refinement: preconditioned Richardson iteration."""
     # Initial sol and residual.
     # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
     #   kkt_true @ sol = kkt_reg @ sol - diag_correction @ sol
@@ -290,15 +344,72 @@ class DirectKktSolver:
           tolerance,
       )
 
-    if np.any(np.isnan(sol)):
-      raise ValueError("Linear solver returned NaNs.")
-
-    logging.debug(
-        "KKT solve: status=%s, solves=%d, res=%e", status, solves, residual_norm
-    )
-
     return sol, {
         "solves": solves,
+        "final_residual_norm": residual_norm,
+        "rhs_norm": rhs_norm,
+        "tolerance": tolerance,
+        "converged": status == "converged",
+        "status": status,
+    }
+
+  def _solve_gmres(self, rhs_norm, tolerance, warm_start):
+    """GMRES on kkt_true x = b, preconditioned by the kkt_reg factorization.
+
+    Each Krylov step costs one factor-solve (preconditioner apply) plus one
+    matvec against the true KKT matrix; we cap the total budget at
+    max_iterative_refinement_steps to match Richardson's per-call cost.
+    """
+    n_total = self._kkt_rhs.shape[0]
+    state = {"solves": 0}
+
+    def matvec_A(x):
+      # kkt_true @ x = kkt_reg @ x - diag_correction * x.
+      return self._solver @ x - self._diag_correction * x
+
+    def matvec_M(b):
+      # Apply the regularized-KKT factorization as the preconditioner.
+      state["solves"] += 1
+      return self._solver.solve(b)
+
+    a_op = spla.LinearOperator(
+        (n_total, n_total), matvec=matvec_A, dtype=np.float64
+    )
+    m_op = spla.LinearOperator(
+        (n_total, n_total), matvec=matvec_M, dtype=np.float64
+    )
+
+    # scipy's gmres tests convergence in the (preconditioned) 2-norm, which
+    # is at least as strict as the inf-norm criterion we report, so passing
+    # atol/rtol through is conservative. restart=maxiter with maxiter=1
+    # means one Arnoldi cycle of up to max_iterative_refinement_steps inner
+    # iterations -- bounded preconditioner apply count.
+    sol, info = spla.gmres(
+        a_op,
+        self._kkt_rhs,
+        x0=warm_start.copy(),
+        rtol=self._rtol,
+        atol=self._atol,
+        restart=self.max_iterative_refinement_steps,
+        maxiter=1,
+        M=m_op,
+    )
+
+    # Compute the final residual in inf-norm for stats consistency with the
+    # Richardson path.
+    residual_norm = float(np.linalg.norm(self._kkt_rhs - matvec_A(sol), np.inf))
+
+    if residual_norm < tolerance:
+      status = "converged"
+    elif info < 0:
+      # Negative info from scipy.gmres indicates illegal input / breakdown.
+      status = "stalled"
+    else:
+      # info > 0: hit maxiter without converging.
+      status = "non-converged"
+
+    return sol, {
+        "solves": state["solves"],
         "final_residual_norm": residual_norm,
         "rhs_norm": rhs_norm,
         "tolerance": tolerance,

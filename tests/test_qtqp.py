@@ -2485,3 +2485,150 @@ def test_augmented_equilibration_ill_scaled_problem_converges():
       verbose=False,
   )
   _assert_solution(solution, a, b, c, p, z)
+
+
+# =============================================================================
+# RefinementStrategy: GMRES iterative refinement
+# =============================================================================
+
+_REFINEMENT_STRATEGIES = [
+    qtqp.RefinementStrategy.RICHARDSON,
+    qtqp.RefinementStrategy.GMRES,
+]
+
+
+@pytest.mark.parametrize('refinement_strategy', _REFINEMENT_STRATEGIES)
+@pytest.mark.parametrize('seed', 5242 + np.arange(3))
+def test_refinement_strategy_solve(refinement_strategy, seed):
+  """Every refinement strategy must solve a feasible QP to optimality."""
+  rng = np.random.default_rng(seed)
+  a, b, c, p = _gen_feasible(60, 40, 8, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=8, p=p).solve(
+      refinement_strategy=refinement_strategy,
+      verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, 8)
+
+
+def test_refinement_gmres_infeasible():
+  """GMRES refinement must still detect primal infeasibility."""
+  rng = np.random.default_rng(5300)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, verbose=False
+  )
+  _assert_infeasible(solution, a, b, 5)
+
+
+def test_refinement_gmres_unbounded():
+  """GMRES refinement must still detect primal unboundedness."""
+  rng = np.random.default_rng(5301)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, verbose=False
+  )
+  _assert_unbounded(solution, a, c, p, 5)
+
+
+def test_refinement_strategies_agree():
+  """RICHARDSON and GMRES must converge to the same QP solution."""
+  rng = np.random.default_rng(5400)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol_rich = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.RICHARDSON, verbose=False
+  )
+  sol_gmres = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, verbose=False
+  )
+  assert sol_rich.status == qtqp.SolutionStatus.SOLVED
+  assert sol_gmres.status == qtqp.SolutionStatus.SOLVED
+  obj_rich = c @ sol_rich.x + 0.5 * sol_rich.x @ p @ sol_rich.x
+  obj_gmres = c @ sol_gmres.x + 0.5 * sol_gmres.x @ p @ sol_gmres.x
+  np.testing.assert_allclose(obj_rich, obj_gmres, atol=1e-5, rtol=1e-5)
+
+
+def test_refinement_gmres_with_augmented_equilibration():
+  """GMRES IR must compose with the new AUGMENTED equilibration."""
+  rng = np.random.default_rng(5500)
+  a, b, c, p = _gen_feasible(60, 40, 8, random_state=rng)
+  b = b * 1e4  # mildly ill-scaled b to exercise AUGMENTED + GMRES together
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=8, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.GMRES,
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, 8)
+
+
+def test_direct_kkt_solver_gmres_residual_matches_richardson():
+  """Direct call: on the same instance, both strategies should drive ||r||_inf
+  to roughly the same final residual when given enough budget."""
+  rng = np.random.default_rng(5600)
+  m, n, z = 80, 50, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.1
+  s = rng.uniform(0.5, 1.5, size=m)
+  y = rng.uniform(0.5, 1.5, size=m)
+  s[:z] = 0.0
+  rhs = np.concatenate([c, b])
+  warm = np.zeros(n + m)
+
+  stats = {}
+  sols = {}
+  for strat in _REFINEMENT_STRATEGIES:
+    solver = qtqp.direct.DirectKktSolver(
+        a=a, p=p, z=z,
+        min_static_regularization=1e-8,
+        max_iterative_refinement_steps=20,
+        atol=1e-12, rtol=1e-12,
+        solver=qtqp.LinearSolver.SCIPY.value(),
+        refinement_strategy=strat,
+    )
+    solver.update(mu=mu, s=s, y=y)
+    sol, st = solver.solve(rhs=rhs, warm_start=warm)
+    solver.free()
+    stats[strat] = st
+    sols[strat] = sol
+
+  # Both must converge under the chosen tolerances on this well-conditioned
+  # problem; final residuals must be comparable.
+  for strat, st in stats.items():
+    assert st['converged'], f"{strat} did not converge: {st}"
+  rich_res = stats[qtqp.RefinementStrategy.RICHARDSON]['final_residual_norm']
+  gmres_res = stats[qtqp.RefinementStrategy.GMRES]['final_residual_norm']
+  # GMRES typically attains smaller or equal final residual for the same
+  # preconditioner; allow loose 100x slack in either direction.
+  assert gmres_res < 100 * rich_res + 1e-12
+  # Solutions agree to high precision.
+  np.testing.assert_allclose(
+      sols[qtqp.RefinementStrategy.RICHARDSON],
+      sols[qtqp.RefinementStrategy.GMRES],
+      atol=1e-8, rtol=1e-8,
+  )
+
+
+def test_direct_kkt_solver_gmres_solves_count_bounded():
+  """GMRES preconditioner-apply count must respect max_iterative_refinement_steps."""
+  rng = np.random.default_rng(5700)
+  m, n, z = 40, 25, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(0.5, 1.5, size=m); s[:z] = 0.0
+  y = rng.uniform(0.5, 1.5, size=m)
+  rhs = np.concatenate([c, b])
+  warm = np.zeros(n + m)
+
+  budget = 3
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=budget,
+      atol=0.0, rtol=0.0,  # force the iteration cap to bind
+      solver=qtqp.LinearSolver.SCIPY.value(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  _, stats = solver.solve(rhs=rhs, warm_start=warm)
+  solver.free()
+  assert stats['solves'] <= budget
