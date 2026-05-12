@@ -346,18 +346,18 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
   )
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 42 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10), (10, 5, 3), (500, 300, 30)))
-def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
+def test_solve(equilibration, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats
@@ -366,18 +366,18 @@ def test_solve(equilibrate, seed, linear_solver, mnz, record_iterations):
   _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 142 + np.arange(10))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10), (500, 300, 30)))
-def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
+def test_infeasible(equilibration, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver with infeasible QP."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats
@@ -386,18 +386,18 @@ def test_infeasible(equilibrate, seed, linear_solver, mnz, record_iterations):
   _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', list(242 + np.arange(10)))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('mnz', ((150, 100, 10), (500, 300, 30)))
-def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
+def test_unbounded(equilibration, seed, linear_solver, mnz, record_iterations):
   """Test the QTQP solver with unbounded QP."""
   rng = np.random.default_rng(seed)
   m, n, z = mnz
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   # Record stats
@@ -406,51 +406,51 @@ def test_unbounded(equilibrate, seed, linear_solver, mnz, record_iterations):
   _assert_unbounded(solution, a, c, p, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 6042 + np.arange(3))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_solve_large(equilibrate, seed, linear_solver, record_iterations):
+def test_solve_large(equilibration, seed, linear_solver, record_iterations):
   """Test solver on larger instances (1000x600) to stress backends."""
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_solution(solution, a, b, c, p, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 6142 + np.arange(3))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_infeasible_large(equilibrate, seed, linear_solver, record_iterations):
+def test_infeasible_large(equilibration, seed, linear_solver, record_iterations):
   """Test infeasible detection on larger instances (1000x600)."""
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
   _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', list(6242 + np.arange(3)))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_unbounded_large(equilibrate, seed, linear_solver, record_iterations):
+def test_unbounded_large(equilibration, seed, linear_solver, record_iterations):
   """Test unbounded detection on larger instances (1000x600)."""
   rng = np.random.default_rng(seed)
   m, n, z = 1000, 600, 60
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
@@ -496,10 +496,10 @@ def _append_dropped_inequalities(a, b, n_extra, random_state, rhs_value):
   return a_full, b_full
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 1542 + np.arange(10))
 @pytest.mark.parametrize('mn', ((5, 10), (30, 50), (80, 100)))
-def test_equality_only_solve(equilibrate, seed, mn):
+def test_equality_only_solve(equilibration, seed, mn):
   """Equality-only QP (z == m) is currently rejected."""
   rng = np.random.default_rng(seed)
   m, n = mn
@@ -507,7 +507,7 @@ def test_equality_only_solve(equilibrate, seed, mn):
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
   with pytest.raises(ValueError, match='effective z == m'):
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        verbose=True, equilibrate=equilibrate,
+        verbose=True, equilibration_strategy=equilibration,
     )
 
 
@@ -1286,7 +1286,8 @@ def test_equivalent_equilibration(seed):
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  a_eq, p_eq, _, _, d, e = solver._equilibrate()  # pylint: disable=protected-access
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.RUIZ
+  a_eq, p_eq, _, _, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
 
   a_ref, p_ref, d_ref, e_ref = _equilibrate_reference(a, p)
 
@@ -1294,6 +1295,7 @@ def test_equivalent_equilibration(seed):
   np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
   np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
+  assert sigma == 1.0  # RUIZ never touches the augmented scalar.
 
 
 def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
@@ -1341,10 +1343,10 @@ def test_equivalent_compute_sigma(seed):
 # LP tests (p=None)
 # =============================================================================
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4042 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
+def test_solve_lp(equilibration, seed, linear_solver, record_iterations):
   """Test QTQP as an LP (p=None); verifies the p.nnz==0 code path."""
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 5
@@ -1352,7 +1354,7 @@ def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
   p_zero = sparse.csc_matrix((n, n))
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1360,17 +1362,17 @@ def test_solve_lp(equilibrate, seed, linear_solver, record_iterations):
   _assert_solution(solution, a, b, c, p_zero, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4142 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_infeasible_lp(equilibrate, seed, linear_solver, record_iterations):
+def test_infeasible_lp(equilibration, seed, linear_solver, record_iterations):
   """Test infeasible LP detection (p=None)."""
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 5
   a, b, c, _ = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1378,10 +1380,10 @@ def test_infeasible_lp(equilibrate, seed, linear_solver, record_iterations):
   _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4242 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_unbounded_lp(equilibrate, seed, linear_solver, record_iterations):
+def test_unbounded_lp(equilibration, seed, linear_solver, record_iterations):
   """Test unbounded LP detection (p=None).
 
   _gen_unbounded constructs a direction x with c'x=-1 and Ax+s=0, s[z:]>=0.
@@ -1394,7 +1396,7 @@ def test_unbounded_lp(equilibrate, seed, linear_solver, record_iterations):
   p_zero = sparse.csc_matrix((n, n))
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1426,17 +1428,17 @@ def test_p_none_equivalent_to_zero_matrix():
 # All-inequality constraints (z=0)
 # =============================================================================
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4342 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_solve_all_inequalities(equilibrate, seed, linear_solver, record_iterations):
+def test_solve_all_inequalities(equilibration, seed, linear_solver, record_iterations):
   """Test solver with z=0 (all-inequality constraints, no equalities)."""
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 0
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1448,17 +1450,17 @@ def test_solve_all_inequalities(equilibrate, seed, linear_solver, record_iterati
 # Small-problem infeasible / unbounded
 # =============================================================================
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4442 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_infeasible_small(equilibrate, seed, linear_solver, record_iterations):
+def test_infeasible_small(equilibration, seed, linear_solver, record_iterations):
   """Test infeasible detection on small problems (n+m < ~50)."""
   rng = np.random.default_rng(seed)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1466,17 +1468,17 @@ def test_infeasible_small(equilibrate, seed, linear_solver, record_iterations):
   _assert_infeasible(solution, a, b, z)
 
 
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 4542 + np.arange(5))
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
-def test_unbounded_small(equilibrate, seed, linear_solver, record_iterations):
+def test_unbounded_small(equilibration, seed, linear_solver, record_iterations):
   """Test unbounded detection on small problems (n+m < ~50)."""
   rng = np.random.default_rng(seed)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_unbounded(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate, linear_solver=linear_solver, collect_stats=True,
+      equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
       verbose=True,
   )
 
@@ -1750,14 +1752,20 @@ def test_max_step_size():
 # Equilibration/unequilibration roundtrip
 # =============================================================================
 
-def test_equilibrate_unequilibrate_roundtrip():
-  """Test that equilibrating then unequilibrating iterates is the identity."""
+@pytest.mark.parametrize('strategy', [
+    qtqp.EquilibrationStrategy.RUIZ,
+    qtqp.EquilibrationStrategy.AUGMENTED,
+])
+def test_equilibrate_unequilibrate_roundtrip(strategy):
+  """Equilibrating then unequilibrating iterates must be the identity for
+  every non-NONE strategy (sigma factor must cancel)."""
   rng = np.random.default_rng(42)
   m, n, z = 30, 20, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  solver.equilibration_strategy = strategy
 
-  _, _, _, _, solver.d, solver.e = solver._equilibrate()  # pylint: disable=protected-access
+  _, _, _, _, solver.d, solver.e, solver.sigma_eq = solver._equilibrate()  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.uniform(size=m)
@@ -1901,46 +1909,52 @@ def test_solve_tiny():
 
 
 # =============================================================================
-# equilibrate=True and equilibrate=False produce the same solution
+# All equilibration strategies produce the same solution
 # =============================================================================
 
-def test_equilibrate_same_solution():
-  """Test that equilibration does not change the optimal objective value."""
+def test_equilibration_strategies_agree():
+  """Every equilibration strategy must yield the same optimum (within tol)."""
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  sol_eq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=True, verbose=True
-  )
-  sol_noeq = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=False, verbose=True
-  )
+  sols = {}
+  for strategy in qtqp.EquilibrationStrategy:
+    sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        equilibration_strategy=strategy, verbose=True
+    )
+    assert sol.status == qtqp.SolutionStatus.SOLVED, (
+        f"strategy {strategy} did not converge"
+    )
+    _assert_solution(sol, a, b, c, p, z)
+    sols[strategy] = sol
 
-  assert sol_eq.status == qtqp.SolutionStatus.SOLVED
-  assert sol_noeq.status == qtqp.SolutionStatus.SOLVED
-  # Both solutions must satisfy KKT independently.
-  _assert_solution(sol_eq, a, b, c, p, z)
-  _assert_solution(sol_noeq, a, b, c, p, z)
-  # Optimal objective values must agree (even if x differs near degeneracy).
-  obj_eq = c @ sol_eq.x + 0.5 * sol_eq.x @ p @ sol_eq.x
-  obj_noeq = c @ sol_noeq.x + 0.5 * sol_noeq.x @ p @ sol_noeq.x
-  np.testing.assert_allclose(obj_eq, obj_noeq, atol=1e-5, rtol=1e-5)
+  obj = {
+      s: c @ sol.x + 0.5 * sol.x @ p @ sol.x for s, sol in sols.items()
+  }
+  ref = obj[qtqp.EquilibrationStrategy.NONE]
+  for s, val in obj.items():
+    np.testing.assert_allclose(val, ref, atol=1e-5, rtol=1e-5,
+                                err_msg=f"objective drift for {s}")
 
 
 # =============================================================================
-# Re-solve with flipped equilibrate setting
+# Re-solve with a different equilibration strategy on the same instance
 # =============================================================================
 
-def test_resolve_flip_equilibrate():
-  """Test re-solving the same instance with different equilibrate settings."""
+def test_resolve_flip_equilibration():
+  """Re-solving the same instance with different equilibration must agree."""
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
 
-  sol1 = solver.solve(equilibrate=True, verbose=True)
-  sol2 = solver.solve(equilibrate=False, verbose=True)
+  sol1 = solver.solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.RUIZ, verbose=True
+  )
+  sol2 = solver.solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.NONE, verbose=True
+  )
 
   assert sol1.status == qtqp.SolutionStatus.SOLVED
   assert sol2.status == qtqp.SolutionStatus.SOLVED
@@ -2246,15 +2260,15 @@ _INIT_STRATEGIES = [
 
 
 @pytest.mark.parametrize('init_strategy', _INIT_STRATEGIES)
-@pytest.mark.parametrize('equilibrate', [True, False])
+@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
 @pytest.mark.parametrize('seed', 42 + np.arange(3))
-def test_init_strategy_solve(init_strategy, equilibrate, seed):
+def test_init_strategy_solve(init_strategy, equilibration, seed):
   """Every init strategy must solve a feasible QP to optimality."""
   rng = np.random.default_rng(seed)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibrate=equilibrate,
+      equilibration_strategy=equilibration,
       init_strategy=init_strategy,
       verbose=False,
   )
@@ -2294,7 +2308,7 @@ def test_init_orthant_centering(mu_scale):
   m, n, z = 40, 25, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver.equilibrate = False  # _init_trivial branch needs the attribute
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE  # _init_trivial branch needs the attribute
   x, y, s, tau, meta = solver._init_orthant(b, mu_scale)
 
   assert tau == 1.0
@@ -2320,7 +2334,7 @@ def test_init_orthant_zero_b():
   b = np.zeros(m)
   c = np.zeros(n)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z)
-  solver.equilibrate = False
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
   x, y, s, tau, meta = solver._init_orthant(b, mu_scale=1.0)
   assert tau == 1.0
   assert np.all(x == 0.0)
@@ -2353,7 +2367,7 @@ def test_init_orthant_stable_for_large_positive_beta():
   c = np.zeros(n)
   b = np.array([10.0, 1.0, 0.5, 2.0])
   solver = qtqp.QTQP(a=sparse.eye(m, n, format='csc'), b=b, c=c, z=z)
-  solver.equilibrate = False
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
   mu_scale = 1e-7  # forces beta to ~1e6 in magnitude
   _, y, s, _, meta = solver._init_orthant(b, mu_scale=mu_scale)
   mu_0 = meta['mu_0']
@@ -2371,7 +2385,7 @@ def test_init_cvxopt_strict_interior():
   m, n, z = 40, 25, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver.equilibrate = False
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
   x, y, s, tau, _ = solver._init_cvxopt(a, p, b, c)
   assert tau == 1.0
   assert x.shape == (n,)
@@ -2394,3 +2408,80 @@ def test_init_strategy_mostly_equality_problem():
     assert solution.status == qtqp.SolutionStatus.SOLVED, (
         f"strategy {strat} failed on mostly-equality problem"
     )
+
+
+# =============================================================================
+# AUGMENTED equilibration: focused tests
+# =============================================================================
+
+@pytest.mark.parametrize('seed', 4242 + np.arange(3))
+def test_augmented_equilibration_solve(seed):
+  """AUGMENTED equilibration must solve a generic feasible QP."""
+  rng = np.random.default_rng(seed)
+  a, b, c, p = _gen_feasible(80, 50, 10, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=10, p=p).solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, 10)
+
+
+def test_augmented_equilibration_infeasible():
+  """AUGMENTED equilibration must still detect primal infeasibility."""
+  rng = np.random.default_rng(4243)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      verbose=False,
+  )
+  _assert_infeasible(solution, a, b, 5)
+
+
+def test_augmented_equilibration_unbounded():
+  """AUGMENTED equilibration must still detect primal unboundedness."""
+  rng = np.random.default_rng(4244)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      verbose=False,
+  )
+  _assert_unbounded(solution, a, c, p, 5)
+
+
+def test_augmented_equilibration_scales_b_and_c():
+  """AUGMENTED equilibration must drive |b| and |c| toward unit scale when
+  the original problem has them several orders of magnitude away from 1.
+  RUIZ scales b and c only passively by d/e and cannot reach this."""
+  rng = np.random.default_rng(99)
+  m, n, z = 30, 20, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  # Push b and c far from unit scale.
+  b = b * 1e6
+  c = c * 1e-6
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.AUGMENTED
+  _, _, b_eq, c_eq, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
+
+  # sigma absorbed most of the gross scale mismatch.
+  assert sigma != 1.0
+  assert np.linalg.norm(b_eq, np.inf) < 1e3
+  assert np.linalg.norm(c_eq, np.inf) < 1e3
+  # Cross-check the inverse: applying sigma * D b reproduces b_eq.
+  np.testing.assert_allclose(b_eq, sigma * d * b, rtol=1e-12)
+  np.testing.assert_allclose(c_eq, sigma * e * c, rtol=1e-12)
+
+
+def test_augmented_equilibration_ill_scaled_problem_converges():
+  """AUGMENTED should handle a problem whose b is 1e6x larger than A's rows
+  without losing accuracy. Same instance, the recovered solution must
+  satisfy the ORIGINAL problem's KKT (not the equilibrated one)."""
+  rng = np.random.default_rng(101)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  b = b * 1e6  # b dominates the row scaling
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, z)

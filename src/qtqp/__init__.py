@@ -137,6 +137,43 @@ class SolutionStatus(enum.Enum):
   UNFINISHED = "unfinished"
 
 
+class EquilibrationStrategy(enum.Enum):
+  """Available equilibration strategies applied to the problem data.
+
+  NONE:
+    Do not equilibrate. Pass (A, P, b, c) through unchanged.
+
+  RUIZ:
+    Ruiz equilibration on the constraint matrix A and Hessian P. Symmetric
+    diagonal scalings D (rows) and E (columns) are chosen so that, at each
+    iteration, the inf-norm of every row of D A E and every column of
+    [D A E ; E P E] is driven toward 1. The vectors b and c are passively
+    rescaled as b <- D b and c <- E c.
+
+  AUGMENTED:
+    Ruiz equilibration on the symmetric augmented matrix
+
+        M = [ P    A^T   c ]
+            [ A     0   -b ]
+            [ c^T -b^T   0 ]
+
+    so b and c participate in determining the row/column norms rather than
+    being scaled passively. The scaling has three blocks (E for x columns,
+    D for y rows, and a scalar sigma for the augmented row/column), giving
+
+        A_eq = D A E,    P_eq = E P E,
+        b_eq = sigma * (D b),   c_eq = sigma * (E c).
+
+    The sigma factor maps to the homogenization variable (tau_orig =
+    sigma * tau_eq), so iterate (un)equilibration must apply 1/sigma to
+    keep the recovered x/tau, y/tau, s/tau in the original scale.
+  """
+
+  NONE = "none"
+  RUIZ = "ruiz"
+  AUGMENTED = "augmented"
+
+
 class InitStrategy(enum.Enum):
   """Available initialization strategies for the IPM iterates.
 
@@ -349,7 +386,7 @@ class QTQP:
     s = np.zeros(self.m)
     y[self.z :] = 1.0
     s[self.z :] = 1.0
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
 
@@ -432,7 +469,7 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibrate: bool = True,
+      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
@@ -453,7 +490,7 @@ class QTQP:
           linear_solver_rtol=linear_solver_rtol,
           linear_solver=linear_solver,
           verbose=verbose,
-          equilibrate=equilibrate,
+          equilibration_strategy=equilibration_strategy,
           collect_stats=collect_stats,
           init_strategy=init_strategy,
           init_mu_scale=init_mu_scale,
@@ -478,7 +515,7 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibrate: bool = True,
+      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.TRIVIAL,
       init_mu_scale: float = 1.0,
@@ -507,8 +544,9 @@ class QTQP:
       linear_solver (LinearSolver): The linear solver to use when solving the
         KKT system.
       verbose (bool): If True, prints a summary of each iteration.
-      equilibrate (bool): If True, equilibrate the data for better numerical
-        stability.
+      equilibration_strategy (EquilibrationStrategy): Which scaling to apply
+        to (A, P, b, c) before iterating. See EquilibrationStrategy for
+        descriptions. Defaults to RUIZ.
       collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
@@ -547,18 +585,20 @@ class QTQP:
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
-    self.equilibrate = equilibrate
+    self.equilibration_strategy = equilibration_strategy
     if verbose:
       print(
           f"| QTQP v{__version__}:"
           f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
-          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name}"
+          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
+          f" equilibration={equilibration_strategy.name}"
       )
 
-    if self.equilibrate:
-      a, p, b, c, self.d, self.e = self._equilibrate()
+    if equilibration_strategy is EquilibrationStrategy.NONE:
+      a, p, b, c = self.a, self.p, self.b, self.c
+      self.d, self.e, self.sigma_eq = None, None, 1.0
     else:
-      a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+      a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate()
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -709,7 +749,7 @@ class QTQP:
         stats[-1]["status"] = status
 
     # We have terminated for one reason or another.
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
       case SolutionStatus.SOLVED:
@@ -745,7 +785,22 @@ class QTQP:
         raise ValueError(f"Unknown convergence status: {status}")
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
-    """Ruiz equilibration to improve numerical conditioning."""
+    """Dispatch to the selected equilibration strategy.
+
+    Returns a 7-tuple (a, p, b, c, d, e, sigma) of equilibrated problem data
+    and accumulated scalings. For RUIZ, sigma == 1.0; for AUGMENTED, sigma is
+    the scalar scaling on the augmented row/column (== tau_orig / tau_eq).
+    """
+    if self.equilibration_strategy is EquilibrationStrategy.RUIZ:
+      return self._equilibrate_ruiz(num_iters, min_scale, max_scale)
+    if self.equilibration_strategy is EquilibrationStrategy.AUGMENTED:
+      return self._equilibrate_augmented(num_iters, min_scale, max_scale)
+    raise ValueError(
+        f"Unknown equilibration strategy: {self.equilibration_strategy}"
+    )
+
+  def _equilibrate_ruiz(self, num_iters, min_scale, max_scale):
+    """Ruiz equilibration on A and P. b, c rescaled passively by d, e."""
     # Work on copies so self.a / self.p are not modified in-place; they are
     # used unequilibrated later (e.g. in _check_termination).
     a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
@@ -791,13 +846,89 @@ class QTQP:
           _norm(e_i - 1, np.inf),
       )
 
-    return a, p, b * d, c * e, d, e
+    return a, p, b * d, c * e, d, e, 1.0
+
+  def _equilibrate_augmented(self, num_iters, min_scale, max_scale):
+    """Ruiz equilibration on the symmetric augmented matrix.
+
+        M = [ P    A^T   c ]
+            [ A     0   -b ]
+            [ c^T -b^T   0 ]
+
+    The augmented row/column for the homogenization variable introduces a
+    scalar scaling sigma in addition to the row scaling d and column scaling
+    e, so b and c are rescaled by sigma * (d ⊙ b) and sigma * (e ⊙ c).
+    """
+    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
+    b, c = self.b.copy(), self.c.copy()
+    d, e = np.ones(self.m), np.ones(self.n)
+    sigma = 1.0
+
+    for i in range(num_iters):
+      # Column inf-norms of the symmetric augmented matrix.
+      # x-columns (0..n): max(||P[:,j]||_inf, ||A[:,j]||_inf, |c[j]|)
+      norms_e = np.maximum(
+          sp.linalg.norm(p, np.inf, axis=0),
+          sp.linalg.norm(a, np.inf, axis=0),
+      )
+      norms_e = np.maximum(norms_e, np.abs(c))
+      # y-columns (n..n+m): max(||A[i,:]||_inf, |b[i]|)
+      norms_d = np.maximum(sp.linalg.norm(a, np.inf, axis=1), np.abs(b))
+      # tau-column (n+m): max(||c||_inf, ||b||_inf)
+      norm_sigma = max(_norm(c, np.inf), _norm(b, np.inf))
+
+      e_i = 1.0 / np.sqrt(np.where(norms_e == 0.0, 1.0, norms_e))
+      d_i = 1.0 / np.sqrt(np.where(norms_d == 0.0, 1.0, norms_d))
+      sigma_i = 1.0 / math.sqrt(norm_sigma) if norm_sigma > 0.0 else 1.0
+
+      e_i = np.clip(e_i, min_scale, max_scale)
+      d_i = np.clip(d_i, min_scale, max_scale)
+      sigma_i = float(np.clip(sigma_i, min_scale, max_scale))
+
+      # A: D_i A E_i (same in-place CSC scaling as RUIZ).
+      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      a.data *= d_i[a.indices] * col_scale_a
+      if p.nnz > 0:
+        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+        p.data *= e_i[p.indices] * col_scale_p
+      # b, c absorb the tau-column scaling sigma_i in addition to d_i / e_i.
+      b = sigma_i * d_i * b
+      c = sigma_i * e_i * c
+
+      d *= d_i
+      e *= e_i
+      sigma *= sigma_i
+      logging.debug(
+          "Augmented equilibration iter %d: d_i err: %s, e_i err: %s,"
+          " sigma_i err: %s",
+          i,
+          _norm(d_i - 1, np.inf),
+          _norm(e_i - 1, np.inf),
+          abs(sigma_i - 1.0),
+      )
+
+    return a, p, b, c, d, e, sigma
 
   def _unequilibrate_iterates(self, x, y, s):
-    return (self.e * x, self.d * y, s / self.d)
+    """Map equilibrated iterates back to original-problem scale.
+
+    Bakes the 1/sigma factor into (x, y, s) so the subsequent division by
+    the (equilibrated-space) tau produces the original-problem solution.
+    """
+    inv_sigma = 1.0 / self.sigma_eq
+    return (
+        inv_sigma * self.e * x,
+        inv_sigma * self.d * y,
+        inv_sigma * s / self.d,
+    )
 
   def _equilibrate_iterates(self, x, y, s):
-    return (x / self.e, y / self.d, s * self.d)
+    """Inverse of _unequilibrate_iterates: original scale -> equilibrated."""
+    return (
+        self.sigma_eq * x / self.e,
+        self.sigma_eq * y / self.d,
+        self.sigma_eq * s * self.d,
+    )
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
@@ -1018,7 +1149,7 @@ class QTQP:
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
     inv_tau = 1.0 / max(tau, _EPS)
