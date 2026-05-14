@@ -381,12 +381,13 @@ class DirectKktSolver:
                           kkt_true x).
     Preconditioner M^-1 x = self._solver.solve(x)  (the direct factor).
 
-    Each inner Arnoldi step costs one factor-solve plus one matvec; each
-    cycle does one additional factor-solve at the end to convert the
-    Krylov-space solution back to a primal-space correction. Total
-    preconditioner applies are bounded by max_iterative_refinement_steps.
-    The best iterate seen across restarts is tracked and returned, so a
-    stalled refinement never returns a worse solution than the warm start.
+    Each inner Arnoldi step costs one factor-solve plus one matvec; the
+    preconditioned Krylov basis Z = M^{-1} V is stored so the end-of-cycle
+    correction is a linear combination (sol += Z.T @ y), avoiding an extra
+    factor-solve at cycle exit. Total preconditioner applies are bounded by
+    max_iterative_refinement_steps. The best iterate seen across restarts is
+    tracked and returned, so a stalled refinement never returns a worse
+    solution than the warm start.
     """
     sol = warm_start.copy()
     residual = (
@@ -404,14 +405,13 @@ class DirectKktSolver:
 
     while (
         status == "non-converged"
-        and self.max_iterative_refinement_steps - solves >= 2
+        and solves < self.max_iterative_refinement_steps
     ):
-      # Each cycle uses (inner + 1) factor-solves: inner Arnoldi steps plus
-      # one final M^{-1} apply. Cap inner so total cycle cost <= remaining.
-      remaining = self.max_iterative_refinement_steps - solves
-      max_inner = min(self.gmres_restart, remaining - 1)
+      cycle_budget = min(
+          self.gmres_restart, self.max_iterative_refinement_steps - solves
+      )
       old_residual_norm = residual_norm
-      used = self._gmres_cycle(sol, residual, max_inner, tolerance)
+      used = self._gmres_cycle(sol, residual, cycle_budget, tolerance)
       solves += used
 
       # Recompute the exact inf-norm residual; the per-cycle running check
@@ -431,7 +431,7 @@ class DirectKktSolver:
 
       # Lucky breakdown (cycle exited early via Arnoldi breakdown) means
       # GMRES exhausted the Krylov subspace; further restarts cannot help.
-      if used < max_inner + 1:
+      if used < cycle_budget:
         status = "stalled"
         break
 
@@ -475,15 +475,17 @@ class DirectKktSolver:
   ) -> int:
     """One restart cycle of right-preconditioned GMRES.
 
-    Updates ``sol`` in place. Returns the total factor-solves consumed
-    (= inner Arnoldi steps + 1 final M^{-1} apply, or 0 if the input
-    residual is already zero). Early-exits when the running 2-norm residual
-    estimate falls below ``tolerance``; the inf-norm is at most the 2-norm,
-    so this is a safe (slightly conservative) trigger for the inf-norm
-    convergence test the outer loop applies.
+    Updates ``sol`` in place. Returns the number of inner Arnoldi steps
+    taken (= preconditioner solves consumed). Stores the preconditioned
+    basis Z so the final correction is a pure linear combination with no
+    extra factor-solve at cycle exit. Early-exits when the running 2-norm
+    residual estimate falls below ``tolerance``; the inf-norm is at most
+    the 2-norm, so this is a safe (slightly conservative) trigger for the
+    inf-norm convergence test the outer loop applies.
     """
     n = sol.size
     v = np.empty((max_inner + 1, n))
+    z = np.empty((max_inner, n))
     h = np.zeros((max_inner + 1, max_inner))
     cs = np.zeros(max_inner)
     sn = np.zeros(max_inner)
@@ -500,8 +502,8 @@ class DirectKktSolver:
     breakdown = False
     for j in range(max_inner):
       # Right preconditioning: build the Krylov subspace of A M^{-1}.
-      z_j = self._solver.solve(v[j])
-      w = self._solver @ z_j - self._diag_correction * z_j
+      z[j] = self._solver.solve(v[j])
+      w = self._solver @ z[j] - self._diag_correction * z[j]
 
       # Modified Gram-Schmidt against the existing basis, with DGKS
       # reorthogonalization if the orthogonalization pass projected out
@@ -544,12 +546,14 @@ class DirectKktSolver:
       if abs(g[j + 1]) < tolerance or breakdown:
         break
 
-    # Solve in Krylov space and convert back to primal space via one M^{-1}
-    # apply -- the single extra factor-solve per cycle vs the FGMRES-style
-    # variant that stores Z = M^{-1} V column-by-column.
+    # Solve in Krylov space and apply the correction directly via the
+    # stored preconditioned basis Z = M^{-1} V. Mathematically identical to
+    # sol += M^{-1}(V.T @ y), but consumes no additional factor-solve at
+    # cycle exit -- which keeps each cycle's apply count equal to the
+    # number of Arnoldi steps performed.
     y = solve_triangular(h[:j_done, :j_done], g[:j_done])
-    sol += self._solver.solve(v[:j_done].T @ y)
-    return j_done + 1
+    sol += z[:j_done].T @ y
+    return j_done
 
   def free(self):
     """Frees the solver resources."""

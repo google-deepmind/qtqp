@@ -843,11 +843,17 @@ class QTQP:
   def _equilibrate_ruiz(self, num_iters, min_scale, max_scale):
     """Ruiz equilibration on A and P. b, c rescaled passively by d, e."""
     # Work on copies so self.a / self.p are not modified in-place; they are
-    # used unequilibrated later (e.g. in _check_termination).
-    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
+    # used unequilibrated later (e.g. in _check_termination). The constructor
+    # already enforces CSC, so .copy() preserves format without a re-convert.
+    a, p = self.a.copy(), self.p.copy()
     b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
+
+    # Sparsity patterns are static across iterations; the per-column nnz
+    # counts only need to be computed once for the scaling-broadcast step.
+    a_col_counts = np.diff(a.indptr)
+    p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
 
     for i in range(num_iters):
       # Row norms (infinity norm)
@@ -870,11 +876,11 @@ class QTQP:
       #     d_mat, e_mat = sp.diags(d_i), sp.diags(e_i)
       #     a = d_mat @ a @ e_mat
       #     p = e_mat @ p @ e_mat
-      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      col_scale_a = np.repeat(e_i, a_col_counts)
       a.data *= d_i[a.indices] * col_scale_a
-      if p.nnz > 0:
+      if p_col_counts is not None:
         # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
-        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+        col_scale_p = np.repeat(e_i, p_col_counts)
         p.data *= e_i[p.indices] * col_scale_p
 
       # Accumulate scaling factors
@@ -900,10 +906,15 @@ class QTQP:
     scalar scaling sigma in addition to the row scaling d and column scaling
     e, so b and c are rescaled by sigma * (d ⊙ b) and sigma * (e ⊙ c).
     """
-    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
+    # Constructor enforces CSC; .copy() preserves format without a re-convert.
+    a, p = self.a.copy(), self.p.copy()
     b, c = self.b.copy(), self.c.copy()
     d, e = np.ones(self.m), np.ones(self.n)
     sigma = 1.0
+
+    # Sparsity patterns are static; pre-compute the per-column nnz counts.
+    a_col_counts = np.diff(a.indptr)
+    p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
 
     for i in range(num_iters):
       # Column inf-norms of the symmetric augmented matrix.
@@ -927,10 +938,10 @@ class QTQP:
       sigma_i = float(np.clip(sigma_i, min_scale, max_scale))
 
       # A: D_i A E_i (same in-place CSC scaling as RUIZ).
-      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      col_scale_a = np.repeat(e_i, a_col_counts)
       a.data *= d_i[a.indices] * col_scale_a
-      if p.nnz > 0:
-        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+      if p_col_counts is not None:
+        col_scale_p = np.repeat(e_i, p_col_counts)
         p.data *= e_i[p.indices] * col_scale_p
       # b, c absorb the tau-column scaling sigma_i in addition to d_i / e_i.
       b = sigma_i * d_i * b
@@ -1233,9 +1244,12 @@ class QTQP:
     pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
     dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
 
-    # Residuals
-    pres = _norm((ax + s) * inv_tau - self.b, np.inf)
-    dres = _norm((px + aty) * inv_tau + self.c, np.inf)
+    # Residuals. ax_plus_s and px_plus_aty are reused for the infeasibility
+    # certificates below, so compute them once.
+    ax_plus_s = ax + s
+    px_plus_aty = px + aty
+    pres = _norm(ax_plus_s * inv_tau - self.b, np.inf)
+    dres = _norm(px_plus_aty * inv_tau + self.c, np.inf)
     gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
@@ -1244,7 +1258,7 @@ class QTQP:
     # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
-    dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
+    dinfeas_a = _norm(ax_plus_s, np.inf) / (abs(ctx) + _EPS)
     dinfeas_p = norm_px / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     # If the primal is infeasible (dual unbounded) this produces a ray y
