@@ -43,6 +43,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import direct
+from .direct import RefinementStrategy
 
 __version__ = "0.0.5"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -135,6 +136,72 @@ class SolutionStatus(enum.Enum):
   HIT_MAX_ITER = "hit_max_iter"
   FAILED = "failed"
   UNFINISHED = "unfinished"
+
+
+class EquilibrationStrategy(enum.Enum):
+  """Available equilibration strategies applied to the problem data.
+
+  NONE:
+    Do not equilibrate. Pass (A, P, b, c) through unchanged.
+
+  RUIZ:
+    Ruiz equilibration on the constraint matrix A and Hessian P. Symmetric
+    diagonal scalings D (rows) and E (columns) are chosen so that, at each
+    iteration, the inf-norm of every row of D A E and every column of
+    [D A E ; E P E] is driven toward 1. The vectors b and c are passively
+    rescaled as b <- D b and c <- E c.
+
+  AUGMENTED:
+    Ruiz equilibration on the symmetric augmented matrix
+
+        M = [ P    A^T   c ]
+            [ A     0   -b ]
+            [ c^T -b^T   0 ]
+
+    so b and c participate in determining the row/column norms rather than
+    being scaled passively. The scaling has three blocks (E for x columns,
+    D for y rows, and a scalar sigma for the augmented row/column), giving
+
+        A_eq = D A E,    P_eq = E P E,
+        b_eq = sigma * (D b),   c_eq = sigma * (E c).
+
+    The sigma factor maps to the homogenization variable (tau_orig =
+    sigma * tau_eq), so iterate (un)equilibration must apply 1/sigma to
+    keep the recovered x/tau, y/tau, s/tau in the original scale.
+  """
+
+  NONE = "none"
+  RUIZ = "ruiz"
+  AUGMENTED = "augmented"
+
+
+class InitStrategy(enum.Enum):
+  """Available initialization strategies for the IPM iterates.
+
+  TRIVIAL:
+    Unit vectors: y[z:] = s[z:] = 1, x = 0, tau = 1. Cheap, dimensionless.
+    Default for backward compatibility.
+
+  ORTHANT:
+    Closed-form non-negative orthant centering. Picks mu_0 = mu_scale *
+    ||b[z:]|| (see the init_mu_scale solve() kwarg) and solves the
+    per-component centering condition
+        mu_0 * y_i + b_i - mu_0 / y_i = 0
+    for inequality rows, giving y_i = (-beta_i + sqrt(beta_i^2 + 4)) / 2 with
+    beta = b/mu_0. Strictly interior by construction; cost is O(m).
+
+  CVXOPT:
+    Solves the regularized saddle-point system
+        [P + eps*I,  A^T ] [x]   [-c]
+        [    A,    -eps*I] [y] = [ b]
+    treating all rows as equalities, then sets s = b - A @ x and shifts the
+    inequality blocks of (y, s) by a uniform constant so min(y[z:]) and
+    min(s[z:]) are at least 1.0 (CVXOPT's standard interior-point shift).
+  """
+
+  TRIVIAL = "trivial"
+  ORTHANT = "orthant"
+  CVXOPT = "cvxopt"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -245,6 +312,10 @@ class QTQP:
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
+    # Default exponent so _newton_step works in tests that call it directly
+    # before solve() has overridden the attribute.
+    self._central_path_exponent = 1.0
+
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
@@ -296,14 +367,96 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
-  def _init_variables(self):
+  def _init_variables(self, strategy, mu_scale, a, p, b, c):
+    """Dispatch to the requested initialization strategy.
+
+    The (a, p, b, c) passed in are the operating-scale problem data: equilibrated
+    if equilibration is on, original otherwise. The selected strategy produces
+    iterates already in that scale, with the exception of TRIVIAL which keeps
+    its historical behavior (build unit iterates and then equilibrate via
+    _equilibrate_iterates) for backward compatibility.
+    """
+    if strategy is InitStrategy.TRIVIAL:
+      return self._init_trivial()
+    if strategy is InitStrategy.ORTHANT:
+      return self._init_orthant(b, mu_scale)
+    if strategy is InitStrategy.CVXOPT:
+      return self._init_cvxopt(a, p, b, c)
+    raise ValueError(f"Unknown init strategy: {strategy}")
+
+  def _init_trivial(self):
+    """Unit-vector init: y[z:] = s[z:] = 1, x = 0, tau = 1."""
     x = np.zeros(self.n)
     y = np.zeros(self.m)
     s = np.zeros(self.m)
     y[self.z :] = 1.0
     s[self.z :] = 1.0
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._equilibrate_iterates(x, y, s)
+    return x, y, s, 1.0, {}
+
+  def _init_orthant(self, b, mu_scale):
+    """Closed-form non-negative orthant init (see InitStrategy.ORTHANT)."""
+    m, n, z = self.m, self.n, self.z
+    x = np.zeros(n)
+    y = np.zeros(m)
+    s = np.zeros(m)
+
+    b_ineq = b[z:]
+    norm_b = _norm(b_ineq, 2)
+    if norm_b == 0.0:
+      mu_0 = max(mu_scale, np.finfo(np.float64).tiny)
+      y[z:] = 1.0
+      s[z:] = mu_0  # complementarity y_i * s_i = mu_0 with y_i = 1.
+    else:
+      mu_0 = mu_scale * norm_b
+      beta = b_ineq / mu_0
+      sq = np.sqrt(beta * beta + 4.0)
+      # Branch-selected stable form: cancellation-free for both signs of beta.
+      y_ineq = np.where(beta <= 0, 0.5 * (-beta + sq), 2.0 / (beta + sq))
+      assert np.all(y_ineq > 0), "orthant init produced non-positive y component"
+      y[z:] = y_ineq
+      s[z:] = mu_0 / y_ineq
+
+    return x, y, s, 1.0, {"mu_0": mu_0}
+
+  def _init_cvxopt(self, a, p, b, c, reg=1e-8, interior_margin=1.0):
+    """CVXOPT-style init: solve regularized saddle-point KKT, then shift."""
+    m, n, z = self.m, self.n, self.z
+    p_reg = (p + reg * sp.eye(n, format="csc")).tocsc()
+    a_csc = a.tocsc() if not sp.isspmatrix_csc(a) else a
+    kkt = sp.bmat(
+        [[p_reg, a_csc.T], [a_csc, -reg * sp.eye(m, format="csc")]],
+        format="csc",
+    )
+    rhs = np.concatenate([-c, b])
+    xy = sp.linalg.spsolve(kkt, rhs)
+    if not np.all(np.isfinite(xy)):
+      # Fall back to trivial init if the KKT solve produced non-finite values.
+      logging.warning(
+          "CVXOPT init KKT solve produced non-finite values; falling back to"
+          " trivial init."
+      )
+      return self._init_trivial()
+    x = xy[:n]
+    y_full = xy[n:]
+    s_full = b - a_csc @ x
+
+    y = np.zeros(m)
+    s = np.zeros(m)
+    y[:z] = y_full[:z]  # Equality multipliers: any sign, s stays 0.
+    if z < m:
+      y_ineq = y_full[z:]
+      s_ineq = s_full[z:]
+      shift_y = interior_margin - np.min(y_ineq)
+      if shift_y > 0:
+        y_ineq = y_ineq + shift_y
+      shift_s = interior_margin - np.min(s_ineq)
+      if shift_s > 0:
+        s_ineq = s_ineq + shift_s
+      y[z:] = y_ineq
+      s[z:] = s_ineq
+
     return x, y, s, 1.0, {}
 
   def solve(
@@ -321,8 +474,14 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibrate: bool = True,
+      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
+      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_mu_scale: float = 1.0,
+      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
+      gmres_restart: int = 10,
+      central_path_exponent: float = 1.0,
+      fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -340,8 +499,14 @@ class QTQP:
           linear_solver_rtol=linear_solver_rtol,
           linear_solver=linear_solver,
           verbose=verbose,
-          equilibrate=equilibrate,
+          equilibration_strategy=equilibration_strategy,
           collect_stats=collect_stats,
+          init_strategy=init_strategy,
+          init_mu_scale=init_mu_scale,
+          refinement_strategy=refinement_strategy,
+          gmres_restart=gmres_restart,
+          central_path_exponent=central_path_exponent,
+          fused_corrector_division=fused_corrector_division,
       )
     finally:
       if self._linear_solver is not None:
@@ -363,8 +528,14 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibrate: bool = True,
+      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
+      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_mu_scale: float = 1.0,
+      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
+      gmres_restart: int = 10,
+      central_path_exponent: float = 1.0,
+      fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -390,12 +561,43 @@ class QTQP:
       linear_solver (LinearSolver): The linear solver to use when solving the
         KKT system.
       verbose (bool): If True, prints a summary of each iteration.
-      equilibrate (bool): If True, equilibrate the data for better numerical
-        stability.
+      equilibration_strategy (EquilibrationStrategy): Which scaling to apply
+        to (A, P, b, c) before iterating. See EquilibrationStrategy for
+        descriptions. Defaults to RUIZ.
       collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
         diagnostics are needed.
+      init_strategy (InitStrategy): Which initialization to use for (x, y, s,
+        tau). See InitStrategy for descriptions. Defaults to TRIVIAL.
+      init_mu_scale (float): Multiplier on ||b[z:]|| that sets the initial
+        barrier parameter mu_0 = init_mu_scale * ||b[z:]|| for
+        InitStrategy.ORTHANT. Larger values produce iterates closer to the
+        canonical center; smaller values produce more aggressive starts. Must
+        be positive and finite. Ignored for other strategies.
+      refinement_strategy (RefinementStrategy): Which iterative-refinement
+        scheme drives each KKT solve. See RefinementStrategy for descriptions.
+        Defaults to RICHARDSON.
+      gmres_restart (int): Krylov dimension per GMRES restart cycle. Each
+        cycle uses gmres_restart + 1 factor-solves (inner Arnoldi steps
+        plus one final M^{-1} apply). Smaller values reduce per-cycle
+        cost at the price of more restarts. Ignored when
+        refinement_strategy is RICHARDSON.
+      central_path_exponent (float): Exponent p > 0 in the generalized
+        central-path equation r + mu^p * u = 0 (cone products s_i * y_i =
+        mu and tau * kappa = mu are unchanged). Default 1.0 recovers the
+        standard primal-dual central path. p > 1 makes the linear residual
+        vanish faster than mu as mu -> 0; p < 1 the reverse. mu^p enters
+        the KKT diagonal regularization and the Newton-step linear-residual
+        RHS; cone-product targets keep the unmodified mu.
+      fused_corrector_division (bool): If True, compute the corrector
+        slack update via a single division by y[z:] with the three
+        numerator terms (sigma*mu, the Mehrotra cross product, and
+        y_c*s) assembled first. Algebraically equivalent to the default
+        three-division formula `sigma*mu/y + correction - y_c*s/y`, but
+        avoids catastrophic cancellation when y_i is small and the
+        terms have similar magnitudes with opposing signs. Default False
+        preserves the legacy bit-for-bit behavior.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -410,6 +612,18 @@ class QTQP:
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
+    if not (np.isfinite(init_mu_scale) and init_mu_scale > 0):
+      raise ValueError(
+          f"init_mu_scale must be a positive finite float,"
+          f" got {init_mu_scale}"
+      )
+    if not (np.isfinite(central_path_exponent) and central_path_exponent > 0):
+      raise ValueError(
+          "central_path_exponent must be a positive finite float (got"
+          f" {central_path_exponent}); p <= 0 is incompatible with the IPM."
+      )
+    self._central_path_exponent = float(central_path_exponent)
+    self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
@@ -418,18 +632,20 @@ class QTQP:
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
-    self.equilibrate = equilibrate
+    self.equilibration_strategy = equilibration_strategy
     if verbose:
       print(
           f"| QTQP v{__version__}:"
           f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
-          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name}"
+          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
+          f" equilibration={equilibration_strategy.name}"
       )
 
-    if self.equilibrate:
-      a, p, b, c, self.d, self.e = self._equilibrate()
+    if equilibration_strategy is EquilibrationStrategy.NONE:
+      a, p, b, c = self.a, self.p, self.b, self.c
+      self.d, self.e, self.sigma_eq = None, None, 1.0
     else:
-      a, p, b, c, self.d, self.e = self.a, self.p, self.b, self.c, None, None
+      a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate()
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -454,11 +670,15 @@ class QTQP:
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
+        refinement_strategy=refinement_strategy,
+        gmres_restart=gmres_restart,
     )
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, _ = self._init_variables()
+    x, y, s, tau, _ = self._init_variables(
+        init_strategy, init_mu_scale, a, p, b, c
+    )
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -475,9 +695,13 @@ class QTQP:
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       mu = (y @ s) / (self.m - self.z)
+      # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
+      # diagonal and the Newton-step linear-residual RHS; cone-product
+      # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
+      mu_p = mu ** self._central_path_exponent
 
       # --- Take an IPM step ---
-      self._linear_solver.update(mu=mu, s=s, y=y)
+      self._linear_solver.update(mu=mu_p, s=s, y=y)
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
       # This is reused for both predictor and corrector parts of the step.
@@ -509,6 +733,12 @@ class QTQP:
       # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
       d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
+      # Pre-compute the Mehrotra cross term in un-divided form only when the
+      # fused-corrector path will consume it (otherwise stay on the legacy
+      # `-d_s * d_y_p / y` formulation verbatim).
+      if self._fused_corrector_division:
+        cross_p = d_s[self.z :] * d_y_p[self.z :]
+
       # Compute predictor step size and resulting centering parameter (sigma)
       alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
       sigma = self._compute_sigma(
@@ -525,7 +755,10 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+      if self._fused_corrector_division:
+        correction = -cross_p / y[self.z :]
+      else:
+        correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
       xy[: self.n] = x_p
       xy[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
@@ -544,13 +777,22 @@ class QTQP:
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      # Combined corrector slack step: same form as the predictor but now with
-      # centering target sigma*mu and the Mehrotra correction baked in.
-      d_s[self.z :] = (
-          sigma * mu / y[self.z :]
-          + correction
-          - y_c[self.z :] * s[self.z :] / y[self.z :]
-      )
+      if self._fused_corrector_division:
+        # Combined-numerator corrector slack step. Algebraically equivalent
+        # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
+        # numerator before the single division by y[z:], avoiding
+        # catastrophic cancellation when y_i is small and the three terms
+        # have similar magnitudes with opposing signs.
+        d_s[self.z :] = (
+            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+        ) / y[self.z :]
+      else:
+        # Legacy three-division formula.
+        d_s[self.z :] = (
+            sigma * mu / y[self.z :]
+            + correction
+            - y_c[self.z :] * s[self.z :] / y[self.z :]
+        )
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
       step = step_size_scale * alpha
@@ -578,7 +820,7 @@ class QTQP:
         stats[-1]["status"] = status
 
     # We have terminated for one reason or another.
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
       case SolutionStatus.SOLVED:
@@ -614,13 +856,34 @@ class QTQP:
         raise ValueError(f"Unknown convergence status: {status}")
 
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
-    """Ruiz equilibration to improve numerical conditioning."""
+    """Dispatch to the selected equilibration strategy.
+
+    Returns a 7-tuple (a, p, b, c, d, e, sigma) of equilibrated problem data
+    and accumulated scalings. For RUIZ, sigma == 1.0; for AUGMENTED, sigma is
+    the scalar scaling on the augmented row/column (== tau_orig / tau_eq).
+    """
+    if self.equilibration_strategy is EquilibrationStrategy.RUIZ:
+      return self._equilibrate_ruiz(num_iters, min_scale, max_scale)
+    if self.equilibration_strategy is EquilibrationStrategy.AUGMENTED:
+      return self._equilibrate_augmented(num_iters, min_scale, max_scale)
+    raise ValueError(
+        f"Unknown equilibration strategy: {self.equilibration_strategy}"
+    )
+
+  def _equilibrate_ruiz(self, num_iters, min_scale, max_scale):
+    """Ruiz equilibration on A and P. b, c rescaled passively by d, e."""
     # Work on copies so self.a / self.p are not modified in-place; they are
-    # used unequilibrated later (e.g. in _check_termination).
-    a, p = self.a.copy().tocsc(), self.p.copy().tocsc()
+    # used unequilibrated later (e.g. in _check_termination). The constructor
+    # already enforces CSC, so .copy() preserves format without a re-convert.
+    a, p = self.a.copy(), self.p.copy()
     b, c = self.b, self.c
     # Initialize the equilibration matrices.
     d, e = (np.ones(self.m), np.ones(self.n))
+
+    # Sparsity patterns are static across iterations; the per-column nnz
+    # counts only need to be computed once for the scaling-broadcast step.
+    a_col_counts = np.diff(a.indptr)
+    p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
 
     for i in range(num_iters):
       # Row norms (infinity norm)
@@ -643,11 +906,11 @@ class QTQP:
       #     d_mat, e_mat = sp.diags(d_i), sp.diags(e_i)
       #     a = d_mat @ a @ e_mat
       #     p = e_mat @ p @ e_mat
-      col_scale_a = np.repeat(e_i, np.diff(a.indptr))
+      col_scale_a = np.repeat(e_i, a_col_counts)
       a.data *= d_i[a.indices] * col_scale_a
-      if p.nnz > 0:
+      if p_col_counts is not None:
         # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
-        col_scale_p = np.repeat(e_i, np.diff(p.indptr))
+        col_scale_p = np.repeat(e_i, p_col_counts)
         p.data *= e_i[p.indices] * col_scale_p
 
       # Accumulate scaling factors
@@ -660,13 +923,94 @@ class QTQP:
           _norm(e_i - 1, np.inf),
       )
 
-    return a, p, b * d, c * e, d, e
+    return a, p, b * d, c * e, d, e, 1.0
+
+  def _equilibrate_augmented(self, num_iters, min_scale, max_scale):
+    """Ruiz equilibration on the symmetric augmented matrix.
+
+        M = [ P    A^T   c ]
+            [ A     0   -b ]
+            [ c^T -b^T   0 ]
+
+    The augmented row/column for the homogenization variable introduces a
+    scalar scaling sigma in addition to the row scaling d and column scaling
+    e, so b and c are rescaled by sigma * (d ⊙ b) and sigma * (e ⊙ c).
+    """
+    # Constructor enforces CSC; .copy() preserves format without a re-convert.
+    a, p = self.a.copy(), self.p.copy()
+    b, c = self.b.copy(), self.c.copy()
+    d, e = np.ones(self.m), np.ones(self.n)
+    sigma = 1.0
+
+    # Sparsity patterns are static; pre-compute the per-column nnz counts.
+    a_col_counts = np.diff(a.indptr)
+    p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
+
+    for i in range(num_iters):
+      # Column inf-norms of the symmetric augmented matrix.
+      # x-columns (0..n): max(||P[:,j]||_inf, ||A[:,j]||_inf, |c[j]|)
+      norms_e = np.maximum(
+          sp.linalg.norm(p, np.inf, axis=0),
+          sp.linalg.norm(a, np.inf, axis=0),
+      )
+      norms_e = np.maximum(norms_e, np.abs(c))
+      # y-columns (n..n+m): max(||A[i,:]||_inf, |b[i]|)
+      norms_d = np.maximum(sp.linalg.norm(a, np.inf, axis=1), np.abs(b))
+      # tau-column (n+m): max(||c||_inf, ||b||_inf)
+      norm_sigma = max(_norm(c, np.inf), _norm(b, np.inf))
+
+      e_i = 1.0 / np.sqrt(np.where(norms_e == 0.0, 1.0, norms_e))
+      d_i = 1.0 / np.sqrt(np.where(norms_d == 0.0, 1.0, norms_d))
+      sigma_i = 1.0 / math.sqrt(norm_sigma) if norm_sigma > 0.0 else 1.0
+
+      e_i = np.clip(e_i, min_scale, max_scale)
+      d_i = np.clip(d_i, min_scale, max_scale)
+      sigma_i = float(np.clip(sigma_i, min_scale, max_scale))
+
+      # A: D_i A E_i (same in-place CSC scaling as RUIZ).
+      col_scale_a = np.repeat(e_i, a_col_counts)
+      a.data *= d_i[a.indices] * col_scale_a
+      if p_col_counts is not None:
+        col_scale_p = np.repeat(e_i, p_col_counts)
+        p.data *= e_i[p.indices] * col_scale_p
+      # b, c absorb the tau-column scaling sigma_i in addition to d_i / e_i.
+      b = sigma_i * d_i * b
+      c = sigma_i * e_i * c
+
+      d *= d_i
+      e *= e_i
+      sigma *= sigma_i
+      logging.debug(
+          "Augmented equilibration iter %d: d_i err: %s, e_i err: %s,"
+          " sigma_i err: %s",
+          i,
+          _norm(d_i - 1, np.inf),
+          _norm(e_i - 1, np.inf),
+          abs(sigma_i - 1.0),
+      )
+
+    return a, p, b, c, d, e, sigma
 
   def _unequilibrate_iterates(self, x, y, s):
-    return (self.e * x, self.d * y, s / self.d)
+    """Map equilibrated iterates back to original-problem scale.
+
+    Bakes the 1/sigma factor into (x, y, s) so the subsequent division by
+    the (equilibrated-space) tau produces the original-problem solution.
+    """
+    inv_sigma = 1.0 / self.sigma_eq
+    return (
+        inv_sigma * self.e * x,
+        inv_sigma * self.d * y,
+        inv_sigma * s / self.d,
+    )
 
   def _equilibrate_iterates(self, x, y, s):
-    return (x / self.e, y / self.d, s * self.d)
+    """Inverse of _unequilibrate_iterates: original scale -> equilibrated."""
+    return (
+        self.sigma_eq * x / self.e,
+        self.sigma_eq * y / self.d,
+        self.sigma_eq * s * self.d,
+    )
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
@@ -716,12 +1060,21 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
+    The central-path equation r + mu^p * u = 0 contributes the
+    (mu^p - mu_target^p) coefficient on the linear-residual side; cone-product
+    corrections (s_i * y_i = mu_target, tau * kappa = mu_target) keep the
+    unmodified mu_target.
+
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
     linearized fallback (avoids squaring solver noise) when it's noisy or the
     quadratic residual check fails.
     """
+    cpe = self._central_path_exponent
+    # 0**cpe = 0 for cpe > 0, so mu_target = 0 (predictor) yields mu_target_p = 0.
+    mu_p = mu ** cpe
+    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
     # Prepare RHS for the linear system.
-    r = (mu - mu_target) * r_anchor
+    r = (mu_p - mu_target_p) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -738,7 +1091,7 @@ class QTQP:
     tau_plus = None
     if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
-        r_tau = (mu - mu_target) * tau_anchor
+        r_tau = (mu_p - mu_target_p) * tau_anchor
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
@@ -770,12 +1123,17 @@ class QTQP:
     the positive root since tau >= 0 is required for the embedding to represent
     a feasible point (tau=0 corresponds to a certificate of infeasibility or
     unboundedness, which is handled separately at termination).
+
+    Generalized central path: t_a's mu term becomes mu^cpe (the linear-residual
+    coefficient on tau); t_c = -mu_target keeps the unmodified mu_target since
+    it comes from the cone-product equation tau * kappa = mu_target.
     """
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
+    mu_p = mu ** self._central_path_exponent
 
-    t_a = mu + kinv_q @ q
+    t_a = mu_p + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -825,9 +1183,16 @@ class QTQP:
     and tau_curr. P only multiplies the safe current iterate x, so KKT noise
     enters linearly rather than quadratically. A [0.1x, 10x] trust region
     prevents manifold drift from the first-order approximation.
+
+    Linear-residual coefficients on tau use mu^cpe and mu_target^cpe (the
+    generalized central path); the cone-product constant -mu_target keeps the
+    unmodified mu_target.
     """
     n = self.n
     q, kinv_q = self.q, self.kinv_q
+    cpe = self._central_path_exponent
+    mu_p = mu ** cpe
+    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
 
@@ -841,12 +1206,13 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr * tau_curr + (mu_target - mu) * tau_anchor * tau_curr -
-         tau_curr * q_z - mu_target - x_px)
+    g = (mu_p * tau_curr * tau_curr
+         + (mu_target_p - mu_p) * tau_anchor * tau_curr
+         - tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
+    den = (2.0 * mu_p * tau_curr + (mu_target_p - mu_p) * tau_anchor - q_z +
            tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
@@ -887,7 +1253,7 @@ class QTQP:
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
-    if self.equilibrate:
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
     inv_tau = 1.0 / max(tau, _EPS)
@@ -908,9 +1274,12 @@ class QTQP:
     pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
     dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
 
-    # Residuals
-    pres = _norm((ax + s) * inv_tau - self.b, np.inf)
-    dres = _norm((px + aty) * inv_tau + self.c, np.inf)
+    # Residuals. ax_plus_s and px_plus_aty are reused for the infeasibility
+    # certificates below, so compute them once.
+    ax_plus_s = ax + s
+    px_plus_aty = px + aty
+    pres = _norm(ax_plus_s * inv_tau - self.b, np.inf)
+    dres = _norm(px_plus_aty * inv_tau + self.c, np.inf)
     gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
@@ -919,7 +1288,7 @@ class QTQP:
     # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
-    dinfeas_a = _norm((ax + s), np.inf) / (abs(ctx) + _EPS)
+    dinfeas_a = _norm(ax_plus_s, np.inf) / (abs(ctx) + _EPS)
     dinfeas_p = norm_px / (abs(ctx) + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     # If the primal is infeasible (dual unbounded) this produces a ray y
