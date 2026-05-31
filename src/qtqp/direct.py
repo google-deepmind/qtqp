@@ -56,15 +56,15 @@ class RefinementStrategy(enum.Enum):
   GMRES:
     Right-preconditioned restarted GMRES on A_true x = b, using the same
     factorization M as the preconditioner. Each inner Arnoldi step costs
-    one factor-solve plus one matvec; each restart cycle then does one
-    final factor-solve to map the Krylov-space least-squares solution back
-    to a primal-space correction. Right preconditioning is the key
-    difference vs. a stock left-preconditioned GMRES: the least-squares
-    problem minimizes the *true* residual ||b - A_true x||, not the
-    preconditioned residual ||M^{-1}(b - A_true x)||, so convergence isn't
-    fooled when M distorts the residual norm (which is exactly the regime
-    where pure IR stalls). Restarts every gmres_restart inner steps; the
-    apply budget is capped at max_iterative_refinement_steps total.
+    one factor-solve plus one matvec. QTQP stores the preconditioned Krylov
+    basis, so applying the end-of-cycle correction does not consume an extra
+    factor-solve. Right preconditioning is the key difference vs. a stock
+    left-preconditioned GMRES: the least-squares problem minimizes the *true*
+    residual ||b - A_true x||, not the preconditioned residual
+    ||M^{-1}(b - A_true x)||, so convergence isn't fooled when M distorts the
+    residual norm (which is exactly the regime where pure IR stalls). Restarts
+    every gmres_restart inner steps; the apply budget is capped at
+    max_iterative_refinement_steps total.
   """
 
   RICHARDSON = "richardson"
@@ -189,11 +189,9 @@ class DirectKktSolver:
       refinement_strategy: Which iterative-refinement scheme to drive the KKT
         solve with. See RefinementStrategy for descriptions.
       gmres_restart: Krylov dimension per restart cycle (inner Arnoldi steps
-        before restart). Each cycle uses gmres_restart + 1 factor-solves
-        (Arnoldi steps + one final M^{-1} apply to convert the Krylov-space
-        solution back). Ignored when refinement_strategy is RICHARDSON.
+        before restart). Ignored when refinement_strategy is RICHARDSON.
     """
-    if gmres_restart < 1:
+    if refinement_strategy is RefinementStrategy.GMRES and gmres_restart < 1:
       raise ValueError("gmres_restart must be >= 1.")
     self.refinement_strategy = refinement_strategy
     self.gmres_restart = gmres_restart

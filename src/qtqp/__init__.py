@@ -579,9 +579,8 @@ class QTQP:
         scheme drives each KKT solve. See RefinementStrategy for descriptions.
         Defaults to RICHARDSON.
       gmres_restart (int): Krylov dimension per GMRES restart cycle. Each
-        cycle uses gmres_restart + 1 factor-solves (inner Arnoldi steps
-        plus one final M^{-1} apply). Smaller values reduce per-cycle
-        cost at the price of more restarts. Ignored when
+        inner Arnoldi step consumes one factor-solve. Smaller values reduce
+        per-cycle cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
       central_path_exponent (float): Exponent p > 0 in the generalized
         central-path equation r + mu^p * u = 0 (cone products s_i * y_i =

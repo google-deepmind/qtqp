@@ -2714,6 +2714,18 @@ def test_gmres_restart_validation():
     )
 
 
+def test_gmres_restart_ignored_for_richardson():
+  """gmres_restart is a GMRES-only setting and must not affect Richardson."""
+  rng = np.random.default_rng(5701)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
+      refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,
+      gmres_restart=0,
+      verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, 3)
+
+
 def test_gmres_rollback_on_stalled_refinement():
   """A stalled GMRES must not return a worse iterate than the warm start
   (best-iterate rollback)."""
