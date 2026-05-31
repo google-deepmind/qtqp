@@ -159,8 +159,18 @@ solve(
     linear_solver_rtol: float = 1e-12,
     linear_solver: qtqp.LinearSolver = qtqp.LinearSolver.AUTO,
     verbose: bool = True,
-    equilibrate: bool = True,
+    equilibration_strategy: qtqp.EquilibrationStrategy = (
+        qtqp.EquilibrationStrategy.RUIZ
+    ),
     collect_stats: bool = False,
+    init_strategy: qtqp.InitStrategy = qtqp.InitStrategy.TRIVIAL,
+    init_mu_scale: float = 1.0,
+    refinement_strategy: qtqp.RefinementStrategy = (
+        qtqp.RefinementStrategy.RICHARDSON
+    ),
+    gmres_restart: int = 10,
+    central_path_exponent: float = 1.0,
+    fused_corrector_division: bool = False,
 ) -> qtqp.Solution
 ```
 
@@ -179,10 +189,69 @@ Key parameters:
 -   `linear_solver`: (`qtqp.LinearSolver`) Choose the KKT solver backend (see
     below).
 -   `verbose`: Print per-iteration table with key metrics.
--   `equilibrate`: Scale/equilibrate data for numerical stability.
+-   `equilibration_strategy`: Choose how problem data is scaled before the IPM
+    iterations. Defaults to `qtqp.EquilibrationStrategy.RUIZ`.
 -   `collect_stats`: If True, populate `Solution.stats` with per-iteration
     diagnostics (sy, s/y statistics, complementarity, etc.). Defaults to False
     for faster throughput.
+-   `init_strategy`: Choose the initial interior-point iterate. Defaults to
+    `qtqp.InitStrategy.TRIVIAL`.
+-   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
+    set the initial barrier parameter.
+-   `refinement_strategy`: Choose the iterative-refinement method used for KKT
+    solves. Defaults to `qtqp.RefinementStrategy.RICHARDSON`.
+-   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
+    Ignored by Richardson refinement.
+-   `central_path_exponent`: Positive exponent for the generalized central-path
+    residual equation. The default `1.0` is the standard central path.
+-   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
+    update with one fused division. The default False preserves legacy
+    arithmetic.
+
+#### Equilibration strategies
+
+Choose one with the `equilibration_strategy` argument:
+
+-   `qtqp.EquilibrationStrategy.RUIZ`: Default. Ruiz equilibration on `A` and
+    `P`; `b` and `c` are scaled passively by the accumulated row/column
+    scalings.
+-   `qtqp.EquilibrationStrategy.AUGMENTED`: Ruiz equilibration on the symmetric
+    augmented matrix containing `P`, `A`, `b`, and `c`. This lets `b` and `c`
+    participate directly in the scaling and can improve reliability on
+    ill-scaled instances.
+-   `qtqp.EquilibrationStrategy.NONE`: Disable equilibration.
+
+#### Initialization strategies
+
+Choose one with the `init_strategy` argument:
+
+-   `qtqp.InitStrategy.TRIVIAL`: Default. Starts from `x = 0`, `tau = 1`, and
+    unit inequality components for `y` and `s`.
+-   `qtqp.InitStrategy.ORTHANT`: Closed-form non-negative orthant centering. It
+    uses `init_mu_scale * ||b[z:]||_2` as the initial barrier parameter and is
+    cheap to compute.
+-   `qtqp.InitStrategy.CVXOPT`: CVXOPT-style initialization. It solves a
+    regularized saddle-point system and shifts inequality components of `y` and
+    `s` into the strict interior.
+
+#### Refinement strategies
+
+Choose one with the `refinement_strategy` argument:
+
+-   `qtqp.RefinementStrategy.RICHARDSON`: Default. Classical iterative
+    refinement using the factorized regularized KKT matrix as a preconditioner.
+-   `qtqp.RefinementStrategy.GMRES`: Restarted right-preconditioned GMRES on the
+    true KKT system. Each Arnoldi step consumes one factor-solve, and
+    `gmres_restart` controls the restart length.
+
+#### Advanced numerical options
+
+-   `central_path_exponent`: Uses `mu**central_path_exponent` in the linear
+    residual part of the central-path equations while keeping cone-product
+    targets at `mu`. Values must be positive and finite.
+-   `fused_corrector_division`: Fuses the corrector slack numerator before
+    dividing by `y[z:]`. This is useful when small `y` components make the
+    legacy three-division form vulnerable to cancellation.
 
 This method will return a `qtqp.Solution` object, with fields:
 
