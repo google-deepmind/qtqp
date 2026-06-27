@@ -270,7 +270,7 @@ def _gen_unbounded(m, n, z, random_state=None):
   p = rng.normal(size=(n, n))
 
   p = p.T @ p * 0.01
-  e, v = np.linalg.eig(p)
+  e, v = np.linalg.eigh(p)
   e[-1] = 0.0
   x = v[:, -1]
   p = v @ np.diag(e) @ v.T
