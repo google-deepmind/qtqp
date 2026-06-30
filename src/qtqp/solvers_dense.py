@@ -62,6 +62,7 @@ class ScipyDenseSolver(LinearSolver):
     self._dpotrs = lapack.dpotrs
     self._dsyrk = blas.dsyrk
     self._dsymv = blas.dsymv
+    self._dgemv = blas.dgemv
     self._n = 0
     self._m = 0
 
@@ -75,6 +76,8 @@ class ScipyDenseSolver(LinearSolver):
     # Pre-allocate all per-iteration buffers.
     self._R_x = np.empty(n, dtype=np.float64)
     self._R_y = np.empty(m, dtype=np.float64)
+    self._inv_R_y = np.empty(m, dtype=np.float64)
+    self._inv_sqrt_R_y = np.empty(m, dtype=np.float64)
     self._G = np.empty((n, n), dtype=np.float64, order="F")
     self._chol = np.empty((n, n), dtype=np.float64, order="F")
     self._A_scaled = np.empty((m, n), dtype=np.float64, order="F")
@@ -86,7 +89,7 @@ class ScipyDenseSolver(LinearSolver):
     super().set_kkt(kkt)
     n = self._n
     kkt_dense = kkt.toarray()
-    self._A = np.ascontiguousarray(kkt_dense[:n, n:].T, dtype=np.float64)
+    self._A = np.asfortranarray(kkt_dense[:n, n:].T, dtype=np.float64)
     P_block = kkt_dense[:n, :n]
     P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
@@ -95,12 +98,14 @@ class ScipyDenseSolver(LinearSolver):
   def update_diag(self, diag: np.ndarray) -> None:
     np.copyto(self._R_x, diag[:self._n])
     np.negative(diag[self._n:], out=self._R_y)
+    np.divide(1.0, self._R_y, out=self._inv_R_y)
+    np.sqrt(self._inv_R_y, out=self._inv_sqrt_R_y)
 
   def factorize(self) -> None:
     # G = P_offdiag + diag(R_x) + A' diag(1/R_y) A
     np.copyto(self._G, self._P_offdiag)
     self._G[self._diag_idx] += self._R_x
-    np.multiply(self._A, (1.0 / np.sqrt(self._R_y))[:, None], out=self._A_scaled)
+    np.multiply(self._A, self._inv_sqrt_R_y[:, None], out=self._A_scaled)
     # Symmetric rank-k update: G += A_scaled.T @ A_scaled via BLAS dsyrk.
     self._dsyrk(1.0, self._A_scaled, beta=1.0, c=self._G, trans=1,
                 lower=1, overwrite_c=True)
@@ -123,22 +128,27 @@ class ScipyDenseSolver(LinearSolver):
     self._dsymv(1.0, self._P_offdiag, x_x, 0.0, result[:n], lower=1,
                 overwrite_y=1)
     result[:n] += self._R_x * x_x
-    result[:n] += self._A.T @ x_y
-    result[n:] = self._A @ x_x - self._R_y * x_y
+    self._dgemv(1.0, self._A, x_y, 1.0, result[:n], trans=1, overwrite_y=1)
+    np.multiply(self._R_y, x_y, out=result[n:])
+    np.negative(result[n:], out=result[n:])
+    self._dgemv(1.0, self._A, x_x, 1.0, result[n:], trans=0, overwrite_y=1)
     return result
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     n = self._n
-    inv_R_y = 1.0 / self._R_y
+    inv_R_y = self._inv_R_y
     # Reduced RHS: g = rhs_x + A' (R_y^{-1} rhs_y)
     g = self._g
     np.copyto(g, rhs[:n])
-    g += self._A.T @ (inv_R_y * rhs[n:])
+    tmp = inv_R_y * rhs[n:]
+    self._dgemv(1.0, self._A, tmp, 1.0, g, trans=1, overwrite_y=1)
     x, _ = self._dpotrs(self._chol, g, lower=True)
     # Back-substitute: y = R_y^{-1} (A x - rhs_y)
     result = self._result
     result[:n] = x
-    np.multiply(inv_R_y, self._A @ x - rhs[n:], out=result[n:])
+    self._dgemv(1.0, self._A, x, 0.0, result[n:], trans=0, overwrite_y=1)
+    result[n:] -= rhs[n:]
+    result[n:] *= inv_R_y
     return result
 
   def format(self) -> Literal["csr"]:
