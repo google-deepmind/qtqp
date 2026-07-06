@@ -179,19 +179,23 @@ class CupyDenseSolver(LinearSolver):
     self._L = cp.linalg.cholesky(self._G_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Note: `x` must not alias the returned buffer."""
     cp = self._cp
     n = self._n
     self._x_gpu.set(x)
     x_x, x_y = self._x_gpu[:n], self._x_gpu[n:]
     result = self._result_gpu
     cp.dot(self._P_offdiag_gpu, x_x, out=result[:n])
-    result[:n] += self._R_x_gpu * x_x
-    result[:n] += cp.dot(self._A_gpu.T, x_y)
+    cp.multiply(self._R_x_gpu, x_x, out=self._g_gpu)
+    result[:n] += self._g_gpu
+    cp.dot(self._A_gpu.T, x_y, out=self._g_gpu)
+    result[:n] += self._g_gpu
     cp.dot(self._A_gpu, x_x, out=result[n:])
     result[n:] -= self._R_y_gpu * x_y
     return cp.asnumpy(result)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Note: `rhs` must not alias the returned buffer."""
     cp = self._cp
     n = self._n
     self._rhs_gpu.set(rhs)

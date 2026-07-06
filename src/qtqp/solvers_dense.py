@@ -70,7 +70,7 @@ class ScipyDenseSolver(LinearSolver):
     self._n = n
     self._m = m
     # Blocks extracted once from the KKT scaffold (populated in first set_kkt).
-    self._A: np.ndarray | None = None         # (m, n) dense, C-order
+    self._A: np.ndarray | None = None         # (m, n) dense, Fortran-order
     self._P_offdiag: np.ndarray | None = None  # (n, n) P with diagonal zeroed, F-order
 
     # Pre-allocate all per-iteration buffers.
@@ -121,6 +121,7 @@ class ScipyDenseSolver(LinearSolver):
       raise np.linalg.LinAlgError(f"Cholesky failed (dpotrf info={info})")
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Note: `x` must not alias the returned buffer."""
     n = self._n
     x_x, x_y = x[:n], x[n:]
     result = self._result
@@ -135,13 +136,14 @@ class ScipyDenseSolver(LinearSolver):
     return result
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Note: `rhs` must not alias the returned buffer."""
     n = self._n
     inv_R_y = self._inv_R_y
     # Reduced RHS: g = rhs_x + A' (R_y^{-1} rhs_y)
     g = self._g
     np.copyto(g, rhs[:n])
-    tmp = inv_R_y * rhs[n:]
-    self._dgemv(1.0, self._A, tmp, 1.0, g, trans=1, overwrite_y=1)
+    np.multiply(inv_R_y, rhs[n:], out=self._result[n:])
+    self._dgemv(1.0, self._A, self._result[n:], 1.0, g, trans=1, overwrite_y=1)
     x, _ = self._dpotrs(self._chol, g, lower=True)
     # Back-substitute: y = R_y^{-1} (A x - rhs_y)
     result = self._result
