@@ -291,18 +291,26 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
   pres = np.linalg.norm(a @ x + s - b, np.inf)
   dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
   gap = np.abs(c @ x + b @ y + x @ p @ x)
+  # Relative scales mirror the solver's termination criteria: the summand
+  # norms (evaluation floor) plus the iterate norms (the backward-error
+  # allowance of the weighted regularized path).
+  norm_x = np.linalg.norm(x, np.inf)
+  norm_y = np.linalg.norm(y, np.inf)
   prelrhs = max(
       np.linalg.norm(a @ x, np.inf),
       np.linalg.norm(s, np.inf),
       np.linalg.norm(b, np.inf),
+      norm_y,
   )
   drelrhs = max(
       np.linalg.norm(p @ x, np.inf),
       np.linalg.norm(a.T @ y, np.inf),
       np.linalg.norm(c, np.inf),
+      norm_x,
   )
+  gaprelrhs = max(min(abs(pcost), abs(dcost)), norm_x + norm_y)
   assert solution.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_array_less(gap, atol + rtol * min(abs(pcost), abs(dcost)))
+  np.testing.assert_array_less(gap, atol + rtol * gaprelrhs)
   np.testing.assert_array_less(pres, atol + rtol * prelrhs)
   np.testing.assert_array_less(dres, atol + rtol * drelrhs)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
@@ -1783,12 +1791,14 @@ def test_equilibrate_unequilibrate_roundtrip(strategy):
 # _normalize invariant
 # =============================================================================
 
-def test_normalize_invariant():
-  """Test that _normalize enforces ||(x,y,tau)||^2 == m - z + 1."""
+@pytest.mark.parametrize('eps', [1e-4, 1e-2, 1.0])
+def test_normalize_invariant(eps):
+  """_normalize enforces eps * ||(x,y)||^2 + tau^2 == m - z + 1."""
   rng = np.random.default_rng(42)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  solver._regularization_eps = eps  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.normal(size=m)
@@ -1797,8 +1807,8 @@ def test_normalize_invariant():
 
   x_n, y_n, tau_n, _ = solver._normalize(x, y, tau, s)  # pylint: disable=protected-access
 
-  xyt_norm_sq = x_n @ x_n + y_n @ y_n + tau_n ** 2
-  np.testing.assert_allclose(xyt_norm_sq, m - z + 1, atol=1e-12, rtol=1e-12)
+  quad = eps * (x_n @ x_n + y_n @ y_n) + tau_n ** 2
+  np.testing.assert_allclose(quad, m - z + 1, atol=1e-12, rtol=1e-12)
 
 
 # =============================================================================
@@ -2759,85 +2769,68 @@ def test_gmres_rollback_on_stalled_refinement():
 
 
 # =============================================================================
-# central_path_exponent: generalized central path
+# regularization_eps: eps-weighted central path
 # =============================================================================
 
-@pytest.mark.parametrize('central_path_exponent', [0.5, 1.0, 1.5, 2.0])
+@pytest.mark.parametrize('regularization_eps', [1e-4, 1e-2, 0.1, 1.0])
 @pytest.mark.parametrize('seed', 6000 + np.arange(3))
-def test_central_path_exponent_solve(central_path_exponent, seed):
-  """All positive exponents must converge to the same optimal solution."""
+def test_regularization_eps_solve(regularization_eps, seed):
+  """All eps in (0, 1] must converge to the same optimal solution."""
   rng = np.random.default_rng(seed)
   m, n, z = 60, 40, 8
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      central_path_exponent=central_path_exponent, verbose=False,
+      regularization_eps=regularization_eps, verbose=False,
   )
   _assert_solution(solution, a, b, c, p, z)
 
 
-def test_central_path_exponent_default_unchanged():
-  """central_path_exponent=1.0 must give the same solution as the default.
-
-  The two paths drift by ~1 ULP per iteration because mu**1.0 is not
-  bit-identical to mu in IEEE math; this test just guards against any
-  larger semantic divergence on the default path.
-  """
-  rng = np.random.default_rng(6100)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
-  sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      central_path_exponent=1.0, verbose=False
-  )
-  np.testing.assert_allclose(sol_a.x, sol_b.x, atol=1e-6, rtol=1e-6)
-  np.testing.assert_allclose(sol_a.y, sol_b.y, atol=1e-6, rtol=1e-6)
-  np.testing.assert_allclose(sol_a.s, sol_b.s, atol=1e-6, rtol=1e-6)
-
-
-def test_central_path_exponent_solutions_agree():
-  """Different exponents converge to the same QP optimum (within tol)."""
+def test_regularization_eps_solutions_agree():
+  """Different eps values converge to the same QP optimum (within tol)."""
   rng = np.random.default_rng(6200)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   objs = []
-  for cpe in (0.5, 1.0, 1.5, 2.0):
+  for eps in (1e-4, 1e-2, 0.1, 1.0):
     sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        central_path_exponent=cpe, verbose=False
+        regularization_eps=eps, verbose=False
     )
     _assert_solution(sol, a, b, c, p, z)
     objs.append(c @ sol.x + 0.5 * sol.x @ p @ sol.x)
-  ref = objs[1]  # the p=1 case is the reference
+  ref = objs[1]  # the default eps = 1e-2 case is the reference
   for obj in objs:
     np.testing.assert_allclose(obj, ref, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.parametrize('bad_value', [0.0, -1.0, -0.5, float('nan'), float('inf')])
-def test_central_path_exponent_rejects_invalid(bad_value):
-  """Non-positive or non-finite central_path_exponent must raise."""
+@pytest.mark.parametrize(
+    'bad_value', [0.0, -1.0, 1.5, float('nan'), float('inf')]
+)
+def test_regularization_eps_rejects_invalid(bad_value):
+  """eps outside (0, 1] or non-finite must raise."""
   rng = np.random.default_rng(6300)
   a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
-  with pytest.raises(ValueError, match='central_path_exponent'):
+  with pytest.raises(ValueError, match='regularization_eps'):
     qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
-        central_path_exponent=bad_value, verbose=False
+        regularization_eps=bad_value, verbose=False
     )
 
 
-def test_central_path_exponent_infeasible():
-  """Non-default exponent must still detect primal infeasibility."""
+def test_regularization_eps_infeasible():
+  """The weighted path must still detect primal infeasibility."""
   rng = np.random.default_rng(6400)
   a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      central_path_exponent=1.5, verbose=False
+      regularization_eps=1e-2, verbose=False
   )
   _assert_infeasible(solution, a, b, 5)
 
 
-def test_central_path_exponent_unbounded():
-  """Non-default exponent must still detect primal unboundedness."""
+def test_regularization_eps_unbounded():
+  """The weighted path must still detect primal unboundedness."""
   rng = np.random.default_rng(6500)
   a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      central_path_exponent=0.7, verbose=False
+      regularization_eps=1e-2, verbose=False
   )
   _assert_unbounded(solution, a, c, p, 5)
 
