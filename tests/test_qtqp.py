@@ -323,14 +323,19 @@ def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
   y = solution.y
   s = solution.s
 
-  pinfeas = np.linalg.norm(a.T @ y, np.inf)
+  # Certificate quality is judged as relative backward error, mirroring the
+  # solver's detection contract: violations over ||A||_1 * ||y||.
+  norm_a_one = float(abs(a).sum(axis=0).max())
+  pinfeas = np.linalg.norm(a.T @ y, np.inf) / (
+      norm_a_one * np.linalg.norm(y, np.inf) + 1e-300
+  )
 
   assert solution.status == qtqp.SolutionStatus.INFEASIBLE
   np.testing.assert_array_equal(np.isnan(x), True)
   np.testing.assert_array_equal(np.isnan(s), True)
   np.testing.assert_allclose(b @ y, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
-  np.testing.assert_array_less(pinfeas, atol + rtol * np.linalg.norm(y, np.inf))
+  np.testing.assert_array_less(pinfeas, atol)
 
 
 def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
@@ -339,19 +344,21 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
   y = solution.y
   s = solution.s
 
-  dinfeas_a = np.linalg.norm(a @ x + s, np.inf)
-  dinfeas_p = np.linalg.norm(p @ x, np.inf)
+  # Certificate quality is judged as relative backward error, mirroring the
+  # solver's detection contract: violations over ||A||_inf * ||x|| (and
+  # ||P||_inf * ||x|| for the quadratic part).
+  norm_x = np.linalg.norm(x, np.inf)
+  norm_a_inf = float(abs(a).sum(axis=1).max())
+  norm_p_inf = float(abs(p).sum(axis=1).max()) if p.nnz else 0.0
+  dinfeas_a = np.linalg.norm(a @ x + s, np.inf) / (norm_a_inf * norm_x + 1e-300)
+  dinfeas_p = np.linalg.norm(p @ x, np.inf) / (norm_p_inf * norm_x + 1e-300)
 
   assert solution.status == qtqp.SolutionStatus.UNBOUNDED
   np.testing.assert_array_equal(np.isnan(y), True)
   np.testing.assert_allclose(c @ x, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
-  np.testing.assert_array_less(
-      dinfeas_a, atol + rtol * np.linalg.norm(x, np.inf)
-  )
-  np.testing.assert_array_less(
-      dinfeas_p, atol + rtol * np.linalg.norm(x, np.inf)
-  )
+  np.testing.assert_array_less(dinfeas_a, atol)
+  np.testing.assert_array_less(dinfeas_p, atol)
 
 
 @pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
@@ -2766,6 +2773,76 @@ def test_gmres_rollback_on_stalled_refinement():
   # Either we converged immediately, or the returned residual is no worse
   # than what one direct factor-solve from warm_start would give.
   assert stats['final_residual_norm'] < 1e-6
+
+
+# =============================================================================
+# Certificate quality: pseudo-rays must not be certified
+# =============================================================================
+
+def test_certificate_rejects_large_slope_pseudo_ray():
+  """A direction with enormous |c'x| but non-trivial constraint violations
+  must not be accepted as an unboundedness certificate.
+
+  This is the mechanism behind false certificates on degenerate LPs (e.g.
+  NETLIB dfl001): tests that normalize violations by |c'x| hand out slack
+  proportional to the objective slope, which a near-null direction of A with
+  a large c-component can inflate arbitrarily. The certificate test must
+  judge violations against ||A|| ||x|| instead.
+  """
+  rng = np.random.default_rng(7)
+  m, n, z = 12, 8, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  # Direction v: right singular vector of A with the smallest singular value
+  # (near-null for A but not null), and a cost vector with a huge component
+  # along v so that c'v is enormously negative.
+  u_svd, s_svd, vt_svd = np.linalg.svd(a.toarray())
+  mid = len(s_svd) // 2
+  v = vt_svd[mid]
+  sigma_v = s_svd[mid]  # clearly nonzero: v is NOT a feasible ray
+  norm_a = np.max(np.abs(a.toarray()).sum(axis=1))
+  big = 1e12
+  c_adv = -big * v
+
+  solver = qtqp.QTQP(a=a, b=b, c=c_adv, z=z, p=p)
+  # Prime the state that solve() would normally set before termination checks.
+  solver.atol, solver.rtol = 1e-7, 1e-8
+  solver.atol_infeas, solver.rtol_infeas = 1e-8, 1e-9
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
+  solver._norm_b = np.linalg.norm(solver.b, np.inf)
+  solver._norm_c = np.linalg.norm(solver.c, np.inf)
+  abs_a = abs(solver.a)
+  solver._norm_a_inf = float(abs_a.sum(axis=1).max())
+  solver._norm_a_one = float(abs_a.sum(axis=0).max())
+  solver._norm_p_inf = (
+      float(abs(solver.p).sum(axis=1).max()) if solver.p.nnz else 0.0
+  )
+  solver.it = 0
+  solver.start_time = 0.0
+
+  x = v.copy()
+  y = np.zeros(m)
+  y[z:] = 1e-6
+  s = np.zeros(m)
+  s[z:] = 1e-6
+  tau = 1e-8  # deep in the certificate regime
+
+  ctx = c_adv @ x
+  assert ctx < 0
+
+  # The legacy |c'x|-normalized test would have accepted this pseudo-ray:
+  legacy_dinfeas = np.linalg.norm(a @ x + s, np.inf) / abs(ctx)
+  assert legacy_dinfeas < 1e-8 + 1e-9 * np.linalg.norm(x, np.inf) / abs(ctx)
+
+  # The data-scaled test must reject it: the violations are a sigma_v /
+  # ||A|| fraction of ||A|| ||x||, far above any certificate tolerance.
+  assert sigma_v / norm_a > 1e-3
+  status = solver._check_termination(  # pylint: disable=protected-access
+      x, y, tau, s, alpha=0.5, mu=1.0, sigma=0.5, stats_i={},
+      collect_stats=False,
+  )
+  assert status != qtqp.SolutionStatus.UNBOUNDED
+  assert status != qtqp.SolutionStatus.INFEASIBLE
 
 
 # =============================================================================
