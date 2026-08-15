@@ -660,7 +660,19 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
-    self._arc_search = bool(arc_search)
+    if arc_search in (False, 0):
+      self._arc_criterion = None
+    elif arc_search in (True, 1, "mu"):
+      self._arc_criterion = "mu"
+    elif arc_search == "merit":
+      self._arc_criterion = "merit"
+    elif arc_search == "potential":
+      self._arc_criterion = "potential"
+    else:
+      raise ValueError(
+          f"arc_search must be True, False, 'mu', or 'merit', got {arc_search!r}."
+      )
+    self._arc_search = self._arc_criterion is not None
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -785,7 +797,7 @@ class QTQP:
       arc = None
       if self._arc_search:
         arc = self._arc_search_predictor(
-            p=p, mu=mu, x=x, y=y, s=s, tau=tau,
+            p=p, a=a, mu=mu, x=x, y=y, s=s, tau=tau,
             x_p=x_p, y_p=y_p, tau_p=tau_p, d_y_p=d_y_p, d_s_p=d_s, xy=xy,
             stats_i=stats_i,
         )
@@ -1190,7 +1202,8 @@ class QTQP:
     return max(alpha, 0.0)
 
   def _arc_search_predictor(
-      self, *, p, mu, x, y, s, tau, x_p, y_p, tau_p, d_y_p, d_s_p, xy, stats_i,
+      self, *, p, a, mu, x, y, s, tau, x_p, y_p, tau_p, d_y_p, d_s_p, xy,
+      stats_i,
   ):
     """Second-order predictor arc with exact tau-lift per trial point.
 
@@ -1251,11 +1264,41 @@ class QTQP:
     else:
       xpx = None
 
-    def _poly(cs, a):
+    def _poly(cs, av):
       r = 0.0
       for coeff in reversed(cs):
-        r = r * a + coeff
+        r = r * av + coeff
       return r
+
+    def _sqnorm_quartic(v0, v1, v2):
+      # ||v0 + a*v1 + a^2*v2||^2 as quartic coefficients in a.
+      return [float(v0 @ v0), 2.0 * float(v0 @ v1),
+              2.0 * float(v0 @ v2) + float(v1 @ v1),
+              2.0 * float(v1 @ v2), float(v2 @ v2)]
+
+    merit = self._arc_criterion == "merit"
+    if merit:
+      # KKT residual vectors along the arc are quadratic vector
+      # polynomials, so their squared norms are exact quartics: the merit
+      # max(relative pres, dres, complementarity) is closed-form along
+      # the arc. tau uses the arc's polynomial coordinates here; the
+      # exact lift supplies the returned anchor's tau.
+      d1t_m, d2t_m = tau_p - tau, tau_p2 - tau_p
+      if p.nnz > 0:
+        pd0, pd1, pd2 = px0, px1, px2
+      else:
+        pd0 = pd1 = pd2 = 0.0
+      rd0 = pd0 + a.T @ y + c_vec * tau
+      rd1 = pd1 + a.T @ d1y + c_vec * d1t_m
+      rd2 = pd2 + a.T @ d2y + c_vec * d2t_m
+      rp0 = a @ x + s - b_vec * tau
+      rp1 = a @ d1x + d1s - b_vec * d1t_m
+      rp2 = a @ d2x + d2s - b_vec * d2t_m
+      nd_poly = _sqnorm_quartic(rd0, rd1, rd2)
+      np_poly = _sqnorm_quartic(rp0, rp1, rp2)
+      nd0 = max(nd_poly[0], _EPS)
+      np0 = max(np_poly[0], _EPS)
+      ys0 = max(ys[0], _EPS)
 
     eps = self._regularization_eps
     mz1 = self.m - self.z + 1
@@ -1285,11 +1328,27 @@ class QTQP:
       for root in pp.polyroots(stat):
         if abs(root.imag) < 1e-12 and 1e-10 < root.real < alpha_max:
           candidates.append(float(root.real))
+    if merit:
+      for quart in (nd_poly, np_poly, ys):
+        dcoef = np.array([quart[1], 2.0 * quart[2], 3.0 * quart[3],
+                          4.0 * quart[4]])
+        dcoef = np.trim_zeros(dcoef, "b")
+        if dcoef.size > 1:
+          for root in pp.polyroots(dcoef):
+            if abs(root.imag) < 1e-12 and 1e-10 < root.real < alpha_max:
+              candidates.append(float(root.real))
+
     best = None
     for a_c in candidates:
       ys_a = _poly(ys, a_c)
       if ys_a <= 0.0:
         continue
+      if merit:
+        m_a = max(_poly(nd_poly, a_c) / nd0,
+                  _poly(np_poly, a_c) / np0,
+                  (ys_a / ys0) ** 2)
+        # fall through: score by merit but keep the tau-lift validity
+        # checks below; mu_a is still computed for sigma.
       # Exact tau-lift for the trial point: the subproblem tau-row at the
       # affine target, mu*t^2 - (mu*tau + qz(a))*t - xPx(a) = 0, unique
       # nonnegative root.
@@ -1304,11 +1363,75 @@ class QTQP:
         continue
       quad = eps * (_poly(xx, a_c) + _poly(yy, a_c)) + tau_a * tau_a
       mu_a = (mz1 / max(_EPS, quad)) * ys_a / mz
-      if best is None or mu_a < best[0]:
-        best = (mu_a, a_c, tau_a)
+      score = m_a if merit else mu_a
+      if best is None or score < best[0]:
+        best = (score, a_c, tau_a, mu_a)
     if best is None:
       return None
-    mu_arc, a_c, tau_arc = best
+    _, a_c, tau_arc, mu_arc = best
+
+    if self._arc_criterion == "potential":
+      # Re-score the feasible candidates with the Tanabe-Todd-Ye potential
+      # rho*log(y's) - sum_i log(s_i y_i): progress plus the barrier, so
+      # decentered candidates are penalized exactly as the theory demands.
+      # O(m) per candidate, on the handful of finalists only.
+      rho = mz + math.sqrt(mz)
+      best_pot = None
+      for cand in candidates:
+        if cand <= 0.0 or cand > alpha_max:
+          continue
+        yv = y[z:] + cand * d1y[z:] + (cand * cand) * d2y[z:]
+        sv = s[z:] + cand * d1s[z:] + (cand * cand) * d2s[z:]
+        prod = yv * sv
+        if np.min(prod) <= 0.0:
+          continue
+        pot = rho * math.log(float(yv @ sv)) - float(np.sum(np.log(prod)))
+        if best_pot is None or pot < best_pot[0]:
+          best_pot = (pot, cand)
+      if best_pot is not None:
+        a_probe = best_pot[1]
+        ys_probe = _poly(ys, a_probe)
+        # sigma from the potential-optimal probe point (normalized mu).
+        tau_pr = None
+        qz_pr = qz[0] + a_probe * (qz[1] + a_probe * qz[2])
+        xpx_pr = _poly(xpx, a_probe) if xpx is not None else 0.0
+        lin_pr = mu * tau + qz_pr
+        disc_pr = lin_pr * lin_pr + 4.0 * mu * xpx_pr
+        if disc_pr >= 0.0:
+          tau_pr = (lin_pr + math.sqrt(disc_pr)) / (2.0 * mu)
+        if tau_pr is not None and np.isfinite(tau_pr) and tau_pr > 1e-12:
+          quad_pr = eps * (_poly(xx, a_probe) + _poly(yy, a_probe)) + tau_pr ** 2
+          mu_probe = (mz1 / max(_EPS, quad_pr)) * ys_probe / mz
+          sigma_pr = float(np.clip((mu_probe / max(_EPS, mu)) ** 3, 0.0, 1.0))
+          # Target-matched anchor: the corrector's surrogate should
+          # approximate the corrector's own solution (the path point at
+          # mu_c = sigma*mu), so anchor where the arc's complementarity
+          # equals sigma * (current complementarity).
+          target_ys = sigma_pr * ys[0]
+          shifted = np.array(ys, dtype=float)
+          shifted[0] -= target_ys
+          shifted = np.trim_zeros(shifted, "b")
+          a_anchor = None
+          if shifted.size > 1:
+            roots = pp.polyroots(shifted)
+            real = [float(r.real) for r in roots
+                    if abs(r.imag) < 1e-12 and 1e-10 < r.real <= alpha_max]
+            if real:
+              a_anchor = min(real)
+          if a_anchor is None:
+            a_anchor = a_probe
+          qz_an = qz[0] + a_anchor * (qz[1] + a_anchor * qz[2])
+          xpx_an = _poly(xpx, a_anchor) if xpx is not None else 0.0
+          lin_an = mu * tau + qz_an
+          disc_an = lin_an * lin_an + 4.0 * mu * xpx_an
+          if disc_an >= 0.0:
+            tau_an = (lin_an + math.sqrt(disc_an)) / (2.0 * mu)
+            if np.isfinite(tau_an) and tau_an > 1e-12:
+              a_c, tau_arc = a_anchor, tau_an
+              mu_arc = mu_probe
+              # sigma is recomputed below from mu_arc via the same cube.
+
+    
 
     sigma_base = mu_arc / max(_EPS, mu)
     sigma = float(np.clip(sigma_base * sigma_base * sigma_base, 0.0, 1.0))

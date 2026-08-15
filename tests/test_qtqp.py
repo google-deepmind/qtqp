@@ -2849,14 +2849,15 @@ def test_certificate_rejects_large_slope_pseudo_ray():
 # arc_search: second-order predictor arc with exact tau-lift
 # =============================================================================
 
+@pytest.mark.parametrize('criterion', [True, 'merit', 'potential'])
 @pytest.mark.parametrize('seed', 8000 + np.arange(3))
-def test_arc_search_solve(seed):
-  """The arc-search predictor must converge to a valid optimal solution."""
+def test_arc_search_solve(criterion, seed):
+  """Every arc selection criterion must converge to a valid solution."""
   rng = np.random.default_rng(seed)
   m, n, z = 60, 40, 8
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      arc_search=True, verbose=False,
+      arc_search=criterion, verbose=False,
   )
   _assert_solution(solution, a, b, c, p, z)
 
