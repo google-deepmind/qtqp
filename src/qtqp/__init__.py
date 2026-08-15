@@ -672,6 +672,8 @@ class QTQP:
       self.d, self.e, self.sigma_eq = None, None, 1.0
     else:
       a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate()
+    # Operating-scale b, c, kept for the distance-to-path certificate.
+    self._b_op, self._c_op = b, c
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -1337,6 +1339,12 @@ class QTQP:
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
+    # Working-scale references (equilibrated when equilibration is on),
+    # kept for the distance-to-path certificate below; mu_hat is the
+    # complementarity of THIS iterate in the operating scale.
+    x_w, y_w, s_w = x, y, s
+    mu_hat = float(y_w @ s_w) / (self.m - self.z)
+
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
@@ -1375,6 +1383,41 @@ class QTQP:
     # convention) hands out slack proportional to a quantity degenerate
     # problems can inflate — near-null directions with enormous c-slope pass
     # such tests while violating the constraints badly (e.g. NETLIB dfl001).
+    # A posteriori distance-to-path certificate. The eps-weighted path map
+    # T_mu is (eps*mu)-strongly monotone, so
+    #     ||u - u*(mu)|| <= ||T_mu(u)|| / (eps*mu)  =: delta_path,
+    # computable at every iterate. Basically free: the three SpMVs above
+    # are reused via diagonal rescaling into the operating scale. The
+    # bound saturates at the floating-point floor once eps*mu approaches
+    # roundoff of the summands (late endgame); treat large-mu iterates as
+    # the informative regime.
+    eps_w = self._regularization_eps
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+      se = self.sigma_eq * self.e
+      sd = self.sigma_eq * self.d
+      sig2 = self.sigma_eq * self.sigma_eq
+      ax_w = sd * ax
+      aty_w = se * aty
+      px_w = se * px
+      ctx_w, bty_w, xpx_w = sig2 * ctx, sig2 * bty, sig2 * xpx
+    else:
+      ax_w, aty_w, px_w = ax, aty, px
+      ctx_w, bty_w, xpx_w = ctx, bty, xpx
+    b_op = getattr(self, "_b_op", self.b)
+    c_op = getattr(self, "_c_op", self.c)
+    t_x = px_w + aty_w + c_op * tau
+    t_x += (eps_w * mu_hat) * x_w
+    t_y = -ax_w + b_op * tau
+    t_y += (eps_w * mu_hat) * y_w
+    t_y[self.z :] -= mu_hat / y_w[self.z :]
+    inv_tau_w = 1.0 / max(tau, _EPS)
+    t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
+             + mu_hat * (tau - inv_tau_w))
+    t_norm = math.sqrt(
+        float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
+    )
+    stats_i["delta_path"] = t_norm / max(_EPS, eps_w * mu_hat)
+
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
     norm_ax_plus_s = _norm(ax_plus_s, np.inf)

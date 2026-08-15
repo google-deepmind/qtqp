@@ -195,6 +195,12 @@ Key parameters:
 -   `collect_stats`: If True, populate `Solution.stats` with per-iteration
     diagnostics (sy, s/y statistics, complementarity, etc.). Defaults to False
     for faster throughput.
+    Every iteration also logs `delta_path`, a rigorous a posteriori upper
+    bound on the distance from the iterate to the exact central-path point
+    at the current `mu` (from the strong monotonicity of the weighted path
+    map); it is informative when small, conservative for aggressively
+    centered iterates, and saturates at the floating-point floor in the
+    final iterations.
 -   `init_strategy`: Choose the initial interior-point iterate. Defaults to
     `qtqp.InitStrategy.TRIVIAL`.
 -   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
