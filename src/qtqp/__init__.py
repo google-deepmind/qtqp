@@ -547,14 +547,16 @@ class QTQP:
       rtol (float): Relative tolerance for convergence criteria, scaled by
         problem data norms.
       atol_infeas (float): Certificate-quality tolerance for infeasibility
-        and unboundedness detection: a candidate ray u is accepted when its
-        relative backward error (constraint violations divided by
-        ||operator|| * ||u||, the smallest relative data perturbation under
-        which the ray is exact) is below atol_infeas.
-      rtol_infeas (float): Slope-robustness margin for certificates: the
-        ray's objective slope (c'x or b'y) must be negative by at least
-        rtol_infeas times the data norm times the ray norm, so the sign
-        survives an rtol_infeas-sized relative perturbation of the data.
+        and unboundedness detection. A candidate ray u must be good in two
+        complementary senses: its relative backward error (violations over
+        ||operator|| * ||u||) must be below atol_infeas, AND its violations
+        must be below atol_infeas * |objective slope| + rtol_infeas * ||u||.
+        The first rejects large-slope pseudo-rays, the second rejects
+        huge-norm near-solutions; each guards the other's blind spot.
+      rtol_infeas (float): Ray-relative slack in the slope-scaled
+        certificate test, and the margin by which the certificate's
+        objective slope (c'x or b'y) must be negative relative to the data
+        and ray norms.
       max_iter (int): Maximum number of iterations before stopping.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
@@ -1310,9 +1312,10 @@ class QTQP:
     # such tests while violating the constraints badly (e.g. NETLIB dfl001).
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
+    norm_ax_plus_s = _norm(ax_plus_s, np.inf)
     norm_x = _norm(x, np.inf)
     norm_y = _norm(y, np.inf)
-    dinfeas_a = _norm(ax_plus_s, np.inf) / (self._norm_a_inf * norm_x + _EPS)
+    dinfeas_a = norm_ax_plus_s / (self._norm_a_inf * norm_x + _EPS)
     dinfeas_p = norm_px / (self._norm_p_inf * norm_x + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     pinfeas = norm_aty / (self._norm_a_one * norm_y + _EPS)
@@ -1354,23 +1357,31 @@ class QTQP:
         and dres < self.atol + self.rtol * drelrhs
     ):
       status = SolutionStatus.SOLVED
-    # Unbounded: x is a dual infeasibility certificate (primal unbounded
-    # ray) when its relative backward error is within atol_infeas AND the
-    # objective slope is robustly negative relative to the ray's own scale
-    # (so the sign survives an rtol_infeas-sized perturbation of c). Note
-    # the quality measure needs no zero-ray guard: as ||x|| -> 0 its
-    # denominator vanishes while the numerator retains the O(1) slack s,
-    # so dinfeas diverges and nothing is certified.
+    # Certificate acceptance requires BOTH quality senses, because each
+    # guards the other's blind spot:
+    #   - data-scaled (violations / (||operator|| ||ray||) < atol_infeas):
+    #     rejects large-slope pseudo-rays whose |c'x| buys unbounded slack
+    #     in the slope-scaled test (e.g. NETLIB dfl001, where a direction
+    #     violating the constraints at 5-9% of ||A|| ||x|| was certified);
+    #   - slope-scaled (violations < atol_infeas * |slope| + rtol_infeas *
+    #     ||ray||): rejects huge-norm near-solutions, whose data-scaled
+    #     quality becomes small automatically (A'y ~ -c*tau with enormous
+    #     ||y|| makes ||A'y|| / (||A||_1 ||y||) tiny while y is nothing
+    #     like a ray; e.g. NETLIB fit1p, tuff, vtp.base, fffff800).
+    # The quality measures need no zero-ray guard: as ||x|| -> 0 the
+    # data-scaled denominator vanishes while the numerator retains the
+    # O(1) slack s, so dinfeas diverges and nothing is certified.
     elif (
         ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
         and dinfeas < self.atol_infeas
+        and max(norm_ax_plus_s, norm_px)
+        < self.atol_infeas * abs(ctx) + self.rtol_infeas * norm_x
     ):
       status = SolutionStatus.UNBOUNDED
-    # Infeasible: y is a primal infeasibility certificate (dual unbounded
-    # ray), judged the same way via ||A'y|| / (||A||_1 ||y||) and b'y.
     elif (
         bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
         and pinfeas < self.atol_infeas
+        and norm_aty < self.atol_infeas * abs(bty) + self.rtol_infeas * norm_y
     ):
       status = SolutionStatus.INFEASIBLE
     else:
