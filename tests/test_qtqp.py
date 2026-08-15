@@ -2846,6 +2846,52 @@ def test_certificate_rejects_large_slope_pseudo_ray():
 
 
 # =============================================================================
+# arc_search: second-order predictor arc with exact tau-lift
+# =============================================================================
+
+@pytest.mark.parametrize('seed', 8000 + np.arange(3))
+def test_arc_search_solve(seed):
+  """The arc-search predictor must converge to a valid optimal solution."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      arc_search=True, verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_arc_search_agrees_with_default():
+  """Arc-search and point predictors reach the same optimum."""
+  rng = np.random.default_rng(8100)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      arc_search=True, verbose=False
+  )
+  obj_a = c @ sol_a.x + 0.5 * sol_a.x @ p @ sol_a.x
+  obj_b = c @ sol_b.x + 0.5 * sol_b.x @ p @ sol_b.x
+  np.testing.assert_allclose(obj_a, obj_b, atol=1e-5, rtol=1e-5)
+
+
+def test_arc_search_infeasible_unbounded():
+  """The arc predictor must not disturb certificate detection."""
+  rng = np.random.default_rng(8200)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      arc_search=True, verbose=False
+  )
+  _assert_infeasible(sol, a, b, 5)
+  rng = np.random.default_rng(8300)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      arc_search=True, verbose=False
+  )
+  _assert_unbounded(sol, a, c, p, 5)
+
+
+# =============================================================================
 # max_centrality_correctors: Gondzio multiple centrality correctors
 # =============================================================================
 

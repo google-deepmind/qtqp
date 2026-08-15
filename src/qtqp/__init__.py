@@ -486,6 +486,7 @@ class QTQP:
       regularization_eps: float = 1e-2,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
+      arc_search: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -512,6 +513,7 @@ class QTQP:
           regularization_eps=regularization_eps,
           fused_corrector_division=fused_corrector_division,
           max_centrality_correctors=max_centrality_correctors,
+          arc_search=arc_search,
       )
     finally:
       if self._linear_solver is not None:
@@ -542,6 +544,7 @@ class QTQP:
       regularization_eps: float = 1e-2,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
+      arc_search: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -621,6 +624,14 @@ class QTQP:
         The default 1 was validated on NETLIB + Maros-Meszaros (cuts
         iterations ~10%, rescues borderline instances, no regressions);
         0 disables.
+      arc_search (bool): If True, replace the point predictor with a
+        second-order arc search: one extra back-solve builds the arc
+        u + alpha*d1 + alpha^2*d2, every arc quantity is precomputed as a
+        polynomial in alpha, and each trial point's tau is re-lifted
+        EXACTLY via the scalar embedding quadratic (O(1) per candidate,
+        no back-solve) — an operation unavailable to solvers that
+        linearize the tau-kappa coupling. The corrector is anchored at
+        the best arc point. Default False (experimental).
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -649,6 +660,7 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
+    self._arc_search = bool(arc_search)
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -767,17 +779,32 @@ class QTQP:
       # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
       d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
-      # Pre-compute the Mehrotra cross term in un-divided form only when the
-      # fused-corrector path will consume it (otherwise stay on the legacy
-      # `-d_s * d_y_p / y` formulation verbatim).
-      if self._fused_corrector_division:
-        cross_p = d_s[self.z :] * d_y_p[self.z :]
+      # Arc search (if enabled): upgrade the point predictor to a
+      # second-order arc with exact tau-lift per trial point; on success it
+      # supplies the corrector anchor, cross term, and sigma directly.
+      arc = None
+      if self._arc_search:
+        arc = self._arc_search_predictor(
+            p=p, mu=mu, x=x, y=y, s=s, tau=tau,
+            x_p=x_p, y_p=y_p, tau_p=tau_p, d_y_p=d_y_p, d_s_p=d_s, xy=xy,
+            stats_i=stats_i,
+        )
+      if arc is not None:
+        x_p, y_p, tau_p, cross_arc, sigma = arc
+        if self._fused_corrector_division:
+          cross_p = cross_arc
+      else:
+        # Pre-compute the Mehrotra cross term in un-divided form only when
+        # the fused-corrector path will consume it (otherwise stay on the
+        # legacy `-d_s * d_y_p / y` formulation verbatim).
+        if self._fused_corrector_division:
+          cross_p = d_s[self.z :] * d_y_p[self.z :]
 
-      # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
-      sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
-      )
+        # Compute predictor step size and resulting centering parameter
+        alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
+        sigma = self._compute_sigma(
+            mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
+        )
 
       # --- Step 3: Corrector Step ---
       # Mehrotra's second-order correction accounts for the nonlinear cross-term
@@ -789,7 +816,9 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      if self._fused_corrector_division:
+      if arc is not None:
+        correction = -cross_arc / y[self.z :]
+      elif self._fused_corrector_division:
         correction = -cross_p / y[self.z :]
       else:
         correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
@@ -1133,6 +1162,163 @@ class QTQP:
     sigma_base = mu_aff / max(_EPS, mu_curr)
     sigma = sigma_base * sigma_base * sigma_base  # More stable than **3.
     return np.clip(sigma, 0.0, 1.0)
+
+  def _max_arc_step(self, v, d1, d2):
+    """Largest alpha in (0, 1] with v + alpha*d1 + alpha^2*d2 >= 0.
+
+    v is elementwise positive; returns the min over components of the
+    smallest positive root of the componentwise quadratic (capped at 1).
+    """
+    alpha = 1.0
+    quad = np.abs(d2) > _EPS
+    lin = ~quad & (d1 < -_EPS)
+    if np.any(lin):
+      alpha = min(alpha, float(np.min(-v[lin] / d1[lin])))
+    if np.any(quad):
+      a2, a1, a0 = d2[quad], d1[quad], v[quad]
+      disc = a1 * a1 - 4.0 * a2 * a0
+      has = disc >= 0.0
+      if np.any(has):
+        sq = np.sqrt(disc[has])
+        a2h, a1h = a2[has], a1[has]
+        r1 = (-a1h - sq) / (2.0 * a2h)
+        r2 = (-a1h + sq) / (2.0 * a2h)
+        lo, hi = np.minimum(r1, r2), np.maximum(r1, r2)
+        cand = np.where(lo > _EPS, lo, np.where(hi > _EPS, hi, np.inf))
+        if cand.size:
+          alpha = min(alpha, float(np.min(cand)))
+    return max(alpha, 0.0)
+
+  def _arc_search_predictor(
+      self, *, p, mu, x, y, s, tau, x_p, y_p, tau_p, d_y_p, d_s_p, xy, stats_i,
+  ):
+    """Second-order predictor arc with exact tau-lift per trial point.
+
+    One extra back-solve refines the affine point with Mehrotra's cross
+    term, defining the arc u(alpha) = u + alpha*d1 + alpha^2*d2. Every arc
+    quantity (y's, ||x||^2, ||y||^2, c'x + b'y, x'Px) is precomputed as a
+    polynomial in alpha, and each candidate's tau coordinate is re-solved
+    EXACTLY from the embedding's scalar tau-row given (x(alpha), y(alpha))
+    — a few dot products, no back-solve — so every trial point satisfies
+    the tau/perspective nonlinearity exactly. This lift is unavailable to
+    solvers that linearize the tau-kappa coupling. Returns the corrector
+    inputs (arc anchor, cross term, sigma), or None to fall back to the
+    point predictor.
+    """
+    z, n = self.z, self.n
+    corr_aff = -(d_s_p[z:] * d_y_p[z:]) / y[z:]
+    xy[:n] = x_p
+    xy[n:] = y_p
+    x_p2, y_p2, tau_p2, arc_stats = self._newton_step(
+        p=p, mu=mu, mu_target=0.0, r_anchor=xy, tau_anchor=tau_p,
+        x=x, y=y, s=s, tau=tau, correction=corr_aff,
+    )
+    stats_i["arc_lin_sys_stats"] = arc_stats
+    if arc_stats.get("tau_method") != "quadratic":
+      return None  # degraded tau solve; keep the stock point predictor
+
+    d1x, d1y = x_p - x, d_y_p
+    d2x, d2y = x_p2 - x_p, y_p2 - y_p
+    d2s = np.zeros_like(d_s_p)
+    d2s[z:] = (-y_p2[z:] * s[z:] / y[z:] + corr_aff) - d_s_p[z:]
+    d1s = d_s_p
+
+    alpha_max = min(
+        self._max_arc_step(y[z:], d1y[z:], d2y[z:]),
+        self._max_arc_step(s[z:], d1s[z:], d2s[z:]),
+    )
+    if alpha_max <= 1e-8:
+      return None
+
+    # Quartic/quadratic coefficients in alpha of the arc quantities.
+    ys = [float(y @ s), float(y @ d1s + s @ d1y),
+          float(y @ d2s + s @ d2y + d1y @ d1s),
+          float(d1y @ d2s + d2y @ d1s), float(d2y @ d2s)]
+    xx = [float(x @ x), 2.0 * float(x @ d1x),
+          2.0 * float(x @ d2x) + float(d1x @ d1x),
+          2.0 * float(d1x @ d2x), float(d2x @ d2x)]
+    yy = [float(y @ y), 2.0 * float(y @ d1y),
+          2.0 * float(y @ d2y) + float(d1y @ d1y),
+          2.0 * float(d1y @ d2y), float(d2y @ d2y)]
+    c_vec, b_vec = self.q[:n], self.q[n:]
+    qz = [float(c_vec @ x + b_vec @ y), float(c_vec @ d1x + b_vec @ d1y),
+          float(c_vec @ d2x + b_vec @ d2y)]
+    if p.nnz > 0:
+      px0, px1, px2 = p @ x, p @ d1x, p @ d2x
+      xpx = [float(x @ px0), 2.0 * float(d1x @ px0),
+             2.0 * float(d2x @ px0) + float(d1x @ px1),
+             2.0 * float(d2x @ px1), float(d2x @ px2)]
+    else:
+      xpx = None
+
+    def _poly(cs, a):
+      r = 0.0
+      for coeff in reversed(cs):
+        r = r * a + coeff
+      return r
+
+    eps = self._regularization_eps
+    mz1 = self.m - self.z + 1
+    mz = self.m - self.z
+    # Along the arc, the normalized duality measure is the ratio of two
+    # exact quartics in alpha: N(a) = y's(a) over the ellipsoid quadratic
+    # Q(a) = eps*(||x||^2 + ||y||^2)(a) + tau_arc(a)^2 (using the arc's
+    # polynomial tau in the normalization). Its stationary points are the
+    # roots of N'Q - NQ' -- a degree-7 polynomial, solved exactly via the
+    # companion matrix; the exact tau-lift then scores the few candidates.
+    d1t, d2t = tau_p - tau, tau_p2 - tau_p
+    tt = [tau * tau, 2.0 * tau * d1t,
+          2.0 * tau * d2t + d1t * d1t, 2.0 * d1t * d2t, d2t * d2t]
+    pp = np.polynomial.polynomial
+    n_poly = np.array(ys)
+    q_poly = eps * (np.array(xx) + np.array(yy)) + np.array(tt)
+    stat = pp.polysub(pp.polymul(pp.polyder(n_poly), q_poly),
+                      pp.polymul(n_poly, pp.polyder(q_poly)))
+    # Candidates: the exact stationary points of the normalized measure,
+    # augmented with a coarse damping grid -- every evaluation is O(1)
+    # after the precompute, so the redundancy is free and covers model
+    # error between the polynomial arc-tau (used to locate candidates)
+    # and the exact lift (used to score them).
+    candidates = [alpha_max * f for f in (1.0, 0.9, 0.75, 0.6, 0.45, 0.3, 0.15)]
+    stat = np.trim_zeros(stat, "b")
+    if stat.size > 1:
+      for root in pp.polyroots(stat):
+        if abs(root.imag) < 1e-12 and 1e-10 < root.real < alpha_max:
+          candidates.append(float(root.real))
+    best = None
+    for a_c in candidates:
+      ys_a = _poly(ys, a_c)
+      if ys_a <= 0.0:
+        continue
+      # Exact tau-lift for the trial point: the subproblem tau-row at the
+      # affine target, mu*t^2 - (mu*tau + qz(a))*t - xPx(a) = 0, unique
+      # nonnegative root.
+      qz_a = qz[0] + a_c * (qz[1] + a_c * qz[2])
+      xpx_a = _poly(xpx, a_c) if xpx is not None else 0.0
+      lin = mu * tau + qz_a
+      disc = lin * lin + 4.0 * mu * xpx_a
+      if disc < 0.0:
+        continue
+      tau_a = (lin + math.sqrt(disc)) / (2.0 * mu)
+      if not np.isfinite(tau_a) or tau_a <= 1e-12:
+        continue
+      quad = eps * (_poly(xx, a_c) + _poly(yy, a_c)) + tau_a * tau_a
+      mu_a = (mz1 / max(_EPS, quad)) * ys_a / mz
+      if best is None or mu_a < best[0]:
+        best = (mu_a, a_c, tau_a)
+    if best is None:
+      return None
+    mu_arc, a_c, tau_arc = best
+
+    sigma_base = mu_arc / max(_EPS, mu)
+    sigma = float(np.clip(sigma_base * sigma_base * sigma_base, 0.0, 1.0))
+
+    x_arc = x + a_c * d1x + (a_c * a_c) * d2x
+    y_arc = y + a_c * d1y + (a_c * a_c) * d2y
+    dy_tot = a_c * d1y[z:] + (a_c * a_c) * d2y[z:]
+    ds_tot = a_c * d1s[z:] + (a_c * a_c) * d2s[z:]
+    cross_arc = ds_tot * dy_tot
+    return x_arc, y_arc, tau_arc, cross_arc, sigma
 
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau, correction,

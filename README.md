@@ -172,6 +172,7 @@ solve(
     regularization_eps: float = 1e-2,
     fused_corrector_division: bool = False,
     max_centrality_correctors: int = 1,
+    arc_search: bool = False,
 ) -> qtqp.Solution
 ```
 
@@ -265,6 +266,10 @@ Choose one with the `refinement_strategy` argument:
 -   `max_centrality_correctors`: Maximum Gondzio-style centrality correctors
     per iteration, each one extra back-solve on the existing factorization,
     accepted only when the step size improves. Default `1`; `0` disables.
+-   `arc_search`: Opt-in second-order predictor arc with exact per-candidate
+    tau-lift via the embedding's scalar quadratic (an operation unavailable
+    to solvers that linearize the tau-kappa coupling). Solves some
+    chronically hard instances at extra per-iteration cost; off by default.
 
 This method will return a `qtqp.Solution` object, with fields:
 
