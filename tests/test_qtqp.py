@@ -2846,6 +2846,64 @@ def test_certificate_rejects_large_slope_pseudo_ray():
 
 
 # =============================================================================
+# max_centrality_correctors: Gondzio multiple centrality correctors
+# =============================================================================
+
+@pytest.mark.parametrize('mcc', [0, 1, 2, 3])
+@pytest.mark.parametrize('seed', 7000 + np.arange(3))
+def test_centrality_correctors_solve(mcc, seed):
+  """All corrector counts must converge to a valid optimal solution."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      max_centrality_correctors=mcc, verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_centrality_correctors_solutions_agree():
+  """Different corrector counts converge to the same QP optimum."""
+  rng = np.random.default_rng(7200)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  objs = []
+  for mcc in (0, 1, 2):
+    sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        max_centrality_correctors=mcc, verbose=False
+    )
+    _assert_solution(sol, a, b, c, p, z)
+    objs.append(c @ sol.x + 0.5 * sol.x @ p @ sol.x)
+  for obj in objs:
+    np.testing.assert_allclose(obj, objs[1], atol=1e-5, rtol=1e-5)
+
+
+def test_centrality_correctors_rejects_negative():
+  rng = np.random.default_rng(7300)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  with pytest.raises(ValueError, match='max_centrality_correctors'):
+    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
+        max_centrality_correctors=-1, verbose=False
+    )
+
+
+def test_centrality_correctors_infeasible_unbounded():
+  """Correctors must not disturb certificate detection."""
+  rng = np.random.default_rng(7400)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      max_centrality_correctors=2, verbose=False
+  )
+  _assert_infeasible(sol, a, b, 5)
+  rng = np.random.default_rng(7500)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      max_centrality_correctors=2, verbose=False
+  )
+  _assert_unbounded(sol, a, c, p, 5)
+
+
+# =============================================================================
 # regularization_eps: eps-weighted central path
 # =============================================================================
 
