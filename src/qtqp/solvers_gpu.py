@@ -162,6 +162,7 @@ class CupyDenseSolver(LinearSolver):
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    cp = self._cp
     self._R_x_gpu.set(diag[:self._n])
     self._R_y_gpu.set(-diag[self._n:])
     cp.divide(1.0, self._R_y_gpu, out=self._inv_R_y_gpu)
