@@ -286,7 +286,15 @@ class QTQP:
       raise TypeError("Constraint matrix 'a' must be in CSC format.")
     if not np.all(np.isfinite(a.data)):
       raise ValueError("Constraint matrix 'a' must contain only finite values.")
-    self.a = a
+    if a.has_canonical_format:
+      self.a = a
+    else:
+      # Non-canonical CSC (duplicate entries) is summed correctly by the
+      # KKT assembly (sp.bmat goes through COO, which sums duplicates)
+      # but not by the equilibration norms, which would see max(|d1|,
+      # |d2|) where the true entry is |d1 + d2|. Canonicalize a copy.
+      self.a = a.copy()
+      self.a.sum_duplicates()
 
     self.b = np.array(b, dtype=np.float64)
     if self.b.shape != (self.m,):
@@ -315,6 +323,9 @@ class QTQP:
     else:
       if not sp.isspmatrix_csc(p):
         raise TypeError("QP matrix 'p' must be in CSC format.")
+      if not p.has_canonical_format:
+        p = p.copy()
+        p.sum_duplicates()
       if p.shape != (self.n, self.n):
         raise ValueError(
             f"p must have shape ({self.n}, {self.n}), got {p.shape}"

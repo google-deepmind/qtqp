@@ -1099,6 +1099,31 @@ def test_symmetry_tolerance_is_relative():
   p_dense[0, 1] += 1e8
   with pytest.raises(ValueError, match='symmetric'):
     qtqp.QTQP(a=a, b=b, c=c, z=3, p=sparse.csc_matrix(p_dense))
+def test_duplicate_csc_entries_summed():
+  """Non-canonical CSC inputs (duplicate entries) must behave as if the
+  duplicates were summed, including in equilibration norms."""
+  rng = np.random.default_rng(41)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  sol_ref = qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(verbose=False)
+  # Build a genuinely non-canonical CSC by duplicating every stored entry
+  # within its column (constructing from COO would sum during conversion).
+  import scipy.sparse as _sp
+  data, indices, indptr = a.data, a.indices, a.indptr
+  new_data, new_indices, new_indptr = [], [], [0]
+  for col in range(a.shape[1]):
+    lo, hi = indptr[col], indptr[col + 1]
+    new_data.extend(0.5 * data[lo:hi]); new_data.extend(0.5 * data[lo:hi])
+    new_indices.extend(indices[lo:hi]); new_indices.extend(indices[lo:hi])
+    new_indptr.append(len(new_indices))
+  dup = _sp.csc_matrix(
+      (np.array(new_data), np.array(new_indices), np.array(new_indptr)),
+      shape=a.shape,
+  )
+  assert dup.nnz == 2 * a.nnz  # genuinely non-canonical
+  sol_dup = qtqp.QTQP(a=dup, b=b, c=c, z=3, p=p).solve(verbose=False)
+  np.testing.assert_allclose(
+      c @ sol_dup.x, c @ sol_ref.x, atol=1e-6, rtol=1e-6
+  )
 
 
 def test_solve_for_tau_handles_linear_equation():
