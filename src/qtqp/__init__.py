@@ -851,7 +851,7 @@ class QTQP:
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
       case SolutionStatus.UNFINISHED:
-        self._log_footer(f"Failed to converge")
+        self._log_footer("Failed to converge")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
