@@ -52,6 +52,17 @@ _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
+# Floor on the complementarity parameter mu wherever it enters the
+# algorithm (KKT shift, corrector targets, barrier terms). Below this
+# scale mu carries no information in double precision relative to O(1)
+# equilibrated data, and letting it underflow leaves the Newton system
+# effectively unregularized: on infeasibility trajectories the iterate
+# can freeze on an immature ray at mu ~ 1e-20, burning iterations with
+# every solve degraded (observed on Windows/QDLDL, where the platform's
+# roundoff draw loses the race between certificate maturation and mu
+# collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
+# touch the floor.
+_MU_FLOOR = 1e-14
 
 
 class LinearSolver(enum.Enum):
@@ -705,7 +716,7 @@ class QTQP:
       stats_i = {}
       x, y, tau, s = self._normalize(x, y, tau, s)
 
-      mu = (y @ s) / (self.m - self.z)
+      mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
 
       # --- Take an IPM step ---
       self._linear_solver.update(mu=mu, s=s, y=y)
