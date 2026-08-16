@@ -1117,6 +1117,37 @@ def test_duplicate_csc_entries_summed():
   )
 
 
+def test_numeric_failure_returns_failed_status():
+  """Numeric failures inside the iteration must surface as a FAILED
+  Solution carrying the best iterate, not as an exception (documented
+  contract; previously unreachable). Programming errors still raise."""
+  rng = np.random.default_rng(43)
+  a, b, c, p = _gen_feasible(30, 20, 4, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=4, p=p)
+  original = solver._newton_step  # pylint: disable=protected-access
+  calls = [0]
+
+  def failing_newton_step(**kwargs):
+    calls[0] += 1
+    if calls[0] > 3:
+      raise ValueError('synthetic backend failure')
+    return original(**kwargs)
+
+  solver._newton_step = failing_newton_step  # pylint: disable=protected-access
+  solution = solver.solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.FAILED
+  assert np.all(np.isfinite(solution.x))
+
+  solver2 = qtqp.QTQP(a=a, b=b, c=c, z=4, p=p)
+
+  def buggy_newton_step(**kwargs):
+    raise TypeError('programming error must propagate')
+
+  solver2._newton_step = buggy_newton_step  # pylint: disable=protected-access
+  with pytest.raises(TypeError):
+    solver2.solve(verbose=False)
+
+
 def test_solve_for_tau_handles_linear_equation():
   """Near-zero quadratic coefficient should fall back to a linear solve."""
   p = sparse.csc_matrix((1, 1))
