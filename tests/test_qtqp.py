@@ -1085,6 +1085,20 @@ def test_presolve_drops_noisy_infinity_sentinels():
   assert solver.m == 17  # all three rows dropped
   solution = solver.solve(verbose=False)
   assert solution.status == qtqp.SolutionStatus.SOLVED
+def test_symmetry_tolerance_is_relative():
+  """A large-entry symmetric P assembled with roundoff must be accepted:
+  the asymmetry tolerance is relative to max|P|, not absolute."""
+  rng = np.random.default_rng(37)
+  a, b, c, _ = _gen_feasible(20, 12, 3, random_state=rng)
+  q_mat = rng.normal(size=(12, 12)) * 1e8
+  p_dense = q_mat + q_mat.T + np.eye(12) * 1e9
+  # Perturb one entry by an absolute 1e-10 (>> 1e-12 absolute, << relative)
+  p_dense[0, 1] += 1e-10
+  qtqp.QTQP(a=a, b=b, c=c, z=3, p=sparse.csc_matrix(p_dense))  # must not raise
+  # A genuinely asymmetric P at the data scale must still be rejected.
+  p_dense[0, 1] += 1e8
+  with pytest.raises(ValueError, match='symmetric'):
+    qtqp.QTQP(a=a, b=b, c=c, z=3, p=sparse.csc_matrix(p_dense))
 
 
 def test_solve_for_tau_handles_linear_equation():
