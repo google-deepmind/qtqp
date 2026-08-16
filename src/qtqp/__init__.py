@@ -1152,10 +1152,7 @@ class QTQP:
     q, kinv_q = self.q, self.kinv_q
     mu_p = mu ** self._central_path_exponent
 
-    yq = kinv_q[n + self.z :]
-    t_a = mu_p * (1.0 + kinv_q @ kinv_q) + (yq * yq) @ (
-        s[self.z :] / y[self.z :]
-    )
+    t_a = mu_p + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -1163,8 +1160,19 @@ class QTQP:
       # np.stack enables a single pass over P's data and indices, which
       # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
+      t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
       t_c -= max(0.0, kinv_r[:n] @ p_kinv_r)
+    # The expanded t_a keeps algebraic consistency with t_b, t_c computed
+    # from the same (inexact) solves; the Theorem 4.1 positive form is an
+    # identity only at solve accuracy and perturbs tau roots on
+    # refinement-heavy instances if substituted unconditionally. Engage it
+    # only as a rescue when cancellation drives the expanded form to zero.
+    if t_a <= _EPS:
+      yq = kinv_q[n + self.z :]
+      t_a = mu_p * (1.0 + kinv_q @ kinv_q) + (yq * yq) @ (
+          s[self.z :] / y[self.z :]
+      )
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     if abs(t_a) < _EPS:
