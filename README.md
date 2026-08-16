@@ -196,7 +196,7 @@ Key parameters:
     for faster throughput.
     Every iteration also logs `delta_path`, a rigorous a posteriori upper
     bound on the distance from the iterate to the exact central-path point
-    at the current `mu` (from the strong monotonicity of the weighted path
+    at the current `mu` (from the strong monotonicity of the regularized path
     map); it is informative when small, conservative for aggressively
     centered iterates, and saturates at the floating-point floor in the
     final iterations.

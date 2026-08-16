@@ -2869,7 +2869,7 @@ def test_delta_path_logged(equilibration):
 def test_delta_path_small_near_path():
   """A well-converged easy instance certifies proximity mid-flight:
   the minimum delta_path over the trajectory is small relative to the
-  operating ellipsoid diameter."""
+  operating sphere diameter."""
   rng = np.random.default_rng(9100)
   m, n, z = 60, 40, 8
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
@@ -2877,7 +2877,7 @@ def test_delta_path_small_near_path():
       verbose=False, collect_stats=True,
   )
   deltas = [st['delta_path'] for st in sol.stats]
-  diameter = 2.0 * np.sqrt((m - z + 1) / 1e-2)
+  diameter = 2.0 * np.sqrt(m - z + 1)
   assert min(deltas) < 100.0 * diameter
 
 

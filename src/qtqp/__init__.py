@@ -1350,15 +1350,14 @@ class QTQP:
     # convention) hands out slack proportional to a quantity degenerate
     # problems can inflate — near-null directions with enormous c-slope pass
     # such tests while violating the constraints badly (e.g. NETLIB dfl001).
-    # A posteriori distance-to-path certificate. The eps-weighted path map
-    # T_mu is (eps*mu)-strongly monotone, so
-    #     ||u - u*(mu)|| <= ||T_mu(u)|| / (eps*mu)  =: delta_path,
+    # A posteriori distance-to-path certificate. The regularized path map
+    # T_mu is mu-strongly monotone, so
+    #     ||u - u*(mu)|| <= ||T_mu(u)|| / mu  =: delta_path,
     # computable at every iterate. Basically free: the three SpMVs above
     # are reused via diagonal rescaling into the operating scale. The
-    # bound saturates at the floating-point floor once eps*mu approaches
+    # bound saturates at the floating-point floor once mu approaches
     # roundoff of the summands (late endgame); treat large-mu iterates as
     # the informative regime.
-    eps_w = self._regularization_eps
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       se = self.sigma_eq * self.e
       sd = self.sigma_eq * self.d
@@ -1373,9 +1372,9 @@ class QTQP:
     b_op = getattr(self, "_b_op", self.b)
     c_op = getattr(self, "_c_op", self.c)
     t_x = px_w + aty_w + c_op * tau
-    t_x += (eps_w * mu_hat) * x_w
+    t_x += mu_hat * x_w
     t_y = -ax_w + b_op * tau
-    t_y += (eps_w * mu_hat) * y_w
+    t_y += mu_hat * y_w
     t_y[self.z :] -= mu_hat / y_w[self.z :]
     inv_tau_w = 1.0 / max(tau, _EPS)
     t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
@@ -1383,7 +1382,7 @@ class QTQP:
     t_norm = math.sqrt(
         float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
     )
-    stats_i["delta_path"] = t_norm / max(_EPS, eps_w * mu_hat)
+    stats_i["delta_path"] = t_norm / max(_EPS, mu_hat)
 
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
