@@ -1272,12 +1272,11 @@ class QTQP:
       np0 = max(np_poly[0], _EPS)
       ys0 = max(ys[0], _EPS)
 
-    eps = self._regularization_eps
     mz1 = self.m - self.z + 1
     mz = self.m - self.z
     # Along the arc, the normalized duality measure is the ratio of two
-    # exact quartics in alpha: N(a) = y's(a) over the ellipsoid quadratic
-    # Q(a) = eps*(||x||^2 + ||y||^2)(a) + tau_arc(a)^2 (using the arc's
+    # exact quartics in alpha: N(a) = y's(a) over the sphere quadratic
+    # Q(a) = (||x||^2 + ||y||^2)(a) + tau_arc(a)^2 (using the arc's
     # polynomial tau in the normalization). Its stationary points are the
     # roots of N'Q - NQ' -- a degree-7 polynomial, solved exactly via the
     # companion matrix; the exact tau-lift then scores the few candidates.
@@ -1286,7 +1285,7 @@ class QTQP:
           2.0 * tau * d2t + d1t * d1t, 2.0 * d1t * d2t, d2t * d2t]
     pp = np.polynomial.polynomial
     n_poly = np.array(ys)
-    q_poly = eps * (np.array(xx) + np.array(yy)) + np.array(tt)
+    q_poly = np.array(xx) + np.array(yy) + np.array(tt)
     stat = pp.polysub(pp.polymul(pp.polyder(n_poly), q_poly),
                       pp.polymul(n_poly, pp.polyder(q_poly)))
     # Candidates: the exact stationary points of the normalized measure,
@@ -1333,7 +1332,7 @@ class QTQP:
       tau_a = (lin + math.sqrt(disc)) / (2.0 * mu)
       if not np.isfinite(tau_a) or tau_a <= 1e-12:
         continue
-      quad = eps * (_poly(xx, a_c) + _poly(yy, a_c)) + tau_a * tau_a
+      quad = _poly(xx, a_c) + _poly(yy, a_c) + tau_a * tau_a
       mu_a = (mz1 / max(_EPS, quad)) * ys_a / mz
       score = m_a if merit else mu_a
       if best is None or score < best[0]:
@@ -1372,7 +1371,7 @@ class QTQP:
         if disc_pr >= 0.0:
           tau_pr = (lin_pr + math.sqrt(disc_pr)) / (2.0 * mu)
         if tau_pr is not None and np.isfinite(tau_pr) and tau_pr > 1e-12:
-          quad_pr = eps * (_poly(xx, a_probe) + _poly(yy, a_probe)) + tau_pr ** 2
+          quad_pr = _poly(xx, a_probe) + _poly(yy, a_probe) + tau_pr ** 2
           mu_probe = (mz1 / max(_EPS, quad_pr)) * ys_probe / mz
           sigma_pr = float(np.clip((mu_probe / max(_EPS, mu)) ** 3, 0.0, 1.0))
           # Target-matched anchor: the corrector's surrogate should
@@ -1426,10 +1425,10 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
-    The weighted central-path equation contributes the eps*(mu - mu_target)
-    coefficient on the (x, y) linear-residual side and (mu - mu_target) on
-    tau; cone-product corrections (s_i * y_i = mu_target, tau * kappa =
-    mu_target) keep the unmodified mu_target.
+    The regularized central-path equation contributes the (mu - mu_target)
+    coefficient on the linear-residual side; cone-product corrections
+    (s_i * y_i = mu_target, tau * kappa = mu_target) keep the unmodified
+    mu_target.
 
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
     linearized fallback (avoids squaring solver noise) when it's noisy or the
@@ -1588,10 +1587,10 @@ class QTQP:
     like x/tau and y/tau matter — tau is the homogeneous variable, and the final
     solution is recovered as (x/tau, y/tau, s/tau).
 
-    We enforce the invariant of the weighted central path (the Euler identity
-    for the linear term mu * diag(eps*I, eps*I, 1) * u), which ensures
-    convergence to a non-trivial solution:
-        eps * ||(x, y)||^2 + tau^2 = m - z + 1
+    We enforce the invariant of the regularized central path (the Euler
+    identity for the linear term mu * u), which ensures convergence to a
+    non-trivial solution:
+        ||(x, y)||^2 + tau^2 = m - z + 1
     The right-hand side counts complementarity pairs: (m - z) from the
     inequality constraints plus 1 for the tau-kappa pair of the embedding.
 
