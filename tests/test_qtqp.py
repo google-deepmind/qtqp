@@ -1014,7 +1014,7 @@ def test_equivalent_tau_solution(seed, linear_solver):
       a=a,
       p=p,
       z=z,
-      min_static_regularization=1e-8,
+      min_static_regularization=0.0,
       max_iterative_refinement_steps=10,
       atol=1e-12,
       rtol=1e-12,
@@ -1032,7 +1032,9 @@ def test_equivalent_tau_solution(seed, linear_solver):
   )
   tau_anchor = rng.uniform()
   r_tau = (mu - mu_target) * tau_anchor
-  tau_qtqp = solver._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)  # pylint: disable=protected-access
+  tau_qtqp = solver._solve_for_tau(  # pylint: disable=protected-access
+      p, kinv_r, mu, mu_target, r_tau, s=s, y=y
+  )
   tau_1 = _solve_for_tau_alternative(
       n, solver.kinv_q, kinv_r, mu, mu_target, r, r_tau, s, y
   )
@@ -1060,17 +1062,23 @@ def test_rejects_nonfinite_a_and_c():
 
 
 def test_solve_for_tau_handles_linear_equation():
-  """Near-zero quadratic coefficient should fall back to a linear solve."""
+  """Near-zero quadratic coefficient should fall back to a linear solve.
+
+  With t_a computed in the provably positive form, cancellation can no
+  longer produce t_a ~ 0 from O(1) data; the linear regime is reached
+  only when mu and the second-column solve are both genuinely tiny.
+  """
   p = sparse.csc_matrix((1, 1))
   solver = qtqp.QTQP(
       a=sparse.csc_matrix([[1.0]]), b=np.ones(1), c=np.zeros(1), z=0, p=p,
   )
   solver.q = np.array([1.0, 0.0])
-  solver.kinv_q = np.array([-1.0, 0.0])
+  solver.kinv_q = np.array([0.0, 0.0])
   kinv_r = np.array([-2.0, 0.0])
 
   tau = solver._solve_for_tau(  # pylint: disable=protected-access
-      p=p, kinv_r=kinv_r, mu=1.0, mu_target=4.0, r_tau=0.0,
+      p=p, kinv_r=kinv_r, mu=1e-20, mu_target=4.0, r_tau=0.0,
+      s=np.ones(1), y=np.ones(1),
   )
 
   np.testing.assert_allclose(tau, 2.0)

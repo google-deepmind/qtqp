@@ -1095,7 +1095,9 @@ class QTQP:
     if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
         r_tau = (mu_p - mu_target_p) * tau_anchor
-        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+        tau_plus = self._solve_for_tau(
+            p, kinv_r, mu, mu_target, r_tau, s=s, y=y
+        )
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
         logging.debug("Primary tau solve failed; falling back to linearized.")
@@ -1112,7 +1114,7 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, *, s, y) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -1132,11 +1134,28 @@ class QTQP:
     it comes from the cone-product equation tau * kappa = mu_target.
     """
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
+    #
+    # t_a is computed in the provably positive form from the Theorem 4.1
+    # proof: with (x'', y'') = kinv_q the second-column solve,
+    #     t_a = mu^p (1 + ||x''||^2 + ||y''||^2) + y''^T H y'',
+    # where H = diag(s/y) on the inequality block (zero on equality
+    # rows). The algebraically equivalent expanded form
+    # mu^p + kinv_q'q - x''^T P x'' subtracts x''^T P x'' from a quantity
+    # that dominates it, so on P-heavy problems roundoff could drive t_a
+    # negative or tiny -- the failure mode behind the negative-discriminant
+    # and linearized-fallback paths. The positive form is a sum of
+    # nonnegative terms, so t_a > 0 by construction. Similarly clamping
+    # the P-quadratic form in t_c at zero guarantees t_c <= -mu_target
+    # <= 0, making the discriminant t_b^2 - 4 t_a t_c >= t_b^2
+    # nonnegative by construction.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
     mu_p = mu ** self._central_path_exponent
 
-    t_a = mu_p + kinv_q @ q
+    yq = kinv_q[n + self.z :]
+    t_a = mu_p * (1.0 + kinv_q @ kinv_q) + (yq * yq) @ (
+        s[self.z :] / y[self.z :]
+    )
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -1144,9 +1163,8 @@ class QTQP:
       # np.stack enables a single pass over P's data and indices, which
       # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
-      t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-      t_c -= kinv_r[:n] @ p_kinv_r
+      t_c -= max(0.0, kinv_r[:n] @ p_kinv_r)
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     if abs(t_a) < _EPS:
