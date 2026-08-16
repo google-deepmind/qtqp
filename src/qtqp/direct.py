@@ -531,8 +531,13 @@ class DirectKktSolver:
 
       # New Givens rotation to zero out h[j+1, j].
       rho = float(np.hypot(h[j, j], h[j + 1, j]))
-      cs[j] = h[j, j] / rho
-      sn[j] = h[j + 1, j] / rho
+      if rho == 0.0:
+        # Breakdown with a zero pivot: both entries vanish, so the
+        # rotation is arbitrary; the identity keeps everything finite.
+        cs[j], sn[j] = 1.0, 0.0
+      else:
+        cs[j] = h[j, j] / rho
+        sn[j] = h[j + 1, j] / rho
       h[j, j] = rho
       h[j + 1, j] = 0.0
 
