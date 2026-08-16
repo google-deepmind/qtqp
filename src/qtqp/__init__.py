@@ -284,6 +284,8 @@ class QTQP:
     # Input validation
     if not sp.isspmatrix_csc(a):
       raise TypeError("Constraint matrix 'a' must be in CSC format.")
+    if not np.all(np.isfinite(a.data)):
+      raise ValueError("Constraint matrix 'a' must contain only finite values.")
     self.a = a
 
     self.b = np.array(b, dtype=np.float64)
@@ -293,6 +295,8 @@ class QTQP:
     self.c = np.array(c, dtype=np.float64)
     if self.c.shape != (self.n,):
       raise ValueError(f"c must have shape ({self.n},), got {self.c.shape}")
+    if not np.all(np.isfinite(self.c)):
+      raise ValueError("Cost vector 'c' must contain only finite values.")
 
     if self.z < 0 or self.z > self.m:
       raise ValueError(

@@ -1059,6 +1059,21 @@ def test_equivalent_tau_solution(seed, linear_solver):
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
 
 
+def test_rejects_nonfinite_a_and_c():
+  """NaN/inf in a.data or c must be rejected at construction, not surface
+  later as a cryptic linear-solver failure."""
+  rng = np.random.default_rng(31)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  a_bad = a.copy()
+  a_bad.data[0] = np.nan
+  with pytest.raises(ValueError, match="'a'"):
+    qtqp.QTQP(a=a_bad, b=b, c=c, z=3, p=p)
+  c_bad = c.copy()
+  c_bad[0] = np.inf
+  with pytest.raises(ValueError, match="'c'"):
+    qtqp.QTQP(a=a, b=b, c=c_bad, z=3, p=p)
+
+
 def test_solve_for_tau_handles_linear_equation():
   """Near-zero quadratic coefficient should fall back to a linear solve."""
   p = sparse.csc_matrix((1, 1))
