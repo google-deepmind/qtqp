@@ -1798,14 +1798,12 @@ def test_equilibrate_unequilibrate_roundtrip(strategy):
 # _normalize invariant
 # =============================================================================
 
-@pytest.mark.parametrize('eps', [1e-4, 1e-2, 1.0])
-def test_normalize_invariant(eps):
-  """_normalize enforces eps * ||(x,y)||^2 + tau^2 == m - z + 1."""
+def test_normalize_invariant():
+  """_normalize enforces ||(x,y)||^2 + tau^2 == m - z + 1."""
   rng = np.random.default_rng(42)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver._regularization_eps = eps  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.normal(size=m)
@@ -1814,7 +1812,7 @@ def test_normalize_invariant(eps):
 
   x_n, y_n, tau_n, _ = solver._normalize(x, y, tau, s)  # pylint: disable=protected-access
 
-  quad = eps * (x_n @ x_n + y_n @ y_n) + tau_n ** 2
+  quad = x_n @ x_n + y_n @ y_n + tau_n ** 2
   np.testing.assert_allclose(quad, m - z + 1, atol=1e-12, rtol=1e-12)
 
 
@@ -2901,73 +2899,6 @@ def test_centrality_correctors_infeasible_unbounded():
       max_centrality_correctors=2, verbose=False
   )
   _assert_unbounded(sol, a, c, p, 5)
-
-
-# =============================================================================
-# regularization_eps: eps-weighted central path
-# =============================================================================
-
-@pytest.mark.parametrize('regularization_eps', [1e-4, 1e-2, 0.1, 1.0])
-@pytest.mark.parametrize('seed', 6000 + np.arange(3))
-def test_regularization_eps_solve(regularization_eps, seed):
-  """All eps in (0, 1] must converge to the same optimal solution."""
-  rng = np.random.default_rng(seed)
-  m, n, z = 60, 40, 8
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      regularization_eps=regularization_eps, verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, z)
-
-
-def test_regularization_eps_solutions_agree():
-  """Different eps values converge to the same QP optimum (within tol)."""
-  rng = np.random.default_rng(6200)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  objs = []
-  for eps in (1e-4, 1e-2, 0.1, 1.0):
-    sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        regularization_eps=eps, verbose=False
-    )
-    _assert_solution(sol, a, b, c, p, z)
-    objs.append(c @ sol.x + 0.5 * sol.x @ p @ sol.x)
-  ref = objs[1]  # the default eps = 1e-2 case is the reference
-  for obj in objs:
-    np.testing.assert_allclose(obj, ref, atol=1e-5, rtol=1e-5)
-
-
-@pytest.mark.parametrize(
-    'bad_value', [0.0, -1.0, 1.5, float('nan'), float('inf')]
-)
-def test_regularization_eps_rejects_invalid(bad_value):
-  """eps outside (0, 1] or non-finite must raise."""
-  rng = np.random.default_rng(6300)
-  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
-  with pytest.raises(ValueError, match='regularization_eps'):
-    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
-        regularization_eps=bad_value, verbose=False
-    )
-
-
-def test_regularization_eps_infeasible():
-  """The weighted path must still detect primal infeasibility."""
-  rng = np.random.default_rng(6400)
-  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      regularization_eps=1e-2, verbose=False
-  )
-  _assert_infeasible(solution, a, b, 5)
-
-
-def test_regularization_eps_unbounded():
-  """The weighted path must still detect primal unboundedness."""
-  rng = np.random.default_rng(6500)
-  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      regularization_eps=1e-2, verbose=False
-  )
-  _assert_unbounded(solution, a, c, p, 5)
 
 
 # =============================================================================
