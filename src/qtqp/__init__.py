@@ -1267,7 +1267,7 @@ class QTQP:
     if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
         r_tau = (mu - mu_target) * tau_anchor
-        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau, s=s, y=y)
+        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
         logging.debug("Primary tau solve failed; falling back to linearized.")
@@ -1284,7 +1284,7 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, *, s, y) -> float:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -1322,18 +1322,7 @@ class QTQP:
       p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
       t_a -= kinv_q[:n] @ p_kinv_q
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
-      t_c -= max(0.0, kinv_r[:n] @ p_kinv_r)
-    # The expanded t_a keeps algebraic consistency with t_b, t_c computed
-    # from the same (inexact) solves. The Theorem 4.1 positive form
-    # mu (1 + ||kinv_q||^2) + y''^T diag(s/y) y'' is exact only at solve
-    # accuracy; substituting it unconditionally perturbs tau roots on
-    # refinement-heavy instances. Use it only as a rescue when
-    # cancellation actually drives the expanded form nonpositive.
-    if t_a <= _EPS:
-      yq = kinv_q[n + self.z :]
-      t_a = mu * (1.0 + kinv_q @ kinv_q) + (yq * yq) @ (
-          s[self.z :] / y[self.z :]
-      )
+      t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
 
     if abs(t_a) < _EPS:
