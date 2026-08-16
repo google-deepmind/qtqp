@@ -169,7 +169,6 @@ solve(
         qtqp.RefinementStrategy.RICHARDSON
     ),
     gmres_restart: int = 10,
-    regularization_eps: float = 1e-2,
     fused_corrector_division: bool = False,
     max_centrality_correctors: int = 1,
     arc_search: bool = False,
@@ -204,9 +203,6 @@ Key parameters:
     solves. Defaults to `qtqp.RefinementStrategy.RICHARDSON`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
     Ignored by Richardson refinement.
--   `regularization_eps`: Weight in (0, 1] on the (x, y) blocks of the central
-    path's regularization term. The default `1e-2` is the validated weighted
-    path; `1.0` recovers the unweighted regularized path.
 -   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
     update with one fused division. The default False preserves legacy
     arithmetic.
@@ -249,17 +245,12 @@ Choose one with the `refinement_strategy` argument:
 
 #### Advanced numerical options
 
--   `regularization_eps`: The central path's linear regularization term is
-    `mu * diag(eps*I, eps*I, 1) * u`, giving KKT diagonal shifts of `eps*mu`
-    and iterates normalized onto the ellipsoid
-    `eps*||(x,y)||^2 + tau^2 = m - z + 1`. Smaller `eps` cuts the
-    path-induced residual and duality-gap bias by `eps` (important on
-    problems with large solution norms), at the price of a weaker
-    strong-monotonicity modulus and infeasibility certificates bounded at
-    scale `1/sqrt(eps)`. Termination scales include the iterate norms
-    `||x||/tau`, `||y||/tau` (and their sum for the gap), so acceptance is a
-    backward-error criterion consistent with the perturbation the path
-    itself commits.
+-   Termination scales include the iterate norms `||x||/tau`, `||y||/tau`
+    (and their sum for the duality gap), so acceptance is a backward-error
+    criterion consistent with the `mu`-scale perturbation the regularized
+    path itself commits: residuals are judged against the larger of the
+    floating-point measurement floor of their summands and the perturbation
+    allowance of the path.
 -   `fused_corrector_division`: Fuses the corrector slack numerator before
     dividing by `y[z:]`. This is useful when small `y` components make the
     legacy three-division form vulnerable to cancellation.
