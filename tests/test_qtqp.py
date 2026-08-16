@@ -1072,6 +1072,19 @@ def test_rejects_nonfinite_a_and_c():
   c_bad[0] = np.inf
   with pytest.raises(ValueError, match="'c'"):
     qtqp.QTQP(a=a, b=b, c=c_bad, z=3, p=p)
+def test_presolve_drops_noisy_infinity_sentinels():
+  """Bounds within representation noise of the 1e20 infinity sentinel
+  (ULP or float32 storage error) must be dropped like the exact value."""
+  rng = np.random.default_rng(47)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  b_noisy = b.copy()
+  b_noisy[5] = 9.999999999999998e19   # ULP-corrupted sentinel
+  b_noisy[6] = np.float64(np.float32(1e20))  # float32-stored sentinel
+  b_noisy[7] = 1e20                   # exact sentinel
+  solver = qtqp.QTQP(a=a, b=b_noisy, c=c, z=3, p=p)
+  assert solver.m == 17  # all three rows dropped
+  solution = solver.solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
 
 
 def test_solve_for_tau_handles_linear_equation():
