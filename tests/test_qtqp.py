@@ -2881,6 +2881,40 @@ def test_delta_path_local_logged(equilibration):
   assert all(np.isfinite(v) and v > 0 for v in lams)
 
 
+def test_warm_start_same_problem_accepted_and_fast():
+  """Re-solving from a solution certifies near-path and cuts iterations."""
+  rng = np.random.default_rng(9400)
+  m, n, z = 80, 50, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  cold = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False, collect_stats=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, collect_stats=True, warm_start=(sol.x, sol.y, sol.s)
+  )
+  _assert_solution(warm, a, b, c, p, z)
+  assert solver.warm_accepted
+  assert solver.warm_lambda < 10.0
+  assert len(warm.stats) < len(cold.stats)
+
+
+def test_warm_start_junk_vetoed():
+  """A junk warm point is vetoed by the certificate; solve falls back to
+  the trivial init and still converges."""
+  rng = np.random.default_rng(9500)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  junk = (1e12 * rng.normal(size=n), 1e12 * rng.normal(size=m),
+          np.abs(rng.normal(size=m)))
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, collect_stats=True, warm_start=junk,
+      warm_start_threshold=10.0,
+  )
+  _assert_solution(warm, a, b, c, p, z)
+  assert not solver.warm_accepted
+
+
 def test_lambda_init_logged():
   """lambda_init is computed at the initial point and surfaced in stats."""
   rng = np.random.default_rng(9300)
