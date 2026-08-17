@@ -63,6 +63,13 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
 # touch the floor.
 _MU_FLOOR = 1e-14
+# ALMOST_SOLVED acceptance constants: on HIT_MAX_ITER, the best iterate
+# over the trajectory (min over iterations of the max normalized
+# residual) is returned with status ALMOST_SOLVED when it meets the
+# same criteria form at these looser tolerances. SOLVED semantics are
+# unchanged and unambiguous.
+_ALMOST_ATOL = 1e-6
+_ALMOST_RTOL = 1e-6
 
 
 class LinearSolver(enum.Enum):
@@ -147,6 +154,7 @@ class SolutionStatus(enum.Enum):
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
   HIT_MAX_ITER = "hit_max_iter"
+  ALMOST_SOLVED = "almost_solved"
   FAILED = "failed"
   UNFINISHED = "unfinished"
 
@@ -497,8 +505,8 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -555,8 +563,8 @@ class QTQP:
   def _solve_impl(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -736,6 +744,8 @@ class QTQP:
         init_strategy, init_mu_scale, a, p, b, c
     )
     status = SolutionStatus.UNFINISHED
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
 
     # Certified warm start: ingest a caller-supplied (x, y, s) from a
     # nearby problem, embed it interior at a few centering shifts, and
@@ -991,6 +1001,12 @@ class QTQP:
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
       case SolutionStatus.HIT_MAX_ITER:
+        if self._best_almost_score <= 1.0:
+          self._log_footer("Almost solved (best iterate)")
+          bx, by, bs, btau = self._best_almost_iterate
+          x, y, s = bx / btau, by / btau, bs / btau
+          y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
+          return Solution(x, y, s, stats, SolutionStatus.ALMOST_SOLVED)
         self._log_footer("Hit maximum iterations")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
@@ -1533,6 +1549,19 @@ class QTQP:
         min(abs(pcost), abs(dcost)),
         (norm_x + norm_y) * inv_tau,
     )
+
+    # Track the best iterate seen, scored by the max normalized residual
+    # at the ALMOST_SOLVED thresholds (same criteria form, looser
+    # constants). Used to return an honestly-labeled near-solution when
+    # the iteration cap is reached without meeting the SOLVED contract.
+    almost_score = max(
+        gap / (_ALMOST_ATOL + _ALMOST_RTOL * gaprelrhs),
+        pres / (_ALMOST_ATOL + _ALMOST_RTOL * prelrhs),
+        dres / (_ALMOST_ATOL + _ALMOST_RTOL * drelrhs),
+    )
+    if almost_score < self._best_almost_score:
+      self._best_almost_score = almost_score
+      self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
