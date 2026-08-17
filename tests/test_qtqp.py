@@ -1059,6 +1059,35 @@ def test_equivalent_tau_solution(seed, linear_solver):
   np.testing.assert_allclose(tau_1, tau_2, atol=1e-11, rtol=1e-11)
 
 
+def test_default_tolerances_are_1e9():
+  import inspect
+  sig = inspect.signature(qtqp.QTQP.solve)
+  assert sig.parameters['atol'].default == 1e-9
+  assert sig.parameters['rtol'].default == 1e-9
+
+
+def test_almost_solved_near_cap():
+  """Capping one iteration below the solve count returns the best iterate
+  with ALMOST_SOLVED (it meets the 1e-6 criteria form), while a very early
+  cap still returns HIT_MAX_ITER."""
+  rng = np.random.default_rng(9600)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  full = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(collect_stats=True, **kw)
+  assert full.status == qtqp.SolutionStatus.SOLVED
+  n_it = len(full.stats)
+  near = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=n_it - 1, **kw)
+  assert near.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  # The returned best iterate is a genuine near-solution.
+  sv = b - a @ near.x
+  pres = max(np.max(np.abs(sv[:z]), initial=0.0),
+             np.max(np.maximum(-sv[z:], 0.0), initial=0.0))
+  assert pres < 1e-4 * (1 + np.max(np.abs(b)))
+  early = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=2, **kw)
+  assert early.status == qtqp.SolutionStatus.HIT_MAX_ITER
+
+
 def test_solve_for_tau_handles_linear_equation():
   """Near-zero quadratic coefficient should fall back to a linear solve."""
   p = sparse.csc_matrix((1, 1))
