@@ -281,9 +281,10 @@ This method will return a `qtqp.Solution` object, with fields:
     `UNBOUNDED`, `ALMOST_SOLVED`, `HIT_MAX_ITER`, `FAILED`.
     `ALMOST_SOLVED` is returned in place of `HIT_MAX_ITER` when the best
     iterate over the trajectory (by max normalized residual) meets the
-    solved-criteria form at the looser `1e-6` tolerances: the returned
-    solution is that best iterate, honestly labeled as not meeting the
-    full `SOLVED` contract. `SOLVED` semantics are unchanged.
+    solved-criteria form at tolerances `1000x` looser than the requested
+    `atol`/`rtol` (so `1e-6` at the defaults): the returned solution is
+    that best iterate, honestly labeled as not meeting the full `SOLVED`
+    contract. `SOLVED` semantics are unchanged.
 -   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
     `collect_stats=True`. When enabled, includes primal/dual objective,
     residuals, gap, mu, elapsed time, and complementarity statistics.

@@ -63,13 +63,14 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
 # touch the floor.
 _MU_FLOOR = 1e-14
-# ALMOST_SOLVED acceptance constants: on HIT_MAX_ITER, the best iterate
-# over the trajectory (min over iterations of the max normalized
-# residual) is returned with status ALMOST_SOLVED when it meets the
-# same criteria form at these looser tolerances. SOLVED semantics are
-# unchanged and unambiguous.
-_ALMOST_ATOL = 1e-6
-_ALMOST_RTOL = 1e-6
+# ALMOST_SOLVED acceptance: on HIT_MAX_ITER, the best iterate over the
+# trajectory (min over iterations of the max normalized residual) is
+# returned with status ALMOST_SOLVED when it meets the same criteria
+# form at tolerances this factor looser than the user-requested
+# atol/rtol (at the 1e-9 defaults: 1e-6). Relative to the request, so
+# the label keeps its meaning at any tolerance setting. SOLVED
+# semantics are unchanged and unambiguous.
+_ALMOST_FACTOR = 1000.0
 
 
 class LinearSolver(enum.Enum):
@@ -1554,10 +1555,12 @@ class QTQP:
     # at the ALMOST_SOLVED thresholds (same criteria form, looser
     # constants). Used to return an honestly-labeled near-solution when
     # the iteration cap is reached without meeting the SOLVED contract.
+    almost_atol = _ALMOST_FACTOR * self.atol
+    almost_rtol = _ALMOST_FACTOR * self.rtol
     almost_score = max(
-        gap / (_ALMOST_ATOL + _ALMOST_RTOL * gaprelrhs),
-        pres / (_ALMOST_ATOL + _ALMOST_RTOL * prelrhs),
-        dres / (_ALMOST_ATOL + _ALMOST_RTOL * drelrhs),
+        gap / (almost_atol + almost_rtol * gaprelrhs),
+        pres / (almost_atol + almost_rtol * prelrhs),
+        dres / (almost_atol + almost_rtol * drelrhs),
     )
     if almost_score < self._best_almost_score:
       self._best_almost_score = almost_score
