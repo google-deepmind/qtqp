@@ -334,6 +334,11 @@ class QTQP:
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
+    # Defaults so _check_termination works in tests that call it
+    # directly before solve() has initialized the tracking state.
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
+
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
