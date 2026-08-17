@@ -16,11 +16,12 @@
 """Interior point method for solving QPs.
 
   Algorithm: Mehrotra predictor-corrector interior point method with a
-  homogeneous embedding, following the regularized central path
-  (linear term mu * u). Each iteration does:
+  homogeneous embedding, following the eps-weighted regularized central path
+  (linear term mu * diag(eps*I, eps*I, 1) * u; eps = 1 is the unweighted
+  path). Each iteration does:
 
-    1. Normalize (x, y, tau, s) onto the path's sphere
-       ||(x, y)||^2 + tau^2 = m - z + 1.
+    1. Normalize (x, y, tau, s) onto the weighted path's ellipsoid
+       eps*||(x, y)||^2 + tau^2 = m - z + 1.
     2. Pre-solve K^{-1} @ [c; b] (shared between predictor and corrector steps).
     3. Predictor step: Newton direction with mu_target=0 (no centering).
     4. Compute sigma (centering parameter) from predictor step quality.
@@ -339,6 +340,10 @@ class QTQP:
     # directly before solve() has initialized the tracking state.
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
+    # Default weight so path internals work in tests that call them directly
+    # before solve() has overridden the attribute. 1.0 is the unweighted
+    # (classical regularized) path and the solve() default.
+    self._regularization_eps = 1.0
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -530,6 +535,7 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      regularization_eps: float = 1.0,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -557,6 +563,7 @@ class QTQP:
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
+          regularization_eps=regularization_eps,
           fused_corrector_division=fused_corrector_division,
           max_centrality_correctors=max_centrality_correctors,
           warm_start=warm_start,
@@ -588,6 +595,7 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      regularization_eps: float = 1.0,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -645,6 +653,16 @@ class QTQP:
         inner Arnoldi step consumes one factor-solve. Smaller values reduce
         per-cycle cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
+      regularization_eps (float): Weight eps in (0, 1] on the (x, y) blocks
+        of the central path's linear regularization term mu * diag(eps*I,
+        eps*I, 1) * u (cone products s_i * y_i = mu and tau * kappa = mu are
+        unweighted). The path lives on the ellipsoid eps*||(x,y)||^2 +
+        tau^2 = m - z + 1; smaller eps cuts the path-induced KKT residual
+        and duality-gap bias by eps at the cost of a weaker strong-
+        monotonicity modulus eps*mu and infeasibility certificates bounded
+        at scale 1/sqrt(eps). The default 1.0 is the unweighted regularized
+        path (EXPERIMENTAL: non-default values under re-evaluation at the
+        1e-9 default tolerances).
       fused_corrector_division (bool): If True, compute the corrector
         slack update via a single division by y[z:] with the three
         numerator terms (sigma*mu, the Mehrotra cross product, and
@@ -684,6 +702,12 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
+    if not (np.isfinite(regularization_eps) and 0 < regularization_eps <= 1):
+      raise ValueError(
+          "regularization_eps must be a finite float in (0, 1], got"
+          f" {regularization_eps}."
+      )
+    self._regularization_eps = float(regularization_eps)
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -815,9 +839,13 @@ class QTQP:
         x, y, tau, s = self._normalize(x, y, tau, s)
 
         mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
+        # Weighted central path: the linear term is mu * diag(eps*I, eps*I, 1)
+        # * u, so the KKT diagonal shift on the x and y blocks is eps*mu.
+        # Cone-product targets (s*y = mu, tau*kappa = mu) keep the plain mu.
+        eps_mu = self._regularization_eps * mu
 
         # --- Take an IPM step ---
-        self._linear_solver.update(mu=mu, s=s, y=y)
+        self._linear_solver.update(mu=eps_mu, s=s, y=y)
 
         # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
         # This is reused for both predictor and corrector parts of the step.
@@ -1218,10 +1246,11 @@ class QTQP:
     s_aff = s + alpha * d_s
 
     # Compute mu_aff directly without calling _normalize to avoid 4 extra
-    # allocations. Equivalent to: normalize onto the path sphere
-    # (||u||^2 = m-z+1) then compute (y @ s) / (m - z);
+    # allocations. Equivalent to: normalize onto the weighted-path ellipsoid
+    # (eps*||(x,y)||^2 + tau^2 = m-z+1) then compute (y @ s) / (m - z);
     # normalization scales y and s each by `scale`, so mu picks up scale^2.
-    quad_aff = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
+    eps = self._regularization_eps
+    quad_aff = eps * (x_aff @ x_aff + y_aff @ y_aff) + tau_aff * tau_aff
     scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, quad_aff)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
@@ -1254,7 +1283,9 @@ class QTQP:
     quadratic residual check fails.
     """
     # Prepare RHS for the linear system.
-    r = (mu - mu_target) * r_anchor
+    # The (x, y) blocks of the weighted path's linear term carry the eps
+    # weight; the cone rows below are barrier terms and stay unweighted.
+    r = (self._regularization_eps * (mu - mu_target)) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -1420,7 +1451,8 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    quad = x @ x + y @ y + tau * tau
+    eps = self._regularization_eps
+    quad = eps * (x @ x + y @ y) + tau * tau
     scale = math.sqrt((self.m - self.z + 1) / max(_EPS, quad))
     x *= scale
     y *= scale
@@ -1502,9 +1534,9 @@ class QTQP:
     b_op = getattr(self, "_b_op", self.b)
     c_op = getattr(self, "_c_op", self.c)
     t_x = px_w + aty_w + c_op * tau
-    t_x += mu_hat * x_w
+    t_x += self._regularization_eps * mu_hat * x_w
     t_y = -ax_w + b_op * tau
-    t_y += mu_hat * y_w
+    t_y += self._regularization_eps * mu_hat * y_w
     t_y[self.z :] -= mu_hat / y_w[self.z :]
     inv_tau_w = 1.0 / max(tau, _EPS)
     t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
@@ -1519,8 +1551,8 @@ class QTQP:
     # certificate conservative on aggressively centered iterates
     # (Newton-decrement flavor), and remains informative for aggressive
     # iterates where the Euclidean bound saturates.
-    h_x = mu_hat
-    h_y = np.full(self.m, mu_hat)
+    h_x = self._regularization_eps * mu_hat
+    h_y = np.full(self.m, self._regularization_eps * mu_hat)
     h_y[self.z :] += mu_hat / (y_w[self.z :] * y_w[self.z :])
     h_tau = mu_hat + mu_hat / max(_EPS, tau * tau)
     lam_sq = (
