@@ -63,13 +63,14 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
 # touch the floor.
 _MU_FLOOR = 1e-14
-# ALMOST_SOLVED acceptance: on HIT_MAX_ITER, the best iterate over the
-# trajectory (min over iterations of the max normalized residual) is
-# returned with status ALMOST_SOLVED when it meets the same criteria
-# form at tolerances this factor looser than the user-requested
-# atol/rtol (at the 1e-9 defaults: 1e-6). Relative to the request, so
-# the label keeps its meaning at any tolerance setting. SOLVED
-# semantics are unchanged and unambiguous.
+# ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown of
+# the linear solver, the best iterate over the trajectory (min over
+# iterations of the max normalized residual) is returned with status
+# ALMOST_SOLVED when it meets the same criteria form at tolerances this
+# factor looser than the user-requested atol/rtol (at the 1e-9
+# defaults: 1e-6). Relative to the request, so the label keeps its
+# meaning at any tolerance setting. SOLVED semantics are unchanged and
+# unambiguous.
 _ALMOST_FACTOR = 1000.0
 
 
@@ -806,182 +807,192 @@ class QTQP:
 
     # --- Main Iteration Loop ---
     # self.it counts IPM steps already taken.
-    for self.it in range(max_iter):
-      stats_i = {}
-      if self.it == 0:
-        stats_i["lambda_init"] = self.lambda_init
-      x, y, tau, s = self._normalize(x, y, tau, s)
+    try:
+      for self.it in range(max_iter):
+        stats_i = {}
+        if self.it == 0:
+          stats_i["lambda_init"] = self.lambda_init
+        x, y, tau, s = self._normalize(x, y, tau, s)
 
-      mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
+        mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
 
-      # --- Take an IPM step ---
-      self._linear_solver.update(mu=mu, s=s, y=y)
+        # --- Take an IPM step ---
+        self._linear_solver.update(mu=mu, s=s, y=y)
 
-      # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
-      # This is reused for both predictor and corrector parts of the step.
-      self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.kinv_q
-      )
-      stats_i["q_lin_sys_stats"] = q_lin_sys_stats
-
-      # --- Step 2: Predictor (Affine) Step ---
-      # Solve KKT with mu_target = 0 to find pure Newton direction.
-      xy[: self.n] = x
-      xy[self.n :] = y
-      x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
-          p=p,
-          mu=mu,
-          mu_target=0.0,
-          r_anchor=xy,
-          tau_anchor=tau,
-          x=x,
-          y=y,
-          s=s,
-          tau=tau,
-          correction=None,
-      )
-      stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
-
-      d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-      # Predictor slack step from the linearized complementarity condition with
-      # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
-      d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
-
-      # Pre-compute the Mehrotra cross term in un-divided form only when the
-      # fused-corrector path will consume it (otherwise stay on the legacy
-      # `-d_s * d_y_p / y` formulation verbatim).
-      if self._fused_corrector_division:
-        cross_p = d_s[self.z :] * d_y_p[self.z :]
-
-      # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
-      sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
-      )
-
-      # --- Step 3: Corrector Step ---
-      # Mehrotra's second-order correction accounts for the nonlinear cross-term
-      # that the predictor's linear approximation ignores. Expanding the full
-      # complementarity condition to second order:
-      #   (y + d_y)(s + d_s) = sigma*mu
-      #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
-      # The predictor solved the linearized version (dropping d_y*d_s). Here we
-      # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
-      # (divided by y because the KKT complementarity block is scaled by 1/y),
-      # so the corrector step can incorporate it to land closer to the target.
-      if self._fused_corrector_division:
-        correction = -cross_p / y[self.z :]
-      else:
-        correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
-      xy[: self.n] = x_p
-      xy[self.n :] = y_p
-      x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-          p=p,
-          mu=mu,
-          mu_target=sigma * mu,
-          r_anchor=xy,
-          tau_anchor=tau_p,
-          x=x,
-          y=y,
-          s=s,
-          tau=tau,
-          correction=correction,
-      )
-      stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
-
-      # --- Step 4: Update Iterates ---
-      d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      if self._fused_corrector_division:
-        # Combined-numerator corrector slack step. Algebraically equivalent
-        # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
-        # numerator before the single division by y[z:], avoiding
-        # catastrophic cancellation when y_i is small and the three terms
-        # have similar magnitudes with opposing signs.
-        d_s[self.z :] = (
-            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
-        ) / y[self.z :]
-      else:
-        # Legacy three-division formula.
-        d_s[self.z :] = (
-            sigma * mu / y[self.z :]
-            + correction
-            - y_c[self.z :] * s[self.z :] / y[self.z :]
+        # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
+        # This is reused for both predictor and corrector parts of the step.
+        self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
+            rhs=self.q, warm_start=self.kinv_q
         )
+        stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
-      alpha = self._compute_step_size(y, s, d_y, d_s)
-
-      # --- Gondzio multiple centrality correctors ---
-      # Each extra corrector costs one back-solve on the existing
-      # factorization (kinv_q is shared): push the aspirational trial
-      # point's outlier complementarity products back into a symmetric
-      # neighborhood of the target, accept only if the step size improves.
-      mu_c = sigma * mu
-      for _ in range(self._max_centrality_correctors):
-        if alpha >= 0.9:
-          break  # step already good; a corrector cannot pay for itself
-        if corrector_lin_sys_stats.get("tau_method") != "quadratic":
-          break  # tau solve degraded; do not stack correctors on it
-        alpha_asp = min(1.0, 1.5 * alpha + 0.3)
-        v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
-            s[self.z :] + alpha_asp * d_s[self.z :]
-        )
-        target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
-        if np.array_equal(target, v):
-          break
-        correction_g = correction + (target - v) / y[self.z :]
-        xy[: self.n] = x_p
-        xy[self.n :] = y_p
-        x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+        # --- Step 2: Predictor (Affine) Step ---
+        # Solve KKT with mu_target = 0 to find pure Newton direction.
+        xy[: self.n] = x
+        xy[self.n :] = y
+        x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
             p=p,
             mu=mu,
-            mu_target=mu_c,
+            mu_target=0.0,
+            r_anchor=xy,
+            tau_anchor=tau,
+            x=x,
+            y=y,
+            s=s,
+            tau=tau,
+            correction=None,
+        )
+        stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+
+        d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
+        # Predictor slack step from the linearized complementarity condition with
+        # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
+        d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+
+        # Pre-compute the Mehrotra cross term in un-divided form only when the
+        # fused-corrector path will consume it (otherwise stay on the legacy
+        # `-d_s * d_y_p / y` formulation verbatim).
+        if self._fused_corrector_division:
+          cross_p = d_s[self.z :] * d_y_p[self.z :]
+
+        # Compute predictor step size and resulting centering parameter (sigma)
+        alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
+        sigma = self._compute_sigma(
+            mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
+        )
+
+        # --- Step 3: Corrector Step ---
+        # Mehrotra's second-order correction accounts for the nonlinear cross-term
+        # that the predictor's linear approximation ignores. Expanding the full
+        # complementarity condition to second order:
+        #   (y + d_y)(s + d_s) = sigma*mu
+        #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
+        # The predictor solved the linearized version (dropping d_y*d_s). Here we
+        # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
+        # (divided by y because the KKT complementarity block is scaled by 1/y),
+        # so the corrector step can incorporate it to land closer to the target.
+        if self._fused_corrector_division:
+          correction = -cross_p / y[self.z :]
+        else:
+          correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+        xy[: self.n] = x_p
+        xy[self.n :] = y_p
+        x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
+            p=p,
+            mu=mu,
+            mu_target=sigma * mu,
             r_anchor=xy,
             tau_anchor=tau_p,
             x=x,
             y=y,
             s=s,
             tau=tau,
-            correction=correction_g,
+            correction=correction,
         )
-        d_s_g = np.zeros_like(d_s)
-        d_s_g[self.z :] = (
-            mu_c / y[self.z :]
-            + correction_g
-            - y_g[self.z :] * s[self.z :] / y[self.z :]
+        stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
+
+        # --- Step 4: Update Iterates ---
+        d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
+        if self._fused_corrector_division:
+          # Combined-numerator corrector slack step. Algebraically equivalent
+          # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
+          # numerator before the single division by y[z:], avoiding
+          # catastrophic cancellation when y_i is small and the three terms
+          # have similar magnitudes with opposing signs.
+          d_s[self.z :] = (
+              sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+          ) / y[self.z :]
+        else:
+          # Legacy three-division formula.
+          d_s[self.z :] = (
+              sigma * mu / y[self.z :]
+              + correction
+              - y_c[self.z :] * s[self.z :] / y[self.z :]
+          )
+
+        alpha = self._compute_step_size(y, s, d_y, d_s)
+
+        # --- Gondzio multiple centrality correctors ---
+        # Each extra corrector costs one back-solve on the existing
+        # factorization (kinv_q is shared): push the aspirational trial
+        # point's outlier complementarity products back into a symmetric
+        # neighborhood of the target, accept only if the step size improves.
+        mu_c = sigma * mu
+        for _ in range(self._max_centrality_correctors):
+          if alpha >= 0.9:
+            break  # step already good; a corrector cannot pay for itself
+          if corrector_lin_sys_stats.get("tau_method") != "quadratic":
+            break  # tau solve degraded; do not stack correctors on it
+          alpha_asp = min(1.0, 1.5 * alpha + 0.3)
+          v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
+              s[self.z :] + alpha_asp * d_s[self.z :]
+          )
+          target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
+          if np.array_equal(target, v):
+            break
+          correction_g = correction + (target - v) / y[self.z :]
+          xy[: self.n] = x_p
+          xy[self.n :] = y_p
+          x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+              p=p,
+              mu=mu,
+              mu_target=mu_c,
+              r_anchor=xy,
+              tau_anchor=tau_p,
+              x=x,
+              y=y,
+              s=s,
+              tau=tau,
+              correction=correction_g,
+          )
+          d_s_g = np.zeros_like(d_s)
+          d_s_g[self.z :] = (
+              mu_c / y[self.z :]
+              + correction_g
+              - y_g[self.z :] * s[self.z :] / y[self.z :]
+          )
+          d_y_g = y_g - y
+          alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
+          if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
+            break
+          stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+          d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
+          d_s = d_s_g
+          correction = correction_g
+          alpha = alpha_g
+
+        step = step_size_scale * alpha
+        x += step * d_x
+        y += step * d_y
+        tau += step * d_tau
+        s += step * d_s
+
+        # Ensure variables stay strictly in the cone to prevent numerical issues.
+        y[self.z :] = np.maximum(y[self.z :], 1e-30)
+        s[self.z :] = np.maximum(s[self.z :], 1e-30)
+        tau = max(tau, 1e-30)
+
+        status = self._check_termination(
+            x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
         )
-        d_y_g = y_g - y
-        alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
-        if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
+        self._log_iteration(stats_i)
+        if collect_stats:
+          stats.append(stats_i)
+        if status != SolutionStatus.UNFINISHED:
           break
-        stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
-        d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
-        d_s = d_s_g
-        correction = correction_g
-        alpha = alpha_g
-
-      step = step_size_scale * alpha
-      x += step * d_x
-      y += step * d_y
-      tau += step * d_tau
-      s += step * d_s
-
-      # Ensure variables stay strictly in the cone to prevent numerical issues.
-      y[self.z :] = np.maximum(y[self.z :], 1e-30)
-      s[self.z :] = np.maximum(s[self.z :], 1e-30)
-      tau = max(tau, 1e-30)
-
-      status = self._check_termination(
-          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+      else:
+        status = SolutionStatus.HIT_MAX_ITER
+        if collect_stats:
+          stats[-1]["status"] = status
+    except ValueError as exc:
+      # Numerical breakdown of the linear solver (e.g. a factorization
+      # yielding NaNs at extreme conditioning in the deep endgame). The
+      # iterates preceding the breakdown are intact and the best one is
+      # already tracked, so salvage it below instead of crashing.
+      logging.warning(
+          "Linear solver breakdown at iteration %d: %s", self.it, exc
       )
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if status != SolutionStatus.UNFINISHED:
-        break
-    else:
-      status = SolutionStatus.HIT_MAX_ITER
-      if collect_stats:
-        stats[-1]["status"] = status
+      status = SolutionStatus.FAILED
 
     # We have terminated for one reason or another.
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
@@ -1006,14 +1017,17 @@ class QTQP:
         x, s = x / abs_ctx, s / abs_ctx
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
-      case SolutionStatus.HIT_MAX_ITER:
+      case SolutionStatus.HIT_MAX_ITER | SolutionStatus.FAILED:
         if self._best_almost_score <= 1.0:
           self._log_footer("Almost solved (best iterate)")
           bx, by, bs, btau = self._best_almost_iterate
           x, y, s = bx / btau, by / btau, bs / btau
           y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
           return Solution(x, y, s, stats, SolutionStatus.ALMOST_SOLVED)
-        self._log_footer("Hit maximum iterations")
+        if status is SolutionStatus.HIT_MAX_ITER:
+          self._log_footer("Hit maximum iterations")
+        else:
+          self._log_footer("Linear solver breakdown")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
