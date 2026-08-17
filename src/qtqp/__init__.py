@@ -1230,16 +1230,21 @@ class QTQP:
         warm_start=r_anchor,
     )
 
-    # Tau solve: exact quadratic when KKT solve converged, linearized
-    # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
+    # Tau solve: always attempt the exact quadratic; fall back to the
+    # linearized form only when it fails. The former residual pre-check
+    # (skip the quadratic unless converged or residual < 1e-7) was
+    # measured to be harmful on the one instance where it fired
+    # materially: under a deterministic backend, d6cube flips from
+    # HIT_MAX_ITER to SOLVED when the quadratic is always attempted,
+    # and no instance in NETLIB+Maros-Meszaros degrades. The exception
+    # path fires twice across both suites, both benign.
     tau_plus = None
-    if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
-      try:
-        r_tau = (mu - mu_target) * tau_anchor
-        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-        lin_sys_stats["tau_method"] = "quadratic"
-      except ValueError:
-        logging.debug("Primary tau solve failed; falling back to linearized.")
+    try:
+      r_tau = (mu - mu_target) * tau_anchor
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+      lin_sys_stats["tau_method"] = "quadratic"
+    except ValueError:
+      logging.debug("Primary tau solve failed; falling back to linearized.")
 
     if tau_plus is None:
       lin_sys_stats["tau_method"] = "linearized"
