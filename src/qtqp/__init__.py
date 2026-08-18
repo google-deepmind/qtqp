@@ -88,6 +88,7 @@ _ALMOST_FACTOR = 1000.0
 _GOV_DELTA_SPIKE = 20.0
 _GOV_SIGMA_MIN = 1.0 / 30.0
 _GOV_MAX_RECENTERS = 8
+_GOV_REARM_WINDOW = 6
 # Certificate acceptance requires the certified-empty ball to exceed the
 # current primal (dual) iterate scale by this margin: a ray with
 # |b'y| / ||A'y|| = R only proves there is no feasible point of norm
@@ -758,6 +759,7 @@ class QTQP:
     self._recenter_pending = False
     self._recenter_count = 0
     self._gov_floor_on = False
+    self._gov_last_trip = None
     self._gov_hist = []
     self._fused_corrector_division = bool(fused_corrector_division)
 
@@ -1112,14 +1114,23 @@ class QTQP:
             mu0, d0 = self._gov_hist[0]
             if (mu < mu0 and d_now > _GOV_DELTA_SPIKE * d0
                 and self._recenter_count < _GOV_MAX_RECENTERS):
+              # First trip: recenter only (transient amnesty - a fast
+              # solver's single hard plunge can excurse and self-heal,
+              # e.g. ex9's 87x delta transient at iteration 8 of an
+              # 11-iteration solve). A repeat trip within
+              # _GOV_REARM_WINDOW iterations is a persistent pathology:
+              # arm the pacing floor for the remainder.
               self._recenter_pending = True
-              if not self._gov_floor_on:
+              if (self._gov_last_trip is not None
+                  and self.it - self._gov_last_trip <= _GOV_REARM_WINDOW
+                  and not self._gov_floor_on):
                 logging.debug(
-                    "governor: paid descent detected at iteration %d"
+                    "governor: repeated paid descent at iteration %d"
                     " (delta %.2e -> %.2e); pacing floor on.",
                     self.it, d0, d_now,
                 )
-              self._gov_floor_on = True
+                self._gov_floor_on = True
+              self._gov_last_trip = self.it
               self._gov_hist.clear()
       else:
         status = SolutionStatus.HIT_MAX_ITER
@@ -2049,8 +2060,8 @@ class QTQP:
 
     solves = (
         f"{parse_ls(stats_i['q_lin_sys_stats'])},"
-        f"{parse_ls(stats_i['predictor_lin_sys_stats'])},"
-        f"{parse_ls(stats_i['corrector_lin_sys_stats'])}"
+        f"{parse_ls(stats_i.get('predictor_lin_sys_stats', {}))},"
+        f"{parse_ls(stats_i.get('corrector_lin_sys_stats', {}))}"
     )
     print(
         f"| {stats_i['iter']:>4} | {stats_i['pcost']:>10.3e} |"
