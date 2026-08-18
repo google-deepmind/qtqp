@@ -287,6 +287,18 @@ This method will return a `qtqp.Solution` object, with fields:
     solution is that best iterate, honestly labeled as not meeting the
     full `SOLVED` contract. `SOLVED` semantics are unchanged. A
     breakdown whose best iterate does not qualify returns `FAILED`.
+-   `governor` (default `True`): certificate-driven schedule governance.
+    The solver monitors the computable distance-to-path certificate
+    `delta = ||T_mu(u)|| / mu` and the termination-criteria ratios; when
+    descent stops paying (worst ratio improving less than 1.2x over 8
+    iterations, or consecutive `delta` spikes without a 5x ratio gain),
+    it re-centers with a single Josephy step at the current `mu` and
+    caps further `mu` reduction at 30x per iteration. Healthy
+    trajectories never trigger and are bitwise-identical to
+    `governor=False`. This guard requires the regularized path's
+    strong-monotonicity certificate and has no analogue in solvers
+    whose central path is unregularized.
+
 -   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
     `collect_stats=True`. When enabled, includes primal/dual objective,
     residuals, gap, mu, elapsed time, and complementarity statistics.

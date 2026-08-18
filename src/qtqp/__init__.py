@@ -74,21 +74,21 @@ _MU_FLOOR = 1e-14
 # meaning at any tolerance setting. SOLVED semantics are unchanged and
 # unambiguous.
 _ALMOST_FACTOR = 1000.0
-# Mu-schedule governor (experimental, env QTQP_GOVERNOR): descent that is
-# paid for in certified off-path drift is pathological. Trigger: delta_path
-# grows more than _GOV_DELTA_SPIKE across two mu-decreasing iterations
-# (healthy aggressive schedules show delta flat or falling during descent
-# - dfl001 3e8 -> 2.5e5 over 21 iterations; the stall class shows delta
-# rocketing 5 orders in 13 iterations of sigma ~ 0 plunges - LISWET8).
-# Response: a single-solve Josephy centering step at the current mu, and
-# the sigma pacing floor stays ON for the remainder of the solve - the
-# instance has identified itself as plunge-fragile. Instances that never
-# trigger never pay (an earlier unconditional floor taxed ex9 from an
-# 11-iteration solve into a timeout and stalled dfl001).
+# Mu-schedule governor (solve kwarg `governor`, default on): recover
+# iterates driven off the path by schedule overshoot, using the
+# delta_path certificate and the termination-criteria ratios. Channels
+# calibrated on ungoverned traces of every observed failure class plus
+# healthy controls: stagnation (mu frozen by an exactly-collapsed step)
+# recenters and, on repetition, arms a sigma pacing floor; a broken
+# ladder (delta spiking >_GOV_DELTA_SPIKE across two mu-decreasing
+# iterations without the worst criteria ratio improving
+# _GOV_LADDER_GAIN-fold since the previous spike) arms the floor
+# outright - healthy plunges land every spike 25-100x closer to the
+# bars, so productive descent never pays.
 _GOV_DELTA_SPIKE = 20.0
+_GOV_LADDER_GAIN = 5.0
 _GOV_SIGMA_MIN = 1.0 / 30.0
 _GOV_MAX_RECENTERS = 8
-_GOV_REARM_WINDOW = 6
 # Certificate acceptance requires the certified-empty ball to exceed the
 # current primal (dual) iterate scale by this margin: a ray with
 # |b'y| / ||A'y|| = R only proves there is no feasible point of norm
@@ -366,10 +366,12 @@ class QTQP:
     # before solve() has overridden the attribute. 1.0 is the unweighted
     # (classical regularized) path and the solve() default.
     self._tau_weight = 1.0
-    self._tau_auto = False
-    self._tau_opt = False
-    self._tau_greedy = False
-    self._crit_hist = []
+    self._governor = False
+    self._recenter_pending = False
+    self._recenter_count = 0
+    self._gov_floor_on = False
+    self._gov_trip_ratio = None
+    self._gov_hist = []
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -562,6 +564,7 @@ class QTQP:
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       tau_weight: float = 1.0,
+      governor: bool = True,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -590,6 +593,7 @@ class QTQP:
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
           tau_weight=tau_weight,
+          governor=governor,
           fused_corrector_division=fused_corrector_division,
           max_centrality_correctors=max_centrality_correctors,
           warm_start=warm_start,
@@ -622,6 +626,7 @@ class QTQP:
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       tau_weight: float = 1.0,
+      governor: bool = True,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -695,6 +700,15 @@ class QTQP:
         gap has stalled against its bar - the signature of a
         Tikhonov-pinned endgame. w never enters the factorization, so
         adaptation is free.
+      governor (bool): Enables the mu-schedule governor (default True).
+        The governor watches the certified distance-to-path delta =
+        ||T_mu(u)|| / mu each iteration; when delta grows more than 20x
+        across two mu-decreasing iterations (descent being paid for in
+        off-path drift), the next iteration is a single-solve centering
+        step at the current mu, and a repeat trip within 6 iterations
+        arms a sigma >= 1/30 pacing floor for the remainder. Healthy
+        trajectories never trigger and run bit-identically to
+        governor=False. Set False to reproduce the ungoverned schedule.
       fused_corrector_division (bool): If True, compute the corrector
         slack update via a single division by y[z:] with the three
         numerator terms (sigma*mu, the Mehrotra cross product, and
@@ -734,32 +748,16 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
-    if isinstance(tau_weight, str):
-      if tau_weight not in ("auto", "opt", "greedy"):
-        raise ValueError(
-            "tau_weight must be a finite float >= 1, 'auto', 'opt', or"
-            f" 'greedy', got {tau_weight!r}."
-        )
-      self._tau_auto = tau_weight == "auto"
-      self._tau_opt = tau_weight in ("opt", "greedy")
-      self._tau_greedy = tau_weight == "greedy"
-      self._tau_weight = 1.0
-    else:
-      if not (np.isfinite(tau_weight) and tau_weight >= 1):
-        raise ValueError(
-            f"tau_weight must be a finite float >= 1 or 'auto', got"
-            f" {tau_weight}."
-        )
-      self._tau_auto = False
-      self._tau_opt = False
-      self._tau_greedy = False
-      self._tau_weight = float(tau_weight)
-    self._crit_hist = []
-    self._governor = bool(os.environ.get("QTQP_GOVERNOR"))
+    if not (np.isfinite(tau_weight) and tau_weight >= 1):
+      raise ValueError(
+          f"tau_weight must be a finite float >= 1, got {tau_weight}."
+      )
+    self._tau_weight = float(tau_weight)
+    self._governor = bool(governor)
     self._recenter_pending = False
     self._recenter_count = 0
     self._gov_floor_on = False
-    self._gov_last_trip = None
+    self._gov_trip_ratio = None
     self._gov_hist = []
     self._fused_corrector_division = bool(fused_corrector_division)
 
@@ -1006,7 +1004,6 @@ class QTQP:
               s=s,
               tau=tau,
               correction=correction,
-              select_w=True,
           )
           stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
 
@@ -1099,39 +1096,51 @@ class QTQP:
           stats.append(stats_i)
         if status != SolutionStatus.UNFINISHED:
           break
-        if self._tau_auto:
-          self._maybe_escalate_tau_weight()
         if self._governor:
-          # Paid-descent detector: delta growing across two mu-decreasing
-          # iterations means the schedule is buying depth with certified
-          # off-path drift. Re-center at the current mu and keep the
-          # pacing floor on for the rest of the solve.
+          # Two data-derived distress channels, calibrated on ungoverned
+          # traces of every observed failure class plus healthy controls:
+          # 1. No progress: the worst criteria ratio improved less than
+          #    1.2x over the last 8 iterations. The slowest healthy grind
+          #    observed (dfl001) never drops below 1.46x per 8; the
+          #    failure classes sit at 0.29-1.00x. Response: recenter and
+          #    arm the sigma pacing floor.
+          # 2. Broken ladder: consecutive delta-spikes (>20x over two
+          #    mu-decreasing iterations) whose worst ratio failed to
+          #    improve 5x in between. Healthy plunges land every spike
+          #    25-100x closer to the bars (the slowest observed healthy
+          #    gain is 11x); plunging without converging is the
+          #    LISWET/STADAT signature and precedes the cliff. Response:
+          #    recenter and arm the floor.
           d_now = stats_i.get("delta_path", math.inf)
-          self._gov_hist.append((mu, d_now))
-          if len(self._gov_hist) > 3:
+          ratio_now = max(
+              self._crit_state[0] / self._crit_state[1],
+              self._crit_state[2] / self._crit_state[3],
+              self._crit_state[4] / self._crit_state[5],
+          )
+          self._gov_hist.append((mu, d_now, ratio_now))
+          if len(self._gov_hist) > 9:
             self._gov_hist.pop(0)
-          if len(self._gov_hist) == 3:
-            mu0, d0 = self._gov_hist[0]
-            if (mu < mu0 and d_now > _GOV_DELTA_SPIKE * d0
-                and self._recenter_count < _GOV_MAX_RECENTERS):
-              # First trip: recenter only (transient amnesty - a fast
-              # solver's single hard plunge can excurse and self-heal,
-              # e.g. ex9's 87x delta transient at iteration 8 of an
-              # 11-iteration solve). A repeat trip within
-              # _GOV_REARM_WINDOW iterations is a persistent pathology:
-              # arm the pacing floor for the remainder.
-              self._recenter_pending = True
-              if (self._gov_last_trip is not None
-                  and self.it - self._gov_last_trip <= _GOV_REARM_WINDOW
-                  and not self._gov_floor_on):
-                logging.debug(
-                    "governor: repeated paid descent at iteration %d"
-                    " (delta %.2e -> %.2e); pacing floor on.",
-                    self.it, d0, d_now,
-                )
-                self._gov_floor_on = True
-              self._gov_last_trip = self.it
-              self._gov_hist.clear()
+          fire = None
+          if (len(self._gov_hist) == 9
+              and self._gov_hist[0][2] < 1.2 * ratio_now):
+            fire = "no progress"
+          elif len(self._gov_hist) >= 3:
+            mu0, d0, _ = self._gov_hist[-3]
+            if mu < mu0 and d_now > _GOV_DELTA_SPIKE * d0:
+              if (self._gov_trip_ratio is not None
+                  and ratio_now > self._gov_trip_ratio / _GOV_LADDER_GAIN):
+                fire = "unproductive descent"
+              self._gov_trip_ratio = ratio_now
+          if fire and self._recenter_count < _GOV_MAX_RECENTERS:
+            self._recenter_pending = True
+            if not self._gov_floor_on:
+              logging.debug(
+                  "governor: %s at iteration %d; pacing floor on.",
+                  fire, self.it,
+              )
+            self._gov_floor_on = True
+            self._gov_hist.clear()
+            self._gov_trip_ratio = None
       else:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
@@ -1388,7 +1397,6 @@ class QTQP:
 
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau, correction,
-      select_w=False,
   ):
     """Computes a Newton search direction by solving the augmented KKT system.
 
@@ -1429,15 +1437,6 @@ class QTQP:
     # and no instance in NETLIB+Maros-Meszaros degrades. The exception
     # path fires twice across both suites, both benign.
     tau_plus = None
-    # Optional greedy w-optimization on this call's shared back-solves (the
-    # (x, y) RHS carries no w, so every candidate weight reuses kinv_r);
-    # may update self._tau_weight and returns the winning tau directly.
-    if select_w and self._tau_opt:
-      tau_plus, _sel_method = self._select_tau_weight(
-          p, kinv_r, mu, mu_target, tau_anchor, x, y, s, tau, correction
-      )
-      if tau_plus is not None:
-        lin_sys_stats["tau_method"] = _sel_method
     if tau_plus is None:
       try:
         r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
@@ -1457,194 +1456,6 @@ class QTQP:
     kinv_r -= self.kinv_q * tau_plus
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
-
-  def _select_tau_weight(
-      self, p, kinv_r, mu, mu_target, tau_anchor, x, y, s, tau, correction,
-  ):
-    """Greedy per-iteration w-optimization on the corrector target family.
-
-    The corrector RHS carries no w (the (x, y) rows keep the plain mu), so
-    kinv_r/kinv_q are shared by every candidate weight: each w costs one
-    scalar tau solve (quadratic, else the linearized fallback) plus an
-    affine reconstruction - no additional back-solves. Each candidate is
-    damped to its own cone-feasible step and scored with the true-frame
-    termination-criteria form (max residual over its acceptance bar); the
-    incumbent weight is replaced only on a decisive (>10%) win. Returns
-    (tau_plus, method) for the winning weight, or (None, None) if no
-    candidate could be formed.
-    """
-    if self._tau_greedy:
-      # Greedy-nu mode: candidates are a dense tau grid inside a [0.1, 10]x
-      # trust region around the incumbent weight's tau (the continuous
-      # w-family limit, unmoored from any single path).
-      try:
-        r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
-        tau_inc = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-      except ValueError:
-        tau_inc = self._solve_for_tau_linearized_fallback(
-            p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
-        )
-      if tau_inc <= 0 or not np.isfinite(tau_inc):
-        return None, None
-      candidates = [(float(t), "greedy")
-                    for t in tau_inc * np.geomspace(0.1, 10.0, 21)]
-      candidates.append((tau_inc, "quadratic"))
-    else:
-      candidates = []
-      for w in (1.0, 10.0, 100.0, 1000.0):
-        method = "quadratic"
-        try:
-          r_tau = w * ((mu - mu_target) * tau_anchor)
-          tau_t = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau, w=w)
-        except ValueError:
-          method = "linearized"
-          tau_t = self._solve_for_tau_linearized_fallback(
-              p, kinv_r, mu, mu_target, x, y, tau, tau_anchor, w=w
-          )
-        candidates.append((tau_t, method, w))
-    best = None
-    best_score = math.inf
-    incumbent_score = math.inf
-    dbg = {}
-    for cand in candidates:
-      tau_t, method = cand[0], cand[1]
-      w = cand[2] if len(cand) > 2 else self._tau_weight
-      if tau_t <= 0 or not np.isfinite(tau_t):
-        continue
-      xy_t = kinv_r - self.kinv_q * tau_t
-      x_t, y_t = xy_t[: self.n], xy_t[self.n :]
-      d_y = y_t - y
-      d_s = np.zeros(self.m)
-      d_s[self.z :] = (
-          mu_target / y[self.z :]
-          + (correction if correction is not None else 0.0)
-          - y_t[self.z :] * s[self.z :] / y[self.z :]
-      )
-      alpha_c = self._compute_step_size(y, s, d_y, d_s)
-      x_c = x + alpha_c * (x_t - x)
-      y_c = y + alpha_c * d_y
-      s_c = s + alpha_c * d_s
-      tau_c = tau + alpha_c * (tau_t - tau)
-      score = self._score_candidate(x_c, y_c, tau_c, s_c)
-      is_incumbent = (method == "quadratic" if self._tau_greedy
-                      else w == self._tau_weight)
-      dbg[round(float(w if not self._tau_greedy else tau_t), 6)] = (
-          round(float(alpha_c), 3), float(f"{score:.3g}"))
-      if is_incumbent:
-        incumbent_score = score
-      if score < best_score:
-        best = (w, tau_t, method)
-        best_score = score
-    if os.environ.get("QTQP_WDEBUG"):
-      print(f"it={self.it} w={self._tau_weight:g} cand={dbg}", flush=True)
-    if best is None:
-      return None, None
-    w_star, tau_star, method_star = best
-    if self._tau_greedy:
-      # Greedy-nu: take the trust-region score minimizer outright on a
-      # decisive win, else the incumbent path's tau.
-      if best_score < 0.9 * incumbent_score:
-        return tau_star, method_star
-      try:
-        r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
-        return self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau), "quadratic"
-      except ValueError:
-        return self._solve_for_tau_linearized_fallback(
-            p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
-        ), "linearized"
-    if w_star != self._tau_weight and best_score < 0.9 * incumbent_score:
-      logging.debug(
-          "tau_weight optimized: %g -> %g at iteration %d (score %.3g)",
-          self._tau_weight, w_star, self.it, best_score,
-      )
-      self._tau_weight = w_star
-    elif w_star != self._tau_weight:
-      # Not a decisive win: keep the incumbent weight's tau instead.
-      w_star = self._tau_weight
-      method_star = "quadratic"
-      try:
-        r_tau = w_star * ((mu - mu_target) * tau_anchor)
-        tau_star = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-      except ValueError:
-        method_star = "linearized"
-        tau_star = self._solve_for_tau_linearized_fallback(
-            p, kinv_r, mu, mu_target, x, y, tau, tau_anchor
-        )
-    return tau_star, method_star
-
-  def _score_candidate(self, x, y, tau, s):
-    """Termination score (max residual / bar) of a homogeneous candidate."""
-    x, y, s = x.copy(), y.copy(), s.copy()
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
-      x, y, s = self._unequilibrate_iterates(x, y, s)
-    inv_tau = 1.0 / max(tau, _EPS)
-    ax = self.a @ x
-    if self.p.nnz == 0:
-      px = np.zeros(self.n)
-      xpx = 0.0
-    else:
-      px = self.p @ x
-      xpx = x @ px
-    aty = self.a.T @ y
-    ctx = self.c @ x
-    bty = self.b @ y
-    pcost = (ctx + 0.5 * xpx * inv_tau) * inv_tau
-    dcost = (-bty - 0.5 * xpx * inv_tau) * inv_tau
-    pres = _norm((ax + s) * inv_tau - self.b, np.inf)
-    dres = _norm((px + aty) * inv_tau + self.c, np.inf)
-    gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
-    prelrhs = max(_norm(ax, np.inf) * inv_tau, _norm(s, np.inf) * inv_tau,
-                  self._norm_b, norm_y * inv_tau)
-    drelrhs = max(_norm(px, np.inf) * inv_tau, _norm(aty, np.inf) * inv_tau,
-                  self._norm_c, norm_x * inv_tau)
-    gaprelrhs = max(min(abs(pcost), abs(dcost)), (norm_x + norm_y) * inv_tau)
-    return max(
-        pres / (self.atol + self.rtol * prelrhs),
-        dres / (self.atol + self.rtol * drelrhs),
-        gap / (self.atol + self.rtol * gaprelrhs),
-    )
-
-  def _maybe_escalate_tau_weight(self):
-    """Auto tau-weight controller: escalate w on the pinned-crawl signature.
-
-    Escalates w by 10x (capped at 1e4) when the iterate is primal-converged
-    but the dual residual or gap is failing and has improved by less than 2x
-    over the last 5 iterations - the signature of a residual pinned at the
-    path's Tikhonov bias rather than genuine non-convergence. Stall-class
-    iterates (pres failing) never escalate: the weight cannot help them.
-    Escalation clears the history so the next decision waits another 5
-    iterations at the new weight.
-    """
-    pres, pbar, dres, dbar, gap, gbar, mu_hat = self._crit_state
-    self._crit_hist.append((dres, gap))
-    if len(self._crit_hist) > 4:
-      self._crit_hist.pop(0)
-    failing = dres >= dbar or gap >= gbar
-    if pres >= pbar or not failing or self._tau_weight >= 1e4:
-      self._mu_danger_count = 0
-      return
-    # Trigger 2 (fast): mu is entering the factorization-degradation zone
-    # while a weight-fixable criterion is still failing. Two consecutive
-    # iterations of hysteresis so healthy endgames (which cross this window
-    # for an iteration or two before terminating) are left alone.
-    self._mu_danger_count = getattr(self, "_mu_danger_count", 0) + 1 \
-        if mu_hat < 1e-8 else 0
-    danger = self._mu_danger_count >= 2
-    # Trigger 1 (slow): dres/gap stalled - less than 2x combined improvement
-    # over the last 3 iterations while failing.
-    d0, g0 = self._crit_hist[0]
-    stalled = (len(self._crit_hist) >= 4
-               and dres > 0.5 * d0 and gap > 0.5 * g0)
-    if danger or stalled:
-      self._tau_weight *= 10.0
-      self._crit_hist.clear()
-      self._mu_danger_count = 0
-      logging.debug(
-          "auto tau_weight escalated to %g at iteration %d (%s)",
-          self._tau_weight, self.it, "danger" if danger else "stall",
-      )
 
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, w=None) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
