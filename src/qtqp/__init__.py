@@ -88,6 +88,12 @@ _ALMOST_FACTOR = 1000.0
 _GOV_DELTA_SPIKE = 20.0
 _GOV_SIGMA_MIN = 1.0 / 30.0
 _GOV_MAX_RECENTERS = 8
+# Certificate acceptance requires the certified-empty ball to exceed the
+# current primal (dual) iterate scale by this margin: a ray with
+# |b'y| / ||A'y|| = R only proves there is no feasible point of norm
+# below R, so accept INFEASIBLE only when ||x/tau|| < margin * R
+# (mirrored for UNBOUNDED).
+_CERT_RADIUS_MARGIN = 0.1
 
 
 class LinearSolver(enum.Enum):
@@ -1953,17 +1959,32 @@ class QTQP:
     # The quality measures need no zero-ray guard: as ||x|| -> 0 the
     # data-scaled denominator vanishes while the numerator retains the
     # O(1) slack s, so dinfeas diverges and nothing is certified.
+    # Certified-radius veto: in finite precision a Farkas ray only proves
+    # emptiness of a ball. Weak duality gives, for any feasible x_hat,
+    # b'y >= -||x_hat|| * ||A'y||, so a ray with b'y < 0 excludes feasible
+    # points of norm below |b'y| / ||A'y|| and says nothing beyond that
+    # radius. If the solver's own primal trajectory already sits outside
+    # the certified ball, the certificate is vacuous for the region the
+    # iterate is converging to (leo1/leo2: ||x*|| ~ 1e9 with pseudo-rays
+    # that pass both relative quality senses; POWELL20: marginal-feasible
+    # solution beyond the pseudo-certificate's radius). The mirrored dual
+    # guard protects UNBOUNDED. A vetoed true certificate only costs
+    # iterations - the test re-fires every iteration as the ray matures
+    # and its certified radius grows.
     elif (
         ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
         and dinfeas < self.atol_infeas
         and max(norm_ax_plus_s, norm_px)
         < self.atol_infeas * abs(ctx) + self.rtol_infeas * norm_x
+        and norm_y * inv_tau * max(norm_ax_plus_s, norm_px)
+        < _CERT_RADIUS_MARGIN * abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
     elif (
         bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
         and pinfeas < self.atol_infeas
         and norm_aty < self.atol_infeas * abs(bty) + self.rtol_infeas * norm_y
+        and norm_x * inv_tau * norm_aty < _CERT_RADIUS_MARGIN * abs(bty)
     ):
       status = SolutionStatus.INFEASIBLE
     else:
