@@ -344,6 +344,8 @@ class QTQP:
     # before solve() has overridden the attribute. 1.0 is the unweighted
     # (classical regularized) path and the solve() default.
     self._tau_weight = 1.0
+    self._tau_auto = False
+    self._crit_hist = []
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -663,7 +665,12 @@ class QTQP:
         factorization or back-solves - only the scalar tau equation and
         the normalization. The default 1.0 is the classical regularized
         path (EXPERIMENTAL: non-default values under evaluation at the
-        1e-9 default tolerances).
+        1e-9 default tolerances). The string 'auto' enables an adaptive
+        controller: start at w = 1 and escalate w by 10x (up to 1e4)
+        whenever the iterate is primal-converged but the dual residual or
+        gap has stalled against its bar - the signature of a
+        Tikhonov-pinned endgame. w never enters the factorization, so
+        adaptation is free.
       fused_corrector_division (bool): If True, compute the corrector
         slack update via a single division by y[z:] with the three
         numerator terms (sigma*mu, the Mehrotra cross product, and
@@ -703,11 +710,23 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
-    if not (np.isfinite(tau_weight) and tau_weight >= 1):
-      raise ValueError(
-          f"tau_weight must be a finite float >= 1, got {tau_weight}."
-      )
-    self._tau_weight = float(tau_weight)
+    if isinstance(tau_weight, str):
+      if tau_weight != "auto":
+        raise ValueError(
+            f"tau_weight must be a finite float >= 1 or 'auto', got"
+            f" {tau_weight!r}."
+        )
+      self._tau_auto = True
+      self._tau_weight = 1.0
+    else:
+      if not (np.isfinite(tau_weight) and tau_weight >= 1):
+        raise ValueError(
+            f"tau_weight must be a finite float >= 1 or 'auto', got"
+            f" {tau_weight}."
+        )
+      self._tau_auto = False
+      self._tau_weight = float(tau_weight)
+    self._crit_hist = []
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -1010,6 +1029,8 @@ class QTQP:
           stats.append(stats_i)
         if status != SolutionStatus.UNFINISHED:
           break
+        if self._tau_auto:
+          self._maybe_escalate_tau_weight()
       else:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
@@ -1325,6 +1346,46 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
+  def _maybe_escalate_tau_weight(self):
+    """Auto tau-weight controller: escalate w on the pinned-crawl signature.
+
+    Escalates w by 10x (capped at 1e4) when the iterate is primal-converged
+    but the dual residual or gap is failing and has improved by less than 2x
+    over the last 5 iterations - the signature of a residual pinned at the
+    path's Tikhonov bias rather than genuine non-convergence. Stall-class
+    iterates (pres failing) never escalate: the weight cannot help them.
+    Escalation clears the history so the next decision waits another 5
+    iterations at the new weight.
+    """
+    pres, pbar, dres, dbar, gap, gbar, mu_hat = self._crit_state
+    self._crit_hist.append((dres, gap))
+    if len(self._crit_hist) > 4:
+      self._crit_hist.pop(0)
+    failing = dres >= dbar or gap >= gbar
+    if pres >= pbar or not failing or self._tau_weight >= 1e4:
+      self._mu_danger_count = 0
+      return
+    # Trigger 2 (fast): mu is entering the factorization-degradation zone
+    # while a weight-fixable criterion is still failing. Two consecutive
+    # iterations of hysteresis so healthy endgames (which cross this window
+    # for an iteration or two before terminating) are left alone.
+    self._mu_danger_count = getattr(self, "_mu_danger_count", 0) + 1 \
+        if mu_hat < 1e-8 else 0
+    danger = self._mu_danger_count >= 2
+    # Trigger 1 (slow): dres/gap stalled - less than 2x combined improvement
+    # over the last 3 iterations while failing.
+    d0, g0 = self._crit_hist[0]
+    stalled = (len(self._crit_hist) >= 4
+               and dres > 0.5 * d0 and gap > 0.5 * g0)
+    if danger or stalled:
+      self._tau_weight *= 10.0
+      self._crit_hist.clear()
+      self._mu_danger_count = 0
+      logging.debug(
+          "auto tau_weight escalated to %g at iteration %d (%s)",
+          self._tau_weight, self.it, "danger" if danger else "stall",
+      )
+
   def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
@@ -1617,6 +1678,15 @@ class QTQP:
     if almost_score < self._best_almost_score:
       self._best_almost_score = almost_score
       self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
+
+    # Criterion state for the auto tau-weight controller: the current
+    # residuals, their acceptance bars, and mu, refreshed every iteration.
+    self._crit_state = (
+        pres, self.atol + self.rtol * prelrhs,
+        dres, self.atol + self.rtol * drelrhs,
+        gap, self.atol + self.rtol * gaprelrhs,
+        mu_hat,
+    )
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
