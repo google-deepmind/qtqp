@@ -74,13 +74,19 @@ _MU_FLOOR = 1e-14
 # meaning at any tolerance setting. SOLVED semantics are unchanged and
 # unambiguous.
 _ALMOST_FACTOR = 1000.0
-# Mu-schedule governor (experimental, env QTQP_GOVERNOR): cap the per-
-# iteration mu reduction and re-center on a delta_path spike, so the
-# schedule never outruns the certified distance to the path (the DUALC8
-# collapse plunged mu 100x/iteration for three iterations while delta
-# grew geometrically, then stalled at the factorization noise floor).
+# Mu-schedule governor (experimental, env QTQP_GOVERNOR): descent that is
+# paid for in certified off-path drift is pathological. Trigger: delta_path
+# grows more than _GOV_DELTA_SPIKE across two mu-decreasing iterations
+# (healthy aggressive schedules show delta flat or falling during descent
+# - dfl001 3e8 -> 2.5e5 over 21 iterations; the stall class shows delta
+# rocketing 5 orders in 13 iterations of sigma ~ 0 plunges - LISWET8).
+# Response: a single-solve Josephy centering step at the current mu, and
+# the sigma pacing floor stays ON for the remainder of the solve - the
+# instance has identified itself as plunge-fragile. Instances that never
+# trigger never pay (an earlier unconditional floor taxed ex9 from an
+# 11-iteration solve into a timeout and stalled dfl001).
+_GOV_DELTA_SPIKE = 20.0
 _GOV_SIGMA_MIN = 1.0 / 30.0
-_GOV_DELTA_SPIKE = 30.0
 _GOV_MAX_RECENTERS = 8
 
 
@@ -745,7 +751,8 @@ class QTQP:
     self._governor = bool(os.environ.get("QTQP_GOVERNOR"))
     self._recenter_pending = False
     self._recenter_count = 0
-    self._delta_prev = None
+    self._gov_floor_on = False
+    self._gov_hist = []
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -960,9 +967,8 @@ class QTQP:
           sigma = self._compute_sigma(
               mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
           )
-          if self._governor:
-            # Rate cap: never reduce mu by more than 1/_GOV_SIGMA_MIN in a
-            # single iteration, so the schedule cannot outrun the iterate.
+          if self._gov_floor_on:
+            # Pacing floor, armed only after a paid-descent trigger.
             sigma = max(sigma, _GOV_SIGMA_MIN)
 
           # --- Step 3: Corrector Step ---
@@ -1088,19 +1094,27 @@ class QTQP:
         if self._tau_auto:
           self._maybe_escalate_tau_weight()
         if self._governor:
-          # Delta-spike detector: a jump in the certified distance to the
-          # path means the last step outran what the linear algebra can
-          # support; re-center at the current mu before descending further.
+          # Paid-descent detector: delta growing across two mu-decreasing
+          # iterations means the schedule is buying depth with certified
+          # off-path drift. Re-center at the current mu and keep the
+          # pacing floor on for the rest of the solve.
           d_now = stats_i.get("delta_path", math.inf)
-          if (self._delta_prev is not None
-              and d_now > _GOV_DELTA_SPIKE * self._delta_prev
-              and self._recenter_count < _GOV_MAX_RECENTERS):
-            self._recenter_pending = True
-            logging.debug(
-                "governor: delta spiked %.2e -> %.2e at iteration %d;"
-                " recentering.", self._delta_prev, d_now, self.it,
-            )
-          self._delta_prev = d_now
+          self._gov_hist.append((mu, d_now))
+          if len(self._gov_hist) > 3:
+            self._gov_hist.pop(0)
+          if len(self._gov_hist) == 3:
+            mu0, d0 = self._gov_hist[0]
+            if (mu < mu0 and d_now > _GOV_DELTA_SPIKE * d0
+                and self._recenter_count < _GOV_MAX_RECENTERS):
+              self._recenter_pending = True
+              if not self._gov_floor_on:
+                logging.debug(
+                    "governor: paid descent detected at iteration %d"
+                    " (delta %.2e -> %.2e); pacing floor on.",
+                    self.it, d0, d_now,
+                )
+              self._gov_floor_on = True
+              self._gov_hist.clear()
       else:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
