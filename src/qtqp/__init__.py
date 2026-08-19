@@ -76,6 +76,7 @@ _MU_FLOOR = 1e-14
 _ALMOST_FACTOR = 1000.0
 # Experimental proximal-anchored path (see _newton_step).
 _PROXIMAL = bool(os.environ.get("QTQP_PROXIMAL"))
+_MUCAP = bool(os.environ.get("QTQP_MUCAP"))
 # Mu-schedule governor (solve kwarg `governor`, default on): recover
 # iterates driven off the path by schedule overshoot, using the
 # delta_path certificate and the termination-criteria ratios. Channels
@@ -89,7 +90,7 @@ _PROXIMAL = bool(os.environ.get("QTQP_PROXIMAL"))
 # bars, so productive descent never pays.
 _GOV_DELTA_SPIKE = 20.0
 _GOV_LADDER_GAIN = 5.0
-_GOV_SIGMA_MIN = 1.0 / 30.0
+_GOV_SIGMA_MIN = 1.0 / float(os.environ.get("QTQP_SIGMA_DIV", "30"))
 _GOV_MAX_RECENTERS = 8
 # Certificate acceptance requires the certified-empty ball to exceed the
 # current primal (dual) iterate scale by this margin: a ray with
@@ -761,6 +762,11 @@ class QTQP:
     self._gov_floor_on = False
     self._gov_trip_ratio = None
     self._gov_hist = []
+    self._crit_state = None
+    if os.environ.get("QTQP_GOV_FLOOR0"):
+      # Experimental: arm the pacing floor from iteration zero (the
+      # probe-validated remedy for proximal schedule overshoot).
+      self._gov_floor_on = True
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -978,6 +984,17 @@ class QTQP:
           if self._gov_floor_on:
             # Pacing floor, armed only after a paid-descent trigger.
             sigma = max(sigma, _GOV_SIGMA_MIN)
+          if _PROXIMAL and _MUCAP and self._crit_state is not None:
+            # Contract-derived mu cap (experimental): under the proximal
+            # family the gap criterion is mu's only remaining customer
+            # (dres/pres vanish at the fixpoint at any mu), and the depth
+            # it requires is computable from the gap bar itself:
+            # gap ~ mu*(m-z)/tau^2 at the fixpoint, so never schedule mu
+            # below a fraction of gbar*tau^2/(m-z) - extra depth buys
+            # only noise-zone factorizations.
+            gbar = self._crit_state[5]
+            mu_req = gbar * tau * tau / max(self.m - self.z, 1)
+            sigma = max(sigma, min(1.0, 0.1 * mu_req / mu))
 
           # --- Step 3: Corrector Step ---
           # Mehrotra's second-order correction accounts for the nonlinear cross-term
