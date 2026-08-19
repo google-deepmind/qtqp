@@ -74,6 +74,8 @@ _MU_FLOOR = 1e-14
 # meaning at any tolerance setting. SOLVED semantics are unchanged and
 # unambiguous.
 _ALMOST_FACTOR = 1000.0
+# Experimental proximal-anchored path (see _newton_step).
+_PROXIMAL = bool(os.environ.get("QTQP_PROXIMAL"))
 # Mu-schedule governor (solve kwarg `governor`, default on): recover
 # iterates driven off the path by schedule overshoot, using the
 # delta_path certificate and the termination-criteria ratios. Channels
@@ -1416,7 +1418,16 @@ class QTQP:
     quadratic residual check fails.
     """
     # Prepare RHS for the linear system.
-    r = (mu - mu_target) * r_anchor
+    # Origin-anchored path: impose r_d(u+) = -mu_target*u_anchor - mu*du.
+    # Proximal (env QTQP_PROXIMAL, experimental): anchor the Tikhonov term
+    # at the current iterate instead of the origin - the imposed residual
+    # becomes -mu*(u+ - u_anchor), which vanishes at convergence instead
+    # of pinning at mu*||u||. Same KKT shift, same conditioning; only the
+    # path family (and hence the residual identity) changes.
+    if _PROXIMAL:
+      r = mu * r_anchor
+    else:
+      r = (mu - mu_target) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -1439,7 +1450,8 @@ class QTQP:
     tau_plus = None
     if tau_plus is None:
       try:
-        r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
+        _tau_coeff = mu if _PROXIMAL else (mu - mu_target)
+        r_tau = self._tau_weight * (_tau_coeff * tau_anchor)
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
@@ -1554,13 +1566,14 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
+    anchor_coeff = -mu_p if _PROXIMAL else (mu_target_p - mu_p)
     g = (mu_p * tau_curr * tau_curr
-         + (mu_target_p - mu_p) * tau_anchor * tau_curr
+         + anchor_coeff * tau_anchor * tau_curr
          - tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu_p * tau_curr + (mu_target_p - mu_p) * tau_anchor - q_z +
+    den = (2.0 * mu_p * tau_curr + anchor_coeff * tau_anchor - q_z +
            tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
