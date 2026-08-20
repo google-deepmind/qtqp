@@ -76,6 +76,9 @@ _MU_FLOOR = 1e-14
 _ALMOST_FACTOR = 1000.0
 # Experimental proximal-anchored path (see _newton_step).
 _PROXIMAL = bool(os.environ.get("QTQP_PROXIMAL"))
+# Anchor the path's Tikhonov term at the initial iterate (fixed for the
+# whole solve) instead of at the origin.
+_ANCHOR_INIT = bool(os.environ.get("QTQP_ANCHOR_INIT"))
 _MUCAP = bool(os.environ.get("QTQP_MUCAP"))
 # Mu-schedule governor (solve kwarg `governor`, default on): recover
 # iterates driven off the path by schedule overshoot, using the
@@ -370,6 +373,9 @@ class QTQP:
     # (classical regularized) path and the solve() default.
     self._tau_weight = 1.0
     self._governor = False
+    # Anchor of the path's Tikhonov term, in the operating scale.
+    # None means the origin-anchored path (the classical form).
+    self._anchor = None
     self._recenter_pending = False
     self._recenter_count = 0
     self._gov_floor_on = False
@@ -511,8 +517,12 @@ class QTQP:
     m, n, z = self.m, self.n, self.z
     p_reg = (p + reg * sp.eye(n, format="csc")).tocsc()
     a_csc = a.tocsc() if not sp.isspmatrix_csc(a) else a
+    # The (2,2) block is -I, not -reg*I: this is the standard
+    # least-squares initialization (CVXOPT/Clarabel), giving y ~ Ax - b.
+    # With -reg*I the block is near-singular and y is amplified by 1/reg
+    # (measured: ||y|| ~ 3e10, mu_0 ~ 2e12 on netlib/25fv47).
     kkt = sp.bmat(
-        [[p_reg, a_csc.T], [a_csc, -reg * sp.eye(m, format="csc")]],
+        [[p_reg, a_csc.T], [a_csc, -sp.eye(m, format="csc")]],
         format="csc",
     )
     rhs = np.concatenate([-c, b])
@@ -833,6 +843,18 @@ class QTQP:
     x, y, s, tau, _ = self._init_variables(
         init_strategy, init_mu_scale, a, p, b, c
     )
+    if _ANCHOR_INIT:
+      # The anchor is a projective point (only x_a/tau_a is meaningful),
+      # so its scale is a free choice; put it on the canonical sphere
+      # ||u_a||^2 = nu + 1. Leaving it at the raw initialization scale
+      # drags the virial manifold ||u||^2 - u'u_a = nu+1 out to
+      # ||u|| ~ ||u_a||, and mu ~ ||u||^2 explodes with it.
+      if os.environ.get("QTQP_ANCHOR_NORM") == "tau1":
+        _sc = 1.0 / max(float(tau), _EPS)
+      else:
+        _q0 = float(x @ x + y @ y + self._tau_weight * tau * tau)
+        _sc = math.sqrt((self.m - self.z + 1) / max(_EPS, _q0))
+      self._anchor = (_sc * x.copy(), _sc * y.copy(), _sc * float(tau))
     status = SolutionStatus.UNFINISHED
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
@@ -1403,7 +1425,17 @@ class QTQP:
     # normalization scales y and s each by `scale`, so mu picks up scale^2.
     quad_aff = (x_aff @ x_aff + y_aff @ y_aff
                 + self._tau_weight * tau_aff * tau_aff)
-    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, quad_aff)
+    rhs_aff = self.m - self.z + 1
+    if self._anchor is None:
+      scale_sq = rhs_aff / max(_EPS * _EPS, quad_aff)
+    else:
+      ax, ay, atau = self._anchor
+      dot_aff = float(x_aff @ ax + y_aff @ ay
+                      + self._tau_weight * tau_aff * atau)
+      lam = ((dot_aff + math.sqrt(max(0.0, dot_aff * dot_aff
+                                      + 4.0 * quad_aff * rhs_aff)))
+             / (2.0 * max(_EPS * _EPS, quad_aff)))
+      scale_sq = lam * lam
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
@@ -1441,10 +1473,11 @@ class QTQP:
     # becomes -mu*(u+ - u_anchor), which vanishes at convergence instead
     # of pinning at mu*||u||. Same KKT shift, same conditioning; only the
     # path family (and hence the residual identity) changes.
-    if _PROXIMAL:
-      r = mu * r_anchor
-    else:
-      r = (mu - mu_target) * r_anchor
+    r = (mu - mu_target) * r_anchor
+    if self._anchor is not None and mu_target != 0.0:
+      # Anchored path: impose r_d(u+) = -mu_target * (u+ - u_a).
+      r[: self.n] += mu_target * self._anchor[0]
+      r[self.n :] += mu_target * self._anchor[1]
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -1467,8 +1500,9 @@ class QTQP:
     tau_plus = None
     if tau_plus is None:
       try:
-        _tau_coeff = mu if _PROXIMAL else (mu - mu_target)
-        r_tau = self._tau_weight * (_tau_coeff * tau_anchor)
+        r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
+        if self._anchor is not None:
+          r_tau += self._tau_weight * mu_target * self._anchor[2]
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
@@ -1583,14 +1617,16 @@ class QTQP:
     px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
 
     # Base residual G(z_curr, tau_curr).
-    anchor_coeff = -mu_p if _PROXIMAL else (mu_target_p - mu_p)
+    anchor_term = (mu_target_p - mu_p) * tau_anchor
+    if self._anchor is not None:
+      anchor_term -= mu_target_p * self._anchor[2]
     g = (mu_p * tau_curr * tau_curr
-         + anchor_coeff * tau_anchor * tau_curr
+         + anchor_term * tau_curr
          - tau_curr * q_z - mu_target - x_px)
 
     # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
     num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu_p * tau_curr + anchor_coeff * tau_anchor - q_z +
+    den = (2.0 * mu_p * tau_curr + anchor_term - q_z +
            tau_curr * q_kinv_q + 2.0 * px_kinv_q)
 
     tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
@@ -1617,7 +1653,16 @@ class QTQP:
     Operates in-place on the iterate arrays and returns them for convenience.
     """
     quad = x @ x + y @ y + self._tau_weight * tau * tau
-    scale = math.sqrt((self.m - self.z + 1) / max(_EPS, quad))
+    rhs = self.m - self.z + 1
+    if self._anchor is None:
+      scale = math.sqrt(rhs / max(_EPS, quad))
+    else:
+      # Virial identity of the anchored path: ||u||^2 - u'u_a = nu + 1.
+      # Scaling u -> lambda u solves lambda^2 quad - lambda dot - rhs = 0.
+      ax, ay, atau = self._anchor
+      dot = float(x @ ax + y @ ay + self._tau_weight * tau * atau)
+      scale = ((dot + math.sqrt(max(0.0, dot * dot + 4.0 * quad * rhs)))
+               / (2.0 * max(_EPS, quad)))
     x *= scale
     y *= scale
     tau *= scale
@@ -1698,13 +1743,20 @@ class QTQP:
     b_op = getattr(self, "_b_op", self.b)
     c_op = getattr(self, "_c_op", self.c)
     t_x = px_w + aty_w + c_op * tau
-    t_x += mu_hat * x_w
+    if self._anchor is None:
+      t_x += mu_hat * x_w
+    else:
+      t_x += mu_hat * (x_w - self._anchor[0])
     t_y = -ax_w + b_op * tau
-    t_y += mu_hat * y_w
+    if self._anchor is None:
+      t_y += mu_hat * y_w
+    else:
+      t_y += mu_hat * (y_w - self._anchor[1])
     t_y[self.z :] -= mu_hat / y_w[self.z :]
     inv_tau_w = 1.0 / max(tau, _EPS)
+    _atau = 0.0 if self._anchor is None else self._anchor[2]
     t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
-             + mu_hat * (self._tau_weight * tau - inv_tau_w))
+             + mu_hat * (self._tau_weight * (tau - _atau) - inv_tau_w))
     t_norm = math.sqrt(
         float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
     )
