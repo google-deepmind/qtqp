@@ -444,15 +444,20 @@ class QTQP:
     mu0 = float(y @ s) / (self.m - self.z)
     if not np.isfinite(mu0) or mu0 <= 0.0:
       return math.inf
-    t_x0 = p @ x + a.T @ y + c * tau + mu0 * x
-    t_y0 = -(a @ x) + b * tau + mu0 * y
+    _anc = self._anchor
+    _ax0 = 0.0 if _anc is None else _anc[0]
+    _ay0 = 0.0 if _anc is None else _anc[1]
+    _at0 = 0.0 if _anc is None else _anc[2]
+    t_x0 = p @ x + a.T @ y + c * tau + mu0 * (x - _ax0)
+    t_y0 = -(a @ x) + b * tau + mu0 * (y - _ay0)
     t_y0[self.z :] -= mu0 / y[self.z :]
     px0_ = float(x @ (p @ x)) if p.nnz else 0.0
     t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
-            + mu0 * (tau - 1.0 / max(_EPS, tau)))
+            + mu0 * (self._tau_weight * (tau - _at0)
+                     - 1.0 / max(_EPS, tau)))
     h_y0 = np.full(self.m, mu0)
     h_y0[self.z :] += mu0 / (y[self.z :] * y[self.z :])
-    h_t0 = mu0 + mu0 / max(_EPS, tau * tau)
+    h_t0 = mu0 * self._tau_weight + mu0 / max(_EPS, tau * tau)
     return math.sqrt(
         float(t_x0 @ t_x0) / max(_EPS, mu0)
         + float((t_y0 * t_y0) @ (1.0 / h_y0))
@@ -852,19 +857,6 @@ class QTQP:
     x, y, s, tau, _ = self._init_variables(
         init_strategy, init_mu_scale, a, p, b, c
     )
-    if _ANCHOR_INIT:
-      # The anchor is a projective point (only x_a/tau_a is meaningful),
-      # so its scale is a free choice; put it on the canonical sphere
-      # ||u_a||^2 = nu + 1. Leaving it at the raw initialization scale
-      # drags the virial manifold ||u||^2 - u'u_a = nu+1 out to
-      # ||u|| ~ ||u_a||, and mu ~ ||u||^2 explodes with it.
-      if os.environ.get("QTQP_ANCHOR_NORM") == "tau1":
-        _sc = 1.0 / max(float(tau), _EPS)
-      else:
-        _q0 = float(x @ x + y @ y + self._tau_weight * tau * tau)
-        _sc = math.sqrt((self.m - self.z + 1) / max(_EPS, _q0))
-      _sc *= float(os.environ.get("QTQP_ANCHOR_SCALE", "1"))
-      self._anchor = (_sc * x.copy(), _sc * y.copy(), _sc * float(tau))
     status = SolutionStatus.UNFINISHED
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
@@ -910,6 +902,47 @@ class QTQP:
     # Maros-Meszaros); pathologically scaled data announces itself here
     # by tens of orders of magnitude — this diagnostic is how corrupted
     # infinity-sentinel bounds in the benchmark datasets were found.
+    if _ANCHOR_INIT:
+      # Captured after warm-start resolution so an accepted warm start is
+      # anchored at itself, not at the discarded cold initializer.
+      _norm_mode = os.environ.get("QTQP_ANCHOR_NORM", "sphere")
+      if _norm_mode == "sc":
+        # Self-consistent anchor: (i) rescale the initial point onto the
+        # canonical sphere (the rescue the loop's first normalization
+        # would perform); (ii) elevate mu0, by scaling s, until
+        # ||Q(u0)||/mu0 <= sqrt(nu+1) so the residual part of the anchor
+        # is bounded; (iii) anchor at u_a = T0_mu0(u0)/mu0, which puts
+        # u0 exactly on its own path and on the anchored virial manifold.
+        _nu1 = self.m - self.z + 1
+        _quad = float(x @ x + y @ y + self._tau_weight * tau * tau)
+        _lam = math.sqrt(_nu1 / max(_EPS, _quad))
+        x *= _lam
+        y *= _lam
+        s *= _lam
+        tau *= _lam
+        _mu0 = float(y[self.z :] @ s[self.z :]) / max(self.m - self.z, 1)
+        _qx = p @ x + a.T @ y + c * tau
+        _qy = -(a @ x) + b * tau
+        _pxq = float(x @ (p @ x)) if p.nnz > 0 else 0.0
+        _qt = -(float(c @ x) + float(b @ y)) - _pxq / max(_EPS, tau)
+        _nq = math.sqrt(float(_qx @ _qx) + float(_qy @ _qy) + _qt * _qt)
+        _mu0_t = _nq / math.sqrt(_nu1)
+        if _mu0_t > _mu0 > 0.0:
+          s *= _mu0_t / _mu0
+          _mu0 = _mu0_t
+        _tx = _qx + _mu0 * x
+        _ty = _qy + _mu0 * y
+        _ty[self.z :] -= _mu0 / y[self.z :]
+        _tt = _qt + _mu0 * (self._tau_weight * tau - 1.0 / max(_EPS, tau))
+        self._anchor = (_tx / _mu0, _ty / _mu0, float(_tt / _mu0))
+      else:
+        if _norm_mode == "tau1":
+          _sc = 1.0 / max(float(tau), _EPS)
+        else:
+          _q0 = float(x @ x + y @ y + self._tau_weight * tau * tau)
+          _sc = math.sqrt((self.m - self.z + 1) / max(_EPS, _q0))
+        _sc *= float(os.environ.get("QTQP_ANCHOR_SCALE", "1"))
+        self._anchor = (_sc * x.copy(), _sc * y.copy(), _sc * float(tau))
     self.lambda_init = self._lambda_local(x, y, s, tau, a, p, b, c)
 
     self._log_header()
