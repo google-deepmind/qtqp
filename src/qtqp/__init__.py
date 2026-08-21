@@ -525,8 +525,17 @@ class QTQP:
         [[p_reg, a_csc.T], [a_csc, -sp.eye(m, format="csc")]],
         format="csc",
     )
-    rhs = np.concatenate([-c, b])
-    xy = sp.linalg.spsolve(kkt, rhs)
+    if p.nnz == 0:
+      # LP initialization (Clarabel's split): solve [0; b] for the primal
+      # (feasibility only) and [-c; 0] for the dual (optimality only).
+      # Coupling both right-hand sides into one solve, as the QP branch
+      # does, is ill-posed when the (1,1) block is empty and produces
+      # wildly scaled initial points (measured mu_0 up to 4e15 on netlib).
+      xy_p = sp.linalg.spsolve(kkt, np.concatenate([np.zeros(n), b]))
+      xy_d = sp.linalg.spsolve(kkt, np.concatenate([-c, np.zeros(m)]))
+      xy = np.concatenate([xy_p[:n], xy_d[n:]])
+    else:
+      xy = sp.linalg.spsolve(kkt, np.concatenate([-c, b]))
     if not np.all(np.isfinite(xy)):
       # Fall back to trivial init if the KKT solve produced non-finite values.
       logging.warning(
@@ -854,6 +863,7 @@ class QTQP:
       else:
         _q0 = float(x @ x + y @ y + self._tau_weight * tau * tau)
         _sc = math.sqrt((self.m - self.z + 1) / max(_EPS, _q0))
+      _sc *= float(os.environ.get("QTQP_ANCHOR_SCALE", "1"))
       self._anchor = (_sc * x.copy(), _sc * y.copy(), _sc * float(tau))
     status = SolutionStatus.UNFINISHED
     self._best_almost_score = math.inf
@@ -1432,10 +1442,13 @@ class QTQP:
       ax, ay, atau = self._anchor
       dot_aff = float(x_aff @ ax + y_aff @ ay
                       + self._tau_weight * tau_aff * atau)
-      lam = ((dot_aff + math.sqrt(max(0.0, dot_aff * dot_aff
-                                      + 4.0 * quad_aff * rhs_aff)))
-             / (2.0 * max(_EPS * _EPS, quad_aff)))
-      scale_sq = lam * lam
+      if dot_aff == 0.0:
+        scale_sq = rhs_aff / max(_EPS * _EPS, quad_aff)
+      else:
+        lam = ((dot_aff + math.sqrt(max(0.0, dot_aff * dot_aff
+                                        + 4.0 * quad_aff * rhs_aff)))
+               / (2.0 * max(_EPS * _EPS, quad_aff)))
+        scale_sq = lam * lam
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
@@ -1661,8 +1674,13 @@ class QTQP:
       # Scaling u -> lambda u solves lambda^2 quad - lambda dot - rhs = 0.
       ax, ay, atau = self._anchor
       dot = float(x @ ax + y @ ay + self._tau_weight * tau * atau)
-      scale = ((dot + math.sqrt(max(0.0, dot * dot + 4.0 * quad * rhs)))
-               / (2.0 * max(_EPS, quad)))
+      if dot == 0.0:
+        # Algebraically the anchored root reduces to the origin formula
+        # here; evaluate it the same way so a zero anchor is bit-exact.
+        scale = math.sqrt(rhs / max(_EPS, quad))
+      else:
+        scale = ((dot + math.sqrt(max(0.0, dot * dot + 4.0 * quad * rhs)))
+                 / (2.0 * max(_EPS, quad)))
     x *= scale
     y *= scale
     tau *= scale
@@ -1743,12 +1761,12 @@ class QTQP:
     b_op = getattr(self, "_b_op", self.b)
     c_op = getattr(self, "_c_op", self.c)
     t_x = px_w + aty_w + c_op * tau
-    if self._anchor is None:
+    if self._anchor is None or not self._anchor[0].any():
       t_x += mu_hat * x_w
     else:
       t_x += mu_hat * (x_w - self._anchor[0])
     t_y = -ax_w + b_op * tau
-    if self._anchor is None:
+    if self._anchor is None or not self._anchor[1].any():
       t_y += mu_hat * y_w
     else:
       t_y += mu_hat * (y_w - self._anchor[1])
