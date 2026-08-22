@@ -266,6 +266,27 @@ class DirectKktSolver:
     self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
+  def update_unit_dual(self, primal_shift: float) -> None:
+    """Forms and factorizes [P + primal_shift*I, A'; A, -I].
+
+    The saddle system of the CVXOPT-style initialization, routed through
+    exactly the same backend, symbolic ordering, static-regularization
+    clamp, and iterative-refinement bookkeeping as the main-loop update().
+    The subsequent main-loop update() refactorizes as usual.
+
+    Args:
+      primal_shift: The (1, 1)-block Tikhonov shift (the init's reg).
+    """
+    self._true_diags[: self.n] = self._p_diags
+    self._true_diags[: self.n] += primal_shift
+    self._true_diags[self.n :] = 1.0
+    np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
+    self._true_diags[self.n :] *= -1.0
+    self._reg_diags[self.n :] *= -1.0
+    self._solver.update_diag(self._reg_diags)
+    self._solver.factorize()
+    np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
+
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
   ) -> tuple[np.ndarray, dict[str, Any]]:
