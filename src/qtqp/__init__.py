@@ -400,22 +400,11 @@ class QTQP:
 
   def _init_balanced(self, a, b, c):
     """Closed-form level-balanced init (see InitStrategy.BALANCED)."""
+    del a  # data-norm formula; the A-dependent terms only matter off-regime
     m, n, z = self.m, self.n, self.z
     k = m - z
-    e_ineq = np.zeros(m)
-    e_ineq[z:] = 1.0
-    a1 = a.T @ e_ineq
-    q2 = a1 @ a1 + k
-    q1 = 2.0 * (c @ a1 - float(b[z:].sum()))
-    q0 = c @ c + b @ b
-    mu_bar = math.sqrt(max(q2 + q1 + q0, 0.0)) / math.sqrt(k + 1)
-    den = (k + 1) - k * mu_bar
-    if mu_bar > 0.0 and den > 0.0:
-      g2 = mu_bar / den
-    elif q2 > 0.0:
-      g2 = q0 / q2
-    else:
-      g2 = 1.0
+    mu0 = math.sqrt(b @ b + c @ c) / math.sqrt(k + 1)
+    g2 = mu0 / max((k + 1) - k * mu0, 1.0)
     gamma = math.sqrt(g2) if np.isfinite(g2) and g2 > 0.0 else 1.0
     x = np.zeros(n)
     y = np.zeros(m)
