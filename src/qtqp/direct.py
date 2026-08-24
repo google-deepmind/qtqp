@@ -307,7 +307,10 @@ class DirectKktSolver:
       )
 
     if np.any(np.isnan(sol)):
-      raise ValueError("Linear solver returned NaNs.")
+      # Breakdown: hand back the finite warm start and a status the
+      # iteration loop can act on, rather than raising.
+      sol = warm_start.copy()
+      stats = dict(stats, converged=False, status="breakdown")
 
     logging.debug(
         "KKT solve: strategy=%s, status=%s, solves=%d, res=%e",
@@ -333,26 +336,28 @@ class DirectKktSolver:
     status, solves = "non-converged", 0
     # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
-      # Perform correction step using the linear system solver.
-      old_residual_norm = residual_norm
-      sol += self._solver.solve(residual)
-      residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
-      residual_norm = np.linalg.norm(residual, np.inf)
+      # Prospective acceptance: test the correction before applying it, so
+      # a stalled or NaN step never degrades the returned solution (the
+      # negated comparison also rejects NaN residuals).
+      trial = sol + self._solver.solve(residual)
+      trial_residual = (
+          self._kkt_rhs - self._solver @ trial + self._diag_correction * trial
+      )
+      trial_norm = np.linalg.norm(trial_residual, np.inf)
+      if not (trial_norm < residual_norm):
+        logging.debug(
+            "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
+            solves,
+            residual_norm,
+            trial_norm,
+        )
+        status = "stalled"
+        break
+      sol, residual, residual_norm = trial, trial_residual, trial_norm
 
       # Check for convergence.
       if residual_norm < tolerance:
         status = "converged"
-        break
-
-      # Check for stalling (residual not improving).
-      if residual_norm >= old_residual_norm:
-        logging.debug(
-            "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
-            solves,
-            old_residual_norm,
-            residual_norm,
-        )
-        status = "stalled"
         break
     else:
       logging.debug(

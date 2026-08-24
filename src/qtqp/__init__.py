@@ -736,6 +736,8 @@ class QTQP:
           rhs=self.q, warm_start=self.kinv_q
       )
       stats_i["q_lin_sys_stats"] = q_lin_sys_stats
+      if q_lin_sys_stats["status"] == "breakdown":
+        break
 
       # --- Step 2: Predictor (Affine) Step ---
       # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -754,6 +756,8 @@ class QTQP:
           correction=None,
       )
       stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+      if predictor_lin_sys_stats["status"] == "breakdown":
+        break
 
       d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
       # Predictor slack step from the linearized complementarity condition with
@@ -812,6 +816,8 @@ class QTQP:
           correction=correction,
       )
       stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
+      if corrector_lin_sys_stats["status"] == "breakdown":
+        break
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
