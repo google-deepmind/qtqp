@@ -202,6 +202,7 @@ class InitStrategy(enum.Enum):
   TRIVIAL = "trivial"
   ORTHANT = "orthant"
   CVXOPT = "cvxopt"
+  BALANCED = "balanced"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -382,6 +383,8 @@ class QTQP:
       return self._init_orthant(b, mu_scale)
     if strategy is InitStrategy.CVXOPT:
       return self._init_cvxopt(a, p, b, c)
+    if strategy is InitStrategy.BALANCED:
+      return self._init_balanced(a, b, c)
     raise ValueError(f"Unknown init strategy: {strategy}")
 
   def _init_trivial(self):
@@ -393,6 +396,32 @@ class QTQP:
     s[self.z :] = 1.0
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._equilibrate_iterates(x, y, s)
+    return x, y, s, 1.0, {}
+
+  def _init_balanced(self, a, b, c):
+    """Closed-form level-balanced init (see InitStrategy.BALANCED)."""
+    m, n, z = self.m, self.n, self.z
+    k = m - z
+    e_ineq = np.zeros(m)
+    e_ineq[z:] = 1.0
+    a1 = a.T @ e_ineq
+    q2 = a1 @ a1 + k
+    q1 = 2.0 * (c @ a1 - float(b[z:].sum()))
+    q0 = c @ c + b @ b
+    mu_bar = math.sqrt(max(q2 + q1 + q0, 0.0)) / math.sqrt(k + 1)
+    den = (k + 1) - k * mu_bar
+    if mu_bar > 0.0 and den > 0.0:
+      g2 = mu_bar / den
+    elif q2 > 0.0:
+      g2 = q0 / q2
+    else:
+      g2 = 1.0
+    gamma = math.sqrt(g2) if np.isfinite(g2) and g2 > 0.0 else 1.0
+    x = np.zeros(n)
+    y = np.zeros(m)
+    s = np.zeros(m)
+    y[z:] = gamma
+    s[z:] = gamma
     return x, y, s, 1.0, {}
 
   def _init_orthant(self, b, mu_scale):
@@ -467,6 +496,7 @@ class QTQP:
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
+      path_radius: float = math.inf,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 20,
@@ -492,6 +522,7 @@ class QTQP:
           atol_infeas=atol_infeas,
           rtol_infeas=rtol_infeas,
           max_iter=max_iter,
+          path_radius=path_radius,
           step_size_scale=step_size_scale,
           min_static_regularization=min_static_regularization,
           max_iterative_refinement_steps=max_iterative_refinement_steps,
@@ -501,7 +532,7 @@ class QTQP:
           verbose=verbose,
           equilibration_strategy=equilibration_strategy,
           collect_stats=collect_stats,
-          init_strategy=init_strategy,
+          init_strategy=InitStrategy(init_strategy),
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
@@ -521,6 +552,7 @@ class QTQP:
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
+      path_radius: float = math.inf,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 20,
@@ -548,6 +580,12 @@ class QTQP:
       rtol_infeas (float): Relative tolerance for detecting primal or dual
         infeasibility.
       max_iter (int): Maximum number of iterations before stopping.
+      path_radius (float): Neighborhood radius beta around the central path:
+        the corrector target is floored at exp(-beta) times the
+        residual-implied path level ||R||/||u||, bounding the level
+        deviation log(mu_resid/mu_comp) by beta. inf (default) reproduces
+        pure Mehrotra; smaller beta follows the path more closely -- more
+        robust, slower. Values near 0 stall; useful range is beta >= 2.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
       min_static_regularization (float): Minimum regularization value used in
@@ -606,6 +644,7 @@ class QTQP:
     assert atol_infeas >= 0
     assert rtol_infeas >= 0
     assert max_iter > 0
+    assert path_radius > 0
     assert 0 < step_size_scale < 1
     assert min_static_regularization >= 0
     assert max_iterative_refinement_steps >= 1
@@ -744,6 +783,17 @@ class QTQP:
           mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
       )
 
+      # N(beta) projection: never target below exp(-beta) times the
+      # residual-implied path level, so the level deviation stays <= beta
+      # even if the linear rows stall.
+      mu_target = sigma * mu
+      if math.isfinite(path_radius):
+        r_x = p @ x + a.T @ y + c * tau
+        r_y = b * tau - a @ x - s
+        mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
+                             / (x @ x + y @ y + tau * tau))
+        mu_target = max(mu_target, math.exp(-path_radius) * mu_resid)
+
       # --- Step 3: Corrector Step ---
       # Mehrotra's second-order correction accounts for the nonlinear cross-term
       # that the predictor's linear approximation ignores. Expanding the full
@@ -763,7 +813,7 @@ class QTQP:
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
           p=p,
           mu=mu,
-          mu_target=sigma * mu,
+          mu_target=mu_target,
           r_anchor=xy,
           tau_anchor=tau_p,
           x=x,
@@ -783,12 +833,12 @@ class QTQP:
         # catastrophic cancellation when y_i is small and the three terms
         # have similar magnitudes with opposing signs.
         d_s[self.z :] = (
-            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+            mu_target - cross_p - y_c[self.z :] * s[self.z :]
         ) / y[self.z :]
       else:
         # Legacy three-division formula.
         d_s[self.z :] = (
-            sigma * mu / y[self.z :]
+            mu_target / y[self.z :]
             + correction
             - y_c[self.z :] * s[self.z :] / y[self.z :]
         )
