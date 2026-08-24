@@ -1326,13 +1326,17 @@ class QTQP:
     # ≈ 0.  dinfeas measures how well x/|c'x| certifies dual infeasibility.
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
-    dinfeas_a = _norm(ax_plus_s, np.inf) / (abs(ctx) + _EPS)
-    dinfeas_p = norm_px / (abs(ctx) + _EPS)
+    # Descent measured in units of the data norm: a right-signed c'x or b'y
+    # at rounding scale is not a certificate when the data norm is large.
+    descent_d = abs(ctx) / max(self._norm_c, 1.0)
+    descent_p = abs(bty) / max(self._norm_b, 1.0)
+    dinfeas_a = _norm(ax_plus_s, np.inf) / (descent_d + _EPS)
+    dinfeas_p = norm_px / (descent_d + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
     # If the primal is infeasible (dual unbounded) this produces a ray y
     # with b'y < 0 that satisfies the homogeneous dual condition A'y ≈ 0.
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
-    pinfeas = norm_aty / (abs(bty) + _EPS)
+    pinfeas = norm_aty / (descent_p + _EPS)
 
     # Primal residual tolerance relative scale.
     prelrhs = max(
