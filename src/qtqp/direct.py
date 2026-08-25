@@ -172,7 +172,6 @@ class DirectKktSolver:
       solver: LinearSolver,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
-      prospective_refinement: bool = True,
   ):
     """Initializes the DirectKktSolver.
 
@@ -195,7 +194,6 @@ class DirectKktSolver:
     if refinement_strategy is RefinementStrategy.GMRES and gmres_restart < 1:
       raise ValueError("gmres_restart must be >= 1.")
     self.refinement_strategy = refinement_strategy
-    self._prospective = bool(prospective_refinement)
     self.gmres_restart = gmres_restart
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
@@ -309,8 +307,6 @@ class DirectKktSolver:
       )
 
     if np.any(np.isnan(sol)):
-      if not self._prospective:
-        raise ValueError("Linear solver returned NaNs.")
       # Breakdown: hand back the finite warm start and a status the
       # iteration loop can act on, rather than raising.
       sol = warm_start.copy()
@@ -340,20 +336,6 @@ class DirectKktSolver:
     status, solves = "non-converged", 0
     # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
-      if not self._prospective:
-        old_residual_norm = residual_norm
-        sol += self._solver.solve(residual)
-        residual = (
-            self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
-        )
-        residual_norm = np.linalg.norm(residual, np.inf)
-        if residual_norm < tolerance:
-          status = "converged"
-          break
-        if residual_norm >= old_residual_norm:
-          status = "stalled"
-          break
-        continue
       # Prospective acceptance: test the correction before applying it, so
       # a stalled or NaN step never degrades the returned solution (the
       # negated comparison also rejects NaN residuals).

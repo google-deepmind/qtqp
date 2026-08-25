@@ -203,7 +203,6 @@ class InitStrategy(enum.Enum):
   ORTHANT = "orthant"
   CVXOPT = "cvxopt"
   BALANCED = "balanced"
-  BALANCED_FULL = "balanced_full"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -386,8 +385,6 @@ class QTQP:
       return self._init_cvxopt(a, p, b, c)
     if strategy is InitStrategy.BALANCED:
       return self._init_balanced(a, b, c)
-    if strategy is InitStrategy.BALANCED_FULL:
-      return self._init_balanced_full(a, b, c)
     raise ValueError(f"Unknown init strategy: {strategy}")
 
   def _init_trivial(self):
@@ -408,32 +405,6 @@ class QTQP:
     k = m - z
     mu0 = math.sqrt(b @ b + c @ c) / math.sqrt(k + 1)
     g2 = mu0 / max((k + 1) - k * mu0, 1.0)
-    gamma = math.sqrt(g2) if np.isfinite(g2) and g2 > 0.0 else 1.0
-    x = np.zeros(n)
-    y = np.zeros(m)
-    s = np.zeros(m)
-    y[z:] = gamma
-    s[z:] = gamma
-    return x, y, s, 1.0, {}
-
-  def _init_balanced_full(self, a, b, c):
-    """A/B only: the full residual-quadratic balanced formula."""
-    m, n, z = self.m, self.n, self.z
-    k = m - z
-    e_ineq = np.zeros(m)
-    e_ineq[z:] = 1.0
-    a1 = a.T @ e_ineq
-    q2 = a1 @ a1 + k
-    q1 = 2.0 * (c @ a1 - float(b[z:].sum()))
-    q0 = c @ c + b @ b
-    mu_bar = math.sqrt(max(q2 + q1 + q0, 0.0)) / math.sqrt(k + 1)
-    den = (k + 1) - k * mu_bar
-    if mu_bar > 0.0 and den > 0.0:
-      g2 = mu_bar / den
-    elif q2 > 0.0:
-      g2 = q0 / q2
-    else:
-      g2 = 1.0
     gamma = math.sqrt(g2) if np.isfinite(g2) and g2 > 0.0 else 1.0
     x = np.zeros(n)
     y = np.zeros(m)
@@ -514,11 +485,7 @@ class QTQP:
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
-      centering: str = "mehrotra",
-      centering_exponent: float = 3.0,
-      cert_datanorm: bool = True,
-      prospective_refinement: bool = True,
-      path_radius: float = math.inf,
+      path_gamma: float = 0.2,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 20,
@@ -528,7 +495,7 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_strategy: InitStrategy = InitStrategy.BALANCED,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
@@ -544,11 +511,7 @@ class QTQP:
           atol_infeas=atol_infeas,
           rtol_infeas=rtol_infeas,
           max_iter=max_iter,
-          centering=centering,
-          centering_exponent=centering_exponent,
-          cert_datanorm=cert_datanorm,
-          prospective_refinement=prospective_refinement,
-          path_radius=path_radius,
+          path_gamma=path_gamma,
           step_size_scale=step_size_scale,
           min_static_regularization=min_static_regularization,
           max_iterative_refinement_steps=max_iterative_refinement_steps,
@@ -581,11 +544,7 @@ class QTQP:
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
-      centering: str = "mehrotra",
-      centering_exponent: float = 3.0,
-      cert_datanorm: bool = True,
-      prospective_refinement: bool = True,
-      path_radius: float = math.inf,
+      path_gamma: float = 0.2,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
       max_iterative_refinement_steps: int = 20,
@@ -595,7 +554,7 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_strategy: InitStrategy = InitStrategy.BALANCED,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
@@ -613,12 +572,12 @@ class QTQP:
       rtol_infeas (float): Relative tolerance for detecting primal or dual
         infeasibility.
       max_iter (int): Maximum number of iterations before stopping.
-      path_radius (float): Neighborhood radius beta around the central path:
-        the corrector target is floored at exp(-beta) times the
-        residual-implied path level ||R||/||u||, bounding the level
-        deviation log(mu_resid/mu_comp) by beta. inf (default) reproduces
-        pure Mehrotra; smaller beta follows the path more closely -- more
-        robust, slower. Values near 0 stall; useful range is beta >= 2.
+      path_gamma (float): Weight of the residual-implied path level in the
+        centering anchor mu_comp^(1-g) * mu_resid^g, in [0, 1]. 0 anchors
+        purely on complementarity (Mehrotra's target); larger values follow
+        the central path more closely -- more robust, slower. Values in
+        [0.1, 0.3] are equivalent on the benchmark corpus; speed degrades
+        monotonically above.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
       min_static_regularization (float): Minimum regularization value used in
@@ -677,8 +636,7 @@ class QTQP:
     assert atol_infeas >= 0
     assert rtol_infeas >= 0
     assert max_iter > 0
-    assert path_radius > 0
-    self._cert_datanorm = bool(cert_datanorm)
+    assert 0.0 <= path_gamma <= 1.0
     assert 0 < step_size_scale < 1
     assert min_static_regularization >= 0
     assert max_iterative_refinement_steps >= 1
@@ -744,7 +702,6 @@ class QTQP:
         solver=linear_solver_backend,
         refinement_strategy=refinement_strategy,
         gmres_restart=gmres_restart,
-        prospective_refinement=prospective_refinement,
     )
 
     stats = []
@@ -825,46 +782,17 @@ class QTQP:
       # N(beta) projection: never target below exp(-beta) times the
       # residual-implied path level, so the level deviation stays <= beta
       # even if the linear rows stall.
-      if centering == "path":
-        # Path-level Mehrotra: the quality^p rule applied to the geometric
-        # mean of the two path-parameter estimators instead of mu_comp.
-        r_x = p @ x + a.T @ y + c * tau
-        r_y = b * tau - a @ x - s
-        mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
-                             / (x @ x + y @ y + tau * tau))
-        s_aff = s[self.z :] + alpha_p * d_s[self.z :]
-        y_aff = y[self.z :] + alpha_p * d_y_p[self.z :]
-        mu_aff = max(float(s_aff @ y_aff) / (self.m - self.z), 0.0)
-        eps_mu = _EPS * max(mu, 1.0)
-        mu_hat = math.sqrt(mu * max(mu_resid, eps_mu))
-        mu_hat_aff = math.sqrt(
-            max(mu_aff, eps_mu) * max((1.0 - alpha_p) * mu_resid, eps_mu)
-        )
-        ratio = min(mu_hat_aff / max(mu_hat, _EPS), 1.0)
-        mu_target = mu_hat * ratio ** centering_exponent
-        sigma = mu_target / max(mu, _EPS)
-      elif centering == "geo":
-        # Geometric path anchoring: Mehrotra's target with the anchor moved
-        # from mu_comp onto mu_comp^(1-g) * mu_resid^g. On-path (mu_resid ==
-        # mu_comp) this is exactly Mehrotra; decoupling is recouped at rate
-        # g per step in log scale.
-        r_x = p @ x + a.T @ y + c * tau
-        r_y = b * tau - a @ x - s
-        mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
-                             / (x @ x + y @ y + tau * tau))
-        eps_mu = _EPS * max(mu, 1.0)
-        mu_target = (sigma * mu
-                     * (max(mu_resid, eps_mu) / max(mu, _EPS))
-                     ** centering_exponent)
-        sigma = mu_target / max(mu, _EPS)
-      else:
-        mu_target = sigma * mu
-        if math.isfinite(path_radius):
-          r_x = p @ x + a.T @ y + c * tau
-          r_y = b * tau - a @ x - s
-          mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
-                               / (x @ x + y @ y + tau * tau))
-          mu_target = max(mu_target, math.exp(-path_radius) * mu_resid)
+      # Path-anchored centering: Mehrotra's affine-quality target with the
+      # anchor moved onto mu_comp^(1-g) * mu_resid^g. g = 0 is the Mehrotra
+      # anchor; larger g follows the central path more closely.
+      r_x = p @ x + a.T @ y + c * tau
+      r_y = b * tau - a @ x - s
+      mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
+                           / (x @ x + y @ y + tau * tau))
+      eps_mu = _EPS * max(mu, 1.0)
+      mu_target = (sigma * mu
+                   * (max(mu_resid, eps_mu) / max(mu, _EPS)) ** path_gamma)
+      sigma = mu_target / max(mu, _EPS)
 
       # --- Step 3: Corrector Step ---
       # Mehrotra's second-order correction accounts for the nonlinear cross-term
@@ -1413,12 +1341,8 @@ class QTQP:
     norm_px = _norm(px, np.inf)
     # Descent measured in units of the data norm: a right-signed c'x or b'y
     # at rounding scale is not a certificate when the data norm is large.
-    if self._cert_datanorm:
-      descent_d = abs(ctx) / max(self._norm_c, 1.0)
-      descent_p = abs(bty) / max(self._norm_b, 1.0)
-    else:
-      descent_d = abs(ctx)
-      descent_p = abs(bty)
+    descent_d = abs(ctx) / max(self._norm_c, 1.0)
+    descent_p = abs(bty) / max(self._norm_b, 1.0)
     dinfeas_a = _norm(ax_plus_s, np.inf) / (descent_d + _EPS)
     dinfeas_p = norm_px / (descent_d + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
