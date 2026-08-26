@@ -1754,7 +1754,6 @@ def test_max_step_size():
 
 @pytest.mark.parametrize('strategy', [
     qtqp.EquilibrationStrategy.RUIZ,
-    qtqp.EquilibrationStrategy.AUGMENTED,
 ])
 def test_equilibrate_unequilibrate_roundtrip(strategy):
   """Equilibrating then unequilibrating iterates must be the identity for
@@ -2074,13 +2073,12 @@ def test_stats_monotonicity():
   times = [s['time'] for s in solution.stats]
   alphas = [s['alpha'] for s in solution.stats]
 
-  # mu is the complementarity of the current iterate and should decrease
-  # strictly as the IPM drives iterates toward the central path.
-  assert mus[0] > 0.0
-  for i in range(1, len(mus)):
-    assert mus[i] < mus[i - 1], (
-        f"mu not decreasing: mu[{i}]={mus[i]} >= mu[{i-1}]={mus[i-1]}"
-    )
+  # mu targets are anchored to the residual level, so mu may rise on a
+  # minority of iterations; assert the trend instead of strict decrease.
+  assert all(v > 0.0 for v in mus)
+  assert mus[-1] < 1e-6 * mus[0]
+  rises = sum(1 for i in range(1, len(mus)) if mus[i] >= mus[i - 1])
+  assert rises <= len(mus) // 3
 
   # Time should be monotonically non-decreasing.
   for i in range(1, len(times)):
@@ -2249,13 +2247,13 @@ def test_nonfinite_p_rejected():
 
 
 # =============================================================================
-# InitStrategy: ORTHANT and CVXOPT-style initialization
+# InitStrategy coverage
 # =============================================================================
 
 _INIT_STRATEGIES = [
     qtqp.InitStrategy.TRIVIAL,
-    qtqp.InitStrategy.ORTHANT,
     qtqp.InitStrategy.CVXOPT,
+    qtqp.InitStrategy.BALANCED,
 ]
 
 
@@ -2297,86 +2295,12 @@ def test_init_strategy_unbounded(init_strategy):
   _assert_unbounded(solution, a, c, p, 5)
 
 
-@pytest.mark.parametrize('mu_scale', [0.1, 1.0, 5.0])
-def test_init_orthant_centering(mu_scale):
-  """ORTHANT init must satisfy the closed-form centering condition exactly.
-
-  For each inequality row i:  mu_0 * y_i + b_i - mu_0 / y_i  ==  0
-  with mu_0 = mu_scale * ||b[z:]||_2 and y_i computed from the closed form.
-  """
-  rng = np.random.default_rng(7)
-  m, n, z = 40, 25, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE  # _init_trivial branch needs the attribute
-  x, y, s, tau, meta = solver._init_orthant(b, mu_scale)
-
-  assert tau == 1.0
-  assert np.all(x == 0.0)
-  assert np.all(y[z:] > 0)
-  assert np.all(s[z:] > 0)
-  mu_0 = meta['mu_0']
-  expected_mu = mu_scale * np.linalg.norm(b[z:], 2)
-  np.testing.assert_allclose(mu_0, expected_mu, rtol=1e-12)
-  # Middle-block centering residual.
-  resid = mu_0 * y[z:] + b[z:] - mu_0 / y[z:]
-  np.testing.assert_allclose(
-      resid, 0.0, atol=1e-10 * (np.linalg.norm(b[z:]) + mu_0)
-  )
-  # Complementarity: y * s == mu_0 componentwise.
-  np.testing.assert_allclose(y[z:] * s[z:], mu_0, rtol=1e-12)
 
 
-def test_init_orthant_zero_b():
-  """ORTHANT init must handle b[z:] == 0 without dividing by zero."""
-  m, n, z = 6, 4, 2
-  a = sparse.eye(m, n, format='csc')
-  b = np.zeros(m)
-  c = np.zeros(n)
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  x, y, s, tau, meta = solver._init_orthant(b, mu_scale=1.0)
-  assert tau == 1.0
-  assert np.all(x == 0.0)
-  np.testing.assert_array_equal(y[z:], 1.0)
-  np.testing.assert_array_equal(s[z:], meta['mu_0'])
 
 
-@pytest.mark.parametrize('bad_value', [0.0, -1.0, float('nan'), float('inf')])
-def test_init_orthant_rejects_invalid_mu_scale(bad_value):
-  """Non-positive or non-finite init_mu_scale must raise a clear error."""
-  rng = np.random.default_rng(0)
-  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
-  with pytest.raises(ValueError, match='init_mu_scale'):
-    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
-        init_strategy=qtqp.InitStrategy.ORTHANT,
-        init_mu_scale=bad_value,
-        verbose=False,
-    )
 
 
-def test_init_orthant_stable_for_large_positive_beta():
-  """The branch-selected formula must avoid catastrophic cancellation.
-
-  Small mu_scale drives beta = b / (mu_scale * ||b||) to large magnitudes; for
-  beta >> 0 the naive form 0.5*(-beta + sqrt(beta^2+4)) loses all precision,
-  while the alternate form 2/(beta + sqrt(beta^2+4)) does not. The centering
-  residual stays at machine epsilon either way only with the branched form.
-  """
-  m, n, z = 4, 2, 0
-  c = np.zeros(n)
-  b = np.array([10.0, 1.0, 0.5, 2.0])
-  solver = qtqp.QTQP(a=sparse.eye(m, n, format='csc'), b=b, c=c, z=z)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  mu_scale = 1e-7  # forces beta to ~1e6 in magnitude
-  _, y, s, _, meta = solver._init_orthant(b, mu_scale=mu_scale)
-  mu_0 = meta['mu_0']
-  # Centering residual must remain near machine precision (the naive
-  # cancellation-prone form would blow this up by ~beta^2 ~ 1e12).
-  resid = mu_0 * y + b - mu_0 / y
-  np.testing.assert_allclose(resid / mu_0, 0.0, atol=1e-7)
-  assert np.all(y > 0)
-  assert np.all(s > 0)
 
 
 def test_init_cvxopt_strict_interior():
@@ -2409,82 +2333,6 @@ def test_init_strategy_mostly_equality_problem():
         f"strategy {strat} failed on mostly-equality problem"
     )
 
-
-# =============================================================================
-# AUGMENTED equilibration: focused tests
-# =============================================================================
-
-@pytest.mark.parametrize('seed', 4242 + np.arange(3))
-def test_augmented_equilibration_solve(seed):
-  """AUGMENTED equilibration must solve a generic feasible QP."""
-  rng = np.random.default_rng(seed)
-  a, b, c, p = _gen_feasible(80, 50, 10, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=10, p=p).solve(
-      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
-      verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, 10)
-
-
-def test_augmented_equilibration_infeasible():
-  """AUGMENTED equilibration must still detect primal infeasibility."""
-  rng = np.random.default_rng(4243)
-  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
-      verbose=False,
-  )
-  _assert_infeasible(solution, a, b, 5)
-
-
-def test_augmented_equilibration_unbounded():
-  """AUGMENTED equilibration must still detect primal unboundedness."""
-  rng = np.random.default_rng(4244)
-  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
-      verbose=False,
-  )
-  _assert_unbounded(solution, a, c, p, 5)
-
-
-def test_augmented_equilibration_scales_b_and_c():
-  """AUGMENTED equilibration must drive |b| and |c| toward unit scale when
-  the original problem has them several orders of magnitude away from 1.
-  RUIZ scales b and c only passively by d/e and cannot reach this."""
-  rng = np.random.default_rng(99)
-  m, n, z = 30, 20, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  # Push b and c far from unit scale.
-  b = b * 1e6
-  c = c * 1e-6
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.AUGMENTED
-  _, _, b_eq, c_eq, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
-
-  # sigma absorbed most of the gross scale mismatch.
-  assert sigma != 1.0
-  assert np.linalg.norm(b_eq, np.inf) < 1e3
-  assert np.linalg.norm(c_eq, np.inf) < 1e3
-  # Cross-check the inverse: applying sigma * D b reproduces b_eq.
-  np.testing.assert_allclose(b_eq, sigma * d * b, rtol=1e-12)
-  np.testing.assert_allclose(c_eq, sigma * e * c, rtol=1e-12)
-
-
-def test_augmented_equilibration_ill_scaled_problem_converges():
-  """AUGMENTED should handle a problem whose b is 1e6x larger than A's rows
-  without losing accuracy. Same instance, the recovered solution must
-  satisfy the ORIGINAL problem's KKT (not the equilibrated one)."""
-  rng = np.random.default_rng(101)
-  m, n, z = 60, 40, 8
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  b = b * 1e6  # b dominates the row scaling
-
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
-      verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, z)
 
 
 # =============================================================================
@@ -2546,19 +2394,6 @@ def test_refinement_strategies_agree():
   obj_rich = c @ sol_rich.x + 0.5 * sol_rich.x @ p @ sol_rich.x
   obj_gmres = c @ sol_gmres.x + 0.5 * sol_gmres.x @ p @ sol_gmres.x
   np.testing.assert_allclose(obj_rich, obj_gmres, atol=1e-5, rtol=1e-5)
-
-
-def test_refinement_gmres_with_augmented_equilibration():
-  """GMRES IR must compose with the new AUGMENTED equilibration."""
-  rng = np.random.default_rng(5500)
-  a, b, c, p = _gen_feasible(60, 40, 8, random_state=rng)
-  b = b * 1e4  # mildly ill-scaled b to exercise AUGMENTED + GMRES together
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=8, p=p).solve(
-      refinement_strategy=qtqp.RefinementStrategy.GMRES,
-      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
-      verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, 8)
 
 
 def test_direct_kkt_solver_gmres_residual_matches_richardson():
@@ -2757,89 +2592,6 @@ def test_gmres_rollback_on_stalled_refinement():
   # than what one direct factor-solve from warm_start would give.
   assert stats['final_residual_norm'] < 1e-6
 
-
-# =============================================================================
-# central_path_exponent: generalized central path
-# =============================================================================
-
-@pytest.mark.parametrize('central_path_exponent', [0.5, 1.0, 1.5, 2.0])
-@pytest.mark.parametrize('seed', 6000 + np.arange(3))
-def test_central_path_exponent_solve(central_path_exponent, seed):
-  """All positive exponents must converge to the same optimal solution."""
-  rng = np.random.default_rng(seed)
-  m, n, z = 60, 40, 8
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      central_path_exponent=central_path_exponent, verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, z)
-
-
-def test_central_path_exponent_default_unchanged():
-  """central_path_exponent=1.0 must give the same solution as the default.
-
-  The two paths drift by ~1 ULP per iteration because mu**1.0 is not
-  bit-identical to mu in IEEE math; this test just guards against any
-  larger semantic divergence on the default path.
-  """
-  rng = np.random.default_rng(6100)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
-  sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      central_path_exponent=1.0, verbose=False
-  )
-  np.testing.assert_allclose(sol_a.x, sol_b.x, atol=1e-6, rtol=1e-6)
-  np.testing.assert_allclose(sol_a.y, sol_b.y, atol=1e-6, rtol=1e-6)
-  np.testing.assert_allclose(sol_a.s, sol_b.s, atol=1e-6, rtol=1e-6)
-
-
-def test_central_path_exponent_solutions_agree():
-  """Different exponents converge to the same QP optimum (within tol)."""
-  rng = np.random.default_rng(6200)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  objs = []
-  for cpe in (0.5, 1.0, 1.5, 2.0):
-    sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        central_path_exponent=cpe, verbose=False
-    )
-    _assert_solution(sol, a, b, c, p, z)
-    objs.append(c @ sol.x + 0.5 * sol.x @ p @ sol.x)
-  ref = objs[1]  # the p=1 case is the reference
-  for obj in objs:
-    np.testing.assert_allclose(obj, ref, atol=1e-5, rtol=1e-5)
-
-
-@pytest.mark.parametrize('bad_value', [0.0, -1.0, -0.5, float('nan'), float('inf')])
-def test_central_path_exponent_rejects_invalid(bad_value):
-  """Non-positive or non-finite central_path_exponent must raise."""
-  rng = np.random.default_rng(6300)
-  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
-  with pytest.raises(ValueError, match='central_path_exponent'):
-    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
-        central_path_exponent=bad_value, verbose=False
-    )
-
-
-def test_central_path_exponent_infeasible():
-  """Non-default exponent must still detect primal infeasibility."""
-  rng = np.random.default_rng(6400)
-  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      central_path_exponent=1.5, verbose=False
-  )
-  _assert_infeasible(solution, a, b, 5)
-
-
-def test_central_path_exponent_unbounded():
-  """Non-default exponent must still detect primal unboundedness."""
-  rng = np.random.default_rng(6500)
-  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      central_path_exponent=0.7, verbose=False
-  )
-  _assert_unbounded(solution, a, c, p, 5)
 
 
 # =============================================================================

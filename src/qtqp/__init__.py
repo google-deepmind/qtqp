@@ -151,28 +151,10 @@ class EquilibrationStrategy(enum.Enum):
     [D A E ; E P E] is driven toward 1. The vectors b and c are passively
     rescaled as b <- D b and c <- E c.
 
-  AUGMENTED:
-    Ruiz equilibration on the symmetric augmented matrix
-
-        M = [ P    A^T   c ]
-            [ A     0   -b ]
-            [ c^T -b^T   0 ]
-
-    so b and c participate in determining the row/column norms rather than
-    being scaled passively. The scaling has three blocks (E for x columns,
-    D for y rows, and a scalar sigma for the augmented row/column), giving
-
-        A_eq = D A E,    P_eq = E P E,
-        b_eq = sigma * (D b),   c_eq = sigma * (E c).
-
-    The sigma factor maps to the homogenization variable (tau_orig =
-    sigma * tau_eq), so iterate (un)equilibration must apply 1/sigma to
-    keep the recovered x/tau, y/tau, s/tau in the original scale.
   """
 
   NONE = "none"
   RUIZ = "ruiz"
-  AUGMENTED = "augmented"
 
 
 class InitStrategy(enum.Enum):
@@ -839,13 +821,10 @@ class QTQP:
     """Dispatch to the selected equilibration strategy.
 
     Returns a 7-tuple (a, p, b, c, d, e, sigma) of equilibrated problem data
-    and accumulated scalings. For RUIZ, sigma == 1.0; for AUGMENTED, sigma is
-    the scalar scaling on the augmented row/column (== tau_orig / tau_eq).
+    and accumulated scalings; sigma is always 1.0 for RUIZ.
     """
     if self.equilibration_strategy is EquilibrationStrategy.RUIZ:
       return self._equilibrate_ruiz(num_iters, min_scale, max_scale)
-    if self.equilibration_strategy is EquilibrationStrategy.AUGMENTED:
-      return self._equilibrate_augmented(num_iters, min_scale, max_scale)
     raise ValueError(
         f"Unknown equilibration strategy: {self.equilibration_strategy}"
     )
@@ -904,72 +883,6 @@ class QTQP:
       )
 
     return a, p, b * d, c * e, d, e, 1.0
-
-  def _equilibrate_augmented(self, num_iters, min_scale, max_scale):
-    """Ruiz equilibration on the symmetric augmented matrix.
-
-        M = [ P    A^T   c ]
-            [ A     0   -b ]
-            [ c^T -b^T   0 ]
-
-    The augmented row/column for the homogenization variable introduces a
-    scalar scaling sigma in addition to the row scaling d and column scaling
-    e, so b and c are rescaled by sigma * (d ⊙ b) and sigma * (e ⊙ c).
-    """
-    # Constructor enforces CSC; .copy() preserves format without a re-convert.
-    a, p = self.a.copy(), self.p.copy()
-    b, c = self.b.copy(), self.c.copy()
-    d, e = np.ones(self.m), np.ones(self.n)
-    sigma = 1.0
-
-    # Sparsity patterns are static; pre-compute the per-column nnz counts.
-    a_col_counts = np.diff(a.indptr)
-    p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
-
-    for i in range(num_iters):
-      # Column inf-norms of the symmetric augmented matrix.
-      # x-columns (0..n): max(||P[:,j]||_inf, ||A[:,j]||_inf, |c[j]|)
-      norms_e = np.maximum(
-          sp.linalg.norm(p, np.inf, axis=0),
-          sp.linalg.norm(a, np.inf, axis=0),
-      )
-      norms_e = np.maximum(norms_e, np.abs(c))
-      # y-columns (n..n+m): max(||A[i,:]||_inf, |b[i]|)
-      norms_d = np.maximum(sp.linalg.norm(a, np.inf, axis=1), np.abs(b))
-      # tau-column (n+m): max(||c||_inf, ||b||_inf)
-      norm_sigma = max(_norm(c, np.inf), _norm(b, np.inf))
-
-      e_i = 1.0 / np.sqrt(np.where(norms_e == 0.0, 1.0, norms_e))
-      d_i = 1.0 / np.sqrt(np.where(norms_d == 0.0, 1.0, norms_d))
-      sigma_i = 1.0 / math.sqrt(norm_sigma) if norm_sigma > 0.0 else 1.0
-
-      e_i = np.clip(e_i, min_scale, max_scale)
-      d_i = np.clip(d_i, min_scale, max_scale)
-      sigma_i = float(np.clip(sigma_i, min_scale, max_scale))
-
-      # A: D_i A E_i (same in-place CSC scaling as RUIZ).
-      col_scale_a = np.repeat(e_i, a_col_counts)
-      a.data *= d_i[a.indices] * col_scale_a
-      if p_col_counts is not None:
-        col_scale_p = np.repeat(e_i, p_col_counts)
-        p.data *= e_i[p.indices] * col_scale_p
-      # b, c absorb the tau-column scaling sigma_i in addition to d_i / e_i.
-      b = sigma_i * d_i * b
-      c = sigma_i * e_i * c
-
-      d *= d_i
-      e *= e_i
-      sigma *= sigma_i
-      logging.debug(
-          "Augmented equilibration iter %d: d_i err: %s, e_i err: %s,"
-          " sigma_i err: %s",
-          i,
-          _norm(d_i - 1, np.inf),
-          _norm(e_i - 1, np.inf),
-          abs(sigma_i - 1.0),
-      )
-
-    return a, p, b, c, d, e, sigma
 
   def _unequilibrate_iterates(self, x, y, s):
     """Map equilibrated iterates back to original-problem scale.
