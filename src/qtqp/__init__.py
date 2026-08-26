@@ -138,25 +138,6 @@ class SolutionStatus(enum.Enum):
   UNFINISHED = "unfinished"
 
 
-class EquilibrationStrategy(enum.Enum):
-  """Available equilibration strategies applied to the problem data.
-
-  NONE:
-    Do not equilibrate. Pass (A, P, b, c) through unchanged.
-
-  RUIZ:
-    Ruiz equilibration on the constraint matrix A and Hessian P. Symmetric
-    diagonal scalings D (rows) and E (columns) are chosen so that, at each
-    iteration, the inf-norm of every row of D A E and every column of
-    [D A E ; E P E] is driven toward 1. The vectors b and c are passively
-    rescaled as b <- D b and c <- E c.
-
-  """
-
-  NONE = "none"
-  RUIZ = "ruiz"
-
-
 class InitStrategy(enum.Enum):
   """Available initialization strategies for the IPM iterates.
 
@@ -364,7 +345,7 @@ class QTQP:
     s = np.zeros(self.m)
     y[self.z :] = 1.0
     s[self.z :] = 1.0
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+    if self.ruiz_iters > 0:
       x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
 
@@ -438,7 +419,7 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
+      ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
@@ -464,7 +445,7 @@ class QTQP:
               if isinstance(linear_solver, str) else linear_solver
           ),
           verbose=verbose,
-          equilibration_strategy=equilibration_strategy,
+          ruiz_iters=ruiz_iters,
           collect_stats=collect_stats,
           init_strategy=InitStrategy(init_strategy),
           refinement_strategy=refinement_strategy,
@@ -491,7 +472,7 @@ class QTQP:
       linear_solver_rtol: float = 1e-12,
       linear_solver: LinearSolver = LinearSolver.AUTO,
       verbose: bool = True,
-      equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
+      ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
@@ -527,9 +508,8 @@ class QTQP:
       linear_solver (LinearSolver): The linear solver to use when solving the
         KKT system.
       verbose (bool): If True, prints a summary of each iteration.
-      equilibration_strategy (EquilibrationStrategy): Which scaling to apply
-        to (A, P, b, c) before iterating. See EquilibrationStrategy for
-        descriptions. Defaults to RUIZ.
+      ruiz_iters (int): Number of Ruiz equilibration iterations applied to
+        (A, P, b, c) before iterating; 0 disables equilibration.
       collect_stats (bool): If True, collect per-iteration stats (sy, s_over_y
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
@@ -566,20 +546,23 @@ class QTQP:
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
-    self.equilibration_strategy = equilibration_strategy
+    assert ruiz_iters >= 0
+    self.ruiz_iters = int(ruiz_iters)
     if verbose:
       print(
           f"| QTQP v{__version__}:"
           f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
           f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
-          f" equilibration={equilibration_strategy.name}"
+          f" ruiz_iters={ruiz_iters}"
       )
 
-    if equilibration_strategy is EquilibrationStrategy.NONE:
+    if ruiz_iters == 0:
       a, p, b, c = self.a, self.p, self.b, self.c
       self.d, self.e, self.sigma_eq = None, None, 1.0
     else:
-      a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate()
+      a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate_ruiz(
+          ruiz_iters, 1e-3, 1e3
+      )
 
     # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
     # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
@@ -753,7 +736,7 @@ class QTQP:
         stats[-1]["status"] = status
 
     # We have terminated for one reason or another.
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+    if self.ruiz_iters > 0:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
       case SolutionStatus.SOLVED:
@@ -787,18 +770,6 @@ class QTQP:
         return Solution(x, y, s, stats, SolutionStatus.FAILED)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
-
-  def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
-    """Dispatch to the selected equilibration strategy.
-
-    Returns a 7-tuple (a, p, b, c, d, e, sigma) of equilibrated problem data
-    and accumulated scalings; sigma is always 1.0 for RUIZ.
-    """
-    if self.equilibration_strategy is EquilibrationStrategy.RUIZ:
-      return self._equilibrate_ruiz(num_iters, min_scale, max_scale)
-    raise ValueError(
-        f"Unknown equilibration strategy: {self.equilibration_strategy}"
-    )
 
   def _equilibrate_ruiz(self, num_iters, min_scale, max_scale):
     """Ruiz equilibration on A and P. b, c rescaled passively by d, e."""
@@ -1110,7 +1081,7 @@ class QTQP:
 
   def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
     """Check termination criteria and compute iteration statistics."""
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+    if self.ruiz_iters > 0:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
     inv_tau = 1.0 / max(tau, _EPS)
