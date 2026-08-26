@@ -182,14 +182,6 @@ class InitStrategy(enum.Enum):
     Unit vectors: y[z:] = s[z:] = 1, x = 0, tau = 1. Cheap, dimensionless.
     Default for backward compatibility.
 
-  ORTHANT:
-    Closed-form non-negative orthant centering. Picks mu_0 = mu_scale *
-    ||b[z:]|| (see the init_mu_scale solve() kwarg) and solves the
-    per-component centering condition
-        mu_0 * y_i + b_i - mu_0 / y_i = 0
-    for inequality rows, giving y_i = (-beta_i + sqrt(beta_i^2 + 4)) / 2 with
-    beta = b/mu_0. Strictly interior by construction; cost is O(m).
-
   CVXOPT:
     Solves the regularized saddle-point system
         [P + eps*I,  A^T ] [x]   [-c]
@@ -200,7 +192,6 @@ class InitStrategy(enum.Enum):
   """
 
   TRIVIAL = "trivial"
-  ORTHANT = "orthant"
   CVXOPT = "cvxopt"
   BALANCED = "balanced"
 
@@ -368,7 +359,7 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
-  def _init_variables(self, strategy, mu_scale, a, p, b, c):
+  def _init_variables(self, strategy, a, p, b, c):
     """Dispatch to the requested initialization strategy.
 
     The (a, p, b, c) passed in are the operating-scale problem data: equilibrated
@@ -379,8 +370,6 @@ class QTQP:
     """
     if strategy is InitStrategy.TRIVIAL:
       return self._init_trivial()
-    if strategy is InitStrategy.ORTHANT:
-      return self._init_orthant(b, mu_scale)
     if strategy is InitStrategy.CVXOPT:
       return self._init_cvxopt(a, p, b, c)
     if strategy is InitStrategy.BALANCED:
@@ -412,31 +401,6 @@ class QTQP:
     y[z:] = gamma
     s[z:] = gamma
     return x, y, s, 1.0, {}
-
-  def _init_orthant(self, b, mu_scale):
-    """Closed-form non-negative orthant init (see InitStrategy.ORTHANT)."""
-    m, n, z = self.m, self.n, self.z
-    x = np.zeros(n)
-    y = np.zeros(m)
-    s = np.zeros(m)
-
-    b_ineq = b[z:]
-    norm_b = _norm(b_ineq, 2)
-    if norm_b == 0.0:
-      mu_0 = max(mu_scale, np.finfo(np.float64).tiny)
-      y[z:] = 1.0
-      s[z:] = mu_0  # complementarity y_i * s_i = mu_0 with y_i = 1.
-    else:
-      mu_0 = mu_scale * norm_b
-      beta = b_ineq / mu_0
-      sq = np.sqrt(beta * beta + 4.0)
-      # Branch-selected stable form: cancellation-free for both signs of beta.
-      y_ineq = np.where(beta <= 0, 0.5 * (-beta + sq), 2.0 / (beta + sq))
-      assert np.all(y_ineq > 0), "orthant init produced non-positive y component"
-      y[z:] = y_ineq
-      s[z:] = mu_0 / y_ineq
-
-    return x, y, s, 1.0, {"mu_0": mu_0}
 
   def _init_cvxopt(self, a, p, b, c, reg=1e-8, interior_margin=1.0):
     """CVXOPT-style init: solve regularized saddle-point KKT, then shift."""
@@ -496,7 +460,6 @@ class QTQP:
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       central_path_exponent: float = 1.0,
@@ -525,7 +488,6 @@ class QTQP:
           equilibration_strategy=equilibration_strategy,
           collect_stats=collect_stats,
           init_strategy=InitStrategy(init_strategy),
-          init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
           central_path_exponent=central_path_exponent,
@@ -555,7 +517,6 @@ class QTQP:
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       central_path_exponent: float = 1.0,
@@ -599,12 +560,7 @@ class QTQP:
         Defaults to False for faster throughput; set True when per-iteration
         diagnostics are needed.
       init_strategy (InitStrategy): Which initialization to use for (x, y, s,
-        tau). See InitStrategy for descriptions. Defaults to TRIVIAL.
-      init_mu_scale (float): Multiplier on ||b[z:]|| that sets the initial
-        barrier parameter mu_0 = init_mu_scale * ||b[z:]|| for
-        InitStrategy.ORTHANT. Larger values produce iterates closer to the
-        canonical center; smaller values produce more aggressive starts. Must
-        be positive and finite. Ignored for other strategies.
+        tau). See InitStrategy for descriptions. Defaults to BALANCED.
       refinement_strategy (RefinementStrategy): Which iterative-refinement
         scheme drives each KKT solve. See RefinementStrategy for descriptions.
         Defaults to RICHARDSON.
@@ -642,11 +598,6 @@ class QTQP:
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
-    if not (np.isfinite(init_mu_scale) and init_mu_scale > 0):
-      raise ValueError(
-          f"init_mu_scale must be a positive finite float,"
-          f" got {init_mu_scale}"
-      )
     if not (np.isfinite(central_path_exponent) and central_path_exponent > 0):
       raise ValueError(
           "central_path_exponent must be a positive finite float (got"
@@ -707,7 +658,7 @@ class QTQP:
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     x, y, s, tau, _ = self._init_variables(
-        init_strategy, init_mu_scale, a, p, b, c
+        init_strategy, a, p, b, c
     )
     status = SolutionStatus.UNFINISHED
     self._log_header()
