@@ -443,7 +443,6 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
-      fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -470,7 +469,6 @@ class QTQP:
           init_strategy=InitStrategy(init_strategy),
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
-          fused_corrector_division=fused_corrector_division,
       )
     finally:
       if self._linear_solver is not None:
@@ -498,7 +496,6 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
-      fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -546,14 +543,6 @@ class QTQP:
         inner Arnoldi step consumes one factor-solve. Smaller values reduce
         per-cycle cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
-      fused_corrector_division (bool): If True, compute the corrector
-        slack update via a single division by y[z:] with the three
-        numerator terms (sigma*mu, the Mehrotra cross product, and
-        y_c*s) assembled first. Algebraically equivalent to the default
-        three-division formula `sigma*mu/y + correction - y_c*s/y`, but
-        avoids catastrophic cancellation when y_i is small and the
-        terms have similar magnitudes with opposing signs. Default False
-        preserves the legacy bit-for-bit behavior.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -569,7 +558,6 @@ class QTQP:
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
-    self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
@@ -678,11 +666,8 @@ class QTQP:
       # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
       d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
-      # Pre-compute the Mehrotra cross term in un-divided form only when the
-      # fused-corrector path will consume it (otherwise stay on the legacy
-      # `-d_s * d_y_p / y` formulation verbatim).
-      if self._fused_corrector_division:
-        cross_p = d_s[self.z :] * d_y_p[self.z :]
+      # Mehrotra cross term, kept un-divided for the fused slack update.
+      cross_p = d_s[self.z :] * d_y_p[self.z :]
 
       # Compute predictor step size and resulting centering parameter (sigma)
       alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
@@ -715,10 +700,7 @@ class QTQP:
       # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
       # (divided by y because the KKT complementarity block is scaled by 1/y),
       # so the corrector step can incorporate it to land closer to the target.
-      if self._fused_corrector_division:
-        correction = -cross_p / y[self.z :]
-      else:
-        correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+      correction = -cross_p / y[self.z :]
       xy[: self.n] = x_p
       xy[self.n :] = y_p
       x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
@@ -739,22 +721,11 @@ class QTQP:
 
       # --- Step 4: Update Iterates ---
       d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      if self._fused_corrector_division:
-        # Combined-numerator corrector slack step. Algebraically equivalent
-        # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
-        # numerator before the single division by y[z:], avoiding
-        # catastrophic cancellation when y_i is small and the three terms
-        # have similar magnitudes with opposing signs.
-        d_s[self.z :] = (
-            mu_target - cross_p - y_c[self.z :] * s[self.z :]
-        ) / y[self.z :]
-      else:
-        # Legacy three-division formula.
-        d_s[self.z :] = (
-            mu_target / y[self.z :]
-            + correction
-            - y_c[self.z :] * s[self.z :] / y[self.z :]
-        )
+      # Combined-numerator slack step: assemble before the single division
+      # by y[z:] to avoid cancellation when y_i is small.
+      d_s[self.z :] = (
+          mu_target - cross_p - y_c[self.z :] * s[self.z :]
+      ) / y[self.z :]
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
       step = step_size_scale * alpha
