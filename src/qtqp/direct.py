@@ -39,36 +39,9 @@ from scipy.linalg import solve_triangular
 # (Bjorck/Paige): orthogonality is recovered to working precision.
 _DGKS_REORTH_THRESHOLD = 1.0 / math.sqrt(2.0)
 
-
-class RefinementStrategy(enum.Enum):
-  """Available iterative refinement strategies for DirectKktSolver.
-
-  RICHARDSON:
-    Classical iterative refinement, i.e. preconditioned Richardson iteration
-
-        x_{k+1} = x_k + M^{-1} (b - A_true x_k)
-
-    where M is the factorized regularized KKT matrix and A_true is the
-    unregularized KKT matrix. Each iteration costs one preconditioner apply
-    (a factor-solve) and one matvec. Stops when the inf-norm of the residual
-    no longer improves or falls below atol + rtol * ||b||_inf.
-
-  GMRES:
-    Right-preconditioned restarted GMRES on A_true x = b, using the same
-    factorization M as the preconditioner. Each inner Arnoldi step costs
-    one factor-solve plus one matvec. QTQP stores the preconditioned Krylov
-    basis, so applying the end-of-cycle correction does not consume an extra
-    factor-solve. Right preconditioning is the key difference vs. a stock
-    left-preconditioned GMRES: the least-squares problem minimizes the *true*
-    residual ||b - A_true x||, not the preconditioned residual
-    ||M^{-1}(b - A_true x)||, so convergence isn't fooled when M distorts the
-    residual norm (which is exactly the regime where pure IR stalls). Restarts
-    every gmres_restart inner steps; the apply budget is capped at
-    max_iterative_refinement_steps total.
-  """
-
-  RICHARDSON = "richardson"
-  GMRES = "gmres"
+# Need-aware refinement: solve error is budgeted as this fraction of the
+# current path level mu (inexact-Newton); the fixed tolerance is the floor.
+_NEED_ETA = 1e-2
 
 
 def diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
@@ -170,8 +143,6 @@ class DirectKktSolver:
       atol: float,
       rtol: float,
       solver: LinearSolver,
-      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
-      gmres_restart: int = 10,
   ):
     """Initializes the DirectKktSolver.
 
@@ -186,15 +157,8 @@ class DirectKktSolver:
       atol: Absolute tolerance for iterative refinement.
       rtol: Relative tolerance for iterative refinement.
       solver: An instance of a direct solver class (e.g., MklPardisoSolver).
-      refinement_strategy: Which iterative-refinement scheme to drive the KKT
-        solve with. See RefinementStrategy for descriptions.
-      gmres_restart: Krylov dimension per restart cycle (inner Arnoldi steps
-        before restart). Ignored when refinement_strategy is RICHARDSON.
     """
-    if refinement_strategy is RefinementStrategy.GMRES and gmres_restart < 1:
-      raise ValueError("gmres_restart must be >= 1.")
-    self.refinement_strategy = refinement_strategy
-    self.gmres_restart = gmres_restart
+    self.gmres_restart = max_iterative_refinement_steps
     # Create KKT scaffold with NaNs where we will update values each iteration.
     self.m, self.n = a.shape
     self.z = z
@@ -244,6 +208,7 @@ class DirectKktSolver:
       s: The slack variables.
       y: The dual variables for the conic constraints.
     """
+    self._mu = float(mu)
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
     self._true_diags[: self.n] = self._p_diags
@@ -297,14 +262,10 @@ class DirectKktSolver:
     rhs_norm = np.linalg.norm(self._kkt_rhs, np.inf)
     tolerance = self._atol + self._rtol * rhs_norm
 
-    if self.refinement_strategy is RefinementStrategy.RICHARDSON:
-      sol, stats = self._solve_richardson(rhs_norm, tolerance, warm_start)
-    elif self.refinement_strategy is RefinementStrategy.GMRES:
-      sol, stats = self._solve_gmres(rhs_norm, tolerance, warm_start)
-    else:
-      raise ValueError(
-          f"Unknown refinement strategy: {self.refinement_strategy}"
-      )
+    tolerance = max(
+        tolerance, _NEED_ETA * getattr(self, "_mu", 0.0) * rhs_norm
+    )
+    sol, stats = self._solve_escalate(rhs_norm, tolerance, warm_start)
 
     if np.any(np.isnan(sol)):
       # Breakdown: hand back the finite warm start and a status the
@@ -313,68 +274,76 @@ class DirectKktSolver:
       stats = dict(stats, converged=False, status="breakdown")
 
     logging.debug(
-        "KKT solve: strategy=%s, status=%s, solves=%d, res=%e",
-        self.refinement_strategy.name,
+        "KKT solve: status=%s, solves=%d, res=%e",
         stats["status"],
         stats["solves"],
         stats["final_residual_norm"],
     )
     return sol, stats
 
-  def _solve_richardson(self, rhs_norm, tolerance, warm_start):
-    """Classical iterative refinement: preconditioned Richardson iteration."""
-    # Initial sol and residual.
-    # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
-    #   kkt_true @ sol = kkt_reg @ sol - diag_correction @ sol
-    # so residual = kkt_rhs - kkt_reg @ sol + diag_correction * sol.
-    # self._solver @ sol computes kkt_reg @ sol (using the factorized matrix).
+  def _solve_escalate(self, rhs_norm, tolerance, warm_start):
+    """Richardson while it contracts by >= 2x per apply; on stall or slow
+    creep, escalate to full (un-restarted) GMRES from the current iterate
+    with the remaining apply budget as the Krylov dimension."""
     sol = warm_start.copy()
     residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
     residual_norm = np.linalg.norm(residual, np.inf)
-
-    # Iterative refinement loop.
-    status, solves = "non-converged", 0
-    # max_iterative_refinement_steps >= 1 so we always do at least one solve.
-    for solves in range(1, self.max_iterative_refinement_steps + 1):
-      # Prospective acceptance: test the correction before applying it, so
-      # a stalled or NaN step never degrades the returned solution (the
-      # negated comparison also rejects NaN residuals).
+    solves = 0
+    status = "non-converged"
+    escalate = False
+    while solves < self.max_iterative_refinement_steps:
       trial = sol + self._solver.solve(residual)
+      solves += 1
       trial_residual = (
           self._kkt_rhs - self._solver @ trial + self._diag_correction * trial
       )
       trial_norm = np.linalg.norm(trial_residual, np.inf)
       if not (trial_norm < residual_norm):
-        logging.debug(
-            "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
-            solves,
-            residual_norm,
-            trial_norm,
-        )
-        status = "stalled"
+        escalate = True  # stall: the stationary direction is exhausted
         break
+      slow = trial_norm > 0.5 * residual_norm
       sol, residual, residual_norm = trial, trial_residual, trial_norm
-
-      # Check for convergence.
       if residual_norm < tolerance:
         status = "converged"
         break
-    else:
-      logging.debug(
-          "Iterative refinement did not converge after %d solves."
-          " Final residual: %e > tolerance: %e",
-          solves,
-          residual_norm,
-          tolerance,
+      if slow:
+        escalate = True  # creep: hand the rest of the budget to GMRES
+        break
+    if escalate and solves < self.max_iterative_refinement_steps:
+      saved_restart = self.gmres_restart
+      saved_budget = self.max_iterative_refinement_steps
+      try:
+        remaining = saved_budget - solves
+        self.gmres_restart = remaining  # full GMRES: no restart within budget
+        self.max_iterative_refinement_steps = remaining
+        g_sol, g_stats = self._solve_gmres(rhs_norm, tolerance, sol)
+      finally:
+        self.gmres_restart = saved_restart
+        self.max_iterative_refinement_steps = saved_budget
+      g_res = (
+          self._kkt_rhs - self._solver @ g_sol + self._diag_correction * g_sol
       )
-
+      g_norm = np.linalg.norm(g_res, np.inf)
+      if g_norm < residual_norm:
+        sol, residual_norm = g_sol, g_norm
+      return sol, {
+          "solves": solves + g_stats["solves"],
+          "final_residual_norm": float(min(residual_norm, g_norm)),
+          "rhs_norm": rhs_norm,
+          "tolerance": tolerance,
+          "converged": min(residual_norm, g_norm) < tolerance,
+          "status": "converged" if min(residual_norm, g_norm) < tolerance
+                    else g_stats["status"],
+          "escalated": True,
+      }
     return sol, {
         "solves": solves,
-        "final_residual_norm": residual_norm,
+        "final_residual_norm": float(residual_norm),
         "rhs_norm": rhs_norm,
         "tolerance": tolerance,
         "converged": status == "converged",
-        "status": status,
+        "status": status if status == "converged" or not escalate else "stalled",
+        "escalated": False,
     }
 
   def _solve_gmres(self, rhs_norm, tolerance, warm_start):

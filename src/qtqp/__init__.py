@@ -43,7 +43,6 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import direct
-from .direct import RefinementStrategy
 
 __version__ = "0.0.5"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
@@ -422,8 +421,6 @@ class QTQP:
       ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
-      gmres_restart: int = 10,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -448,8 +445,6 @@ class QTQP:
           ruiz_iters=ruiz_iters,
           collect_stats=collect_stats,
           init_strategy=InitStrategy(init_strategy),
-          refinement_strategy=refinement_strategy,
-          gmres_restart=gmres_restart,
       )
     finally:
       if self._linear_solver is not None:
@@ -475,8 +470,6 @@ class QTQP:
       ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
-      gmres_restart: int = 10,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -516,13 +509,6 @@ class QTQP:
         diagnostics are needed.
       init_strategy (InitStrategy): Which initialization to use for (x, y, s,
         tau). See InitStrategy for descriptions. Defaults to BALANCED.
-      refinement_strategy (RefinementStrategy): Which iterative-refinement
-        scheme drives each KKT solve. See RefinementStrategy for descriptions.
-        Defaults to RICHARDSON.
-      gmres_restart (int): Krylov dimension per GMRES restart cycle. Each
-        inner Arnoldi step consumes one factor-solve. Smaller values reduce
-        per-cycle cost at the price of more restarts. Ignored when
-        refinement_strategy is RICHARDSON.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -587,8 +573,6 @@ class QTQP:
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
-        refinement_strategy=refinement_strategy,
-        gmres_restart=gmres_restart,
     )
 
     stats = []
