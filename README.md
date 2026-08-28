@@ -170,6 +170,7 @@ solve(
     ),
     gmres_restart: int = 10,
     fused_corrector_division: bool = False,
+    max_centrality_correctors: int = 1,
 ) -> qtqp.Solution
 ```
 
@@ -252,6 +253,9 @@ Choose one with the `refinement_strategy` argument:
 -   `fused_corrector_division`: Fuses the corrector slack numerator before
     dividing by `y[z:]`. This is useful when small `y` components make the
     legacy three-division form vulnerable to cancellation.
+-   `max_centrality_correctors`: Maximum Gondzio-style centrality correctors
+    per iteration, each one extra back-solve on the existing factorization,
+    accepted only when the step size improves. Default `1`; `0` disables.
 
 This method will return a `qtqp.Solution` object, with fields:
 
