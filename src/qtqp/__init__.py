@@ -334,7 +334,12 @@ class QTQP:
           "Inequality RHS entries in 'b' must be finite, +inf, or >= inf_bound."
       )
     drop = np.zeros(self.m, dtype=bool)
-    drop[self.z :] = ineq_b >= inf_bound
+    # Tolerate representation noise in the sentinel: benchmark files store
+    # +-1e20 infinity markers with ULP- or float32-level error (e.g.
+    # 9.999999999999998e19), which a strict >= comparison classifies as a
+    # genuine finite bound -- materializing a 1e20-magnitude row that
+    # silently poisons equilibration and residual scales.
+    drop[self.z :] = ineq_b >= inf_bound * (1.0 - 1e-6)
     if not np.any(drop):
       return
     keep = ~drop
