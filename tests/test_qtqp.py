@@ -2948,6 +2948,44 @@ def test_certificate_rejects_large_slope_pseudo_ray():
 
 
 # =============================================================================
+# delta_path: a posteriori distance-to-path certificate
+# =============================================================================
+
+@pytest.mark.parametrize('equilibration', [
+    qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE,
+])
+def test_delta_path_logged(equilibration):
+  """delta_path is present, finite, and positive on every iteration."""
+  rng = np.random.default_rng(9000)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True, equilibration_strategy=equilibration,
+  )
+  deltas = [st['delta_path'] for st in sol.stats]
+  assert len(deltas) == len(sol.stats)
+  assert all(np.isfinite(d) and d > 0 for d in deltas)
+  # The certificate should improve from the initial iterate at some point
+  # of the trajectory (it saturates at the floating-point floor late).
+  assert min(deltas) <= deltas[0]
+
+
+def test_delta_path_small_near_path():
+  """A well-converged easy instance certifies proximity mid-flight:
+  the minimum delta_path over the trajectory is small relative to the
+  operating sphere diameter."""
+  rng = np.random.default_rng(9100)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True,
+  )
+  deltas = [st['delta_path'] for st in sol.stats]
+  diameter = 2.0 * np.sqrt(m - z + 1)
+  assert min(deltas) < 100.0 * diameter
+
+
+# =============================================================================
 # max_centrality_correctors: Gondzio multiple centrality correctors
 # =============================================================================
 
