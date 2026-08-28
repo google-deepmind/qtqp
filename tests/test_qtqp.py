@@ -1199,8 +1199,8 @@ def _make_tau_gating_solver(converged):
   solver._linear_solver = FakeLinearSolver()  # pylint: disable=protected-access
   calls = {'quadratic': 0, 'linearized': 0}
 
-  def _fake_quadratic(self, p, kinv_r, mu, mu_target, r_tau):
-    del self, p, kinv_r, mu, mu_target, r_tau
+  def _fake_quadratic(self, p, kinv_r, mu, mu_target, r_tau, *, s, y):
+    del self, p, kinv_r, mu, mu_target, r_tau, s, y
     calls['quadratic'] += 1
     return 1.0
 
