@@ -63,6 +63,15 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
 # touch the floor.
 _MU_FLOOR = 1e-14
+# ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown of
+# the linear solver, the best iterate over the trajectory (min over
+# iterations of the max normalized residual) is returned with status
+# ALMOST_SOLVED when it meets the same criteria form at tolerances this
+# factor looser than the user-requested atol/rtol (at the 1e-9
+# defaults: 1e-6). Relative to the request, so the label keeps its
+# meaning at any tolerance setting. SOLVED semantics are unchanged and
+# unambiguous.
+_ALMOST_FACTOR = 1000.0
 
 
 class LinearSolver(enum.Enum):
@@ -147,6 +156,7 @@ class SolutionStatus(enum.Enum):
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
   HIT_MAX_ITER = "hit_max_iter"
+  ALMOST_SOLVED = "almost_solved"
   FAILED = "failed"
   UNFINISHED = "unfinished"
 
@@ -341,6 +351,11 @@ class QTQP:
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
+    # Defaults so _check_termination works in tests that call it
+    # directly before solve() has initialized the tracking state.
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
+
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
@@ -518,8 +533,8 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -576,8 +591,8 @@ class QTQP:
   def _solve_impl(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -757,6 +772,8 @@ class QTQP:
         init_strategy, init_mu_scale, a, p, b, c
     )
     status = SolutionStatus.UNFINISHED
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
 
     # Certified warm start: ingest a caller-supplied (x, y, s) from a
     # nearby problem, embed it interior at a few centering shifts, and
@@ -994,12 +1011,16 @@ class QTQP:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
           stats[-1]["status"] = status
-
     except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
-      logging.warning("Numeric failure at iteration %d: %s", self.it, exc)
-      status = SolutionStatus.UNFINISHED
-      if collect_stats and stats:
-        stats[-1]["status"] = SolutionStatus.FAILED
+      # Numerical breakdown inside the iteration (singular KKT systems,
+      # NaN propagation, degenerate tau equations at extreme conditioning
+      # in the deep endgame). The iterates preceding the breakdown are
+      # intact and the best one is already tracked, so salvage it below
+      # instead of crashing. Programming errors still propagate.
+      logging.warning(
+          "Numeric failure at iteration %d: %s", self.it, exc
+      )
+      status = SolutionStatus.FAILED
 
     # We have terminated for one reason or another.
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
@@ -1024,8 +1045,17 @@ class QTQP:
         x, s = x / abs_ctx, s / abs_ctx
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
-      case SolutionStatus.HIT_MAX_ITER:
-        self._log_footer("Hit maximum iterations")
+      case SolutionStatus.HIT_MAX_ITER | SolutionStatus.FAILED:
+        if self._best_almost_score <= 1.0:
+          self._log_footer("Almost solved (best iterate)")
+          bx, by, bs, btau = self._best_almost_iterate
+          x, y, s = bx / btau, by / btau, bs / btau
+          y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
+          return Solution(x, y, s, stats, SolutionStatus.ALMOST_SOLVED)
+        if status is SolutionStatus.HIT_MAX_ITER:
+          self._log_footer("Hit maximum iterations")
+        else:
+          self._log_footer("Linear solver breakdown")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
         return Solution(x, y, s, stats, status)
@@ -1567,6 +1597,21 @@ class QTQP:
         min(abs(pcost), abs(dcost)),
         (norm_x + norm_y) * inv_tau,
     )
+
+    # Track the best iterate seen, scored by the max normalized residual
+    # at the ALMOST_SOLVED thresholds (same criteria form, looser
+    # constants). Used to return an honestly-labeled near-solution when
+    # the iteration cap is reached without meeting the SOLVED contract.
+    almost_atol = _ALMOST_FACTOR * self.atol
+    almost_rtol = _ALMOST_FACTOR * self.rtol
+    almost_score = max(
+        gap / (almost_atol + almost_rtol * gaprelrhs),
+        pres / (almost_atol + almost_rtol * prelrhs),
+        dres / (almost_atol + almost_rtol * drelrhs),
+    )
+    if almost_score < self._best_almost_score:
+      self._best_almost_score = almost_score
+      self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
     # Solved: duality gap and both residuals are within tolerance.
     if (

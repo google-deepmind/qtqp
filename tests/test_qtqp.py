@@ -1161,6 +1161,88 @@ def test_numeric_failure_returns_failed_status():
     solver2.solve(verbose=False)
 
 
+def test_default_tolerances_are_1e9():
+  import inspect
+  sig = inspect.signature(qtqp.QTQP.solve)
+  assert sig.parameters['atol'].default == 1e-9
+  assert sig.parameters['rtol'].default == 1e-9
+
+
+def test_almost_solved_near_cap():
+  """Capping one iteration below the solve count returns the best iterate
+  with ALMOST_SOLVED (it meets the 1e-6 criteria form), while a very early
+  cap still returns HIT_MAX_ITER."""
+  rng = np.random.default_rng(9600)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  full = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(collect_stats=True, **kw)
+  assert full.status == qtqp.SolutionStatus.SOLVED
+  n_it = len(full.stats)
+  near = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=n_it - 1, **kw)
+  assert near.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  # The returned best iterate is a genuine near-solution.
+  sv = b - a @ near.x
+  pres = max(np.max(np.abs(sv[:z]), initial=0.0),
+             np.max(np.maximum(-sv[z:], 0.0), initial=0.0))
+  assert pres < 1e-4 * (1 + np.max(np.abs(b)))
+  early = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=2, **kw)
+  assert early.status == qtqp.SolutionStatus.HIT_MAX_ITER
+
+
+def test_linear_solver_breakdown_returns_best_iterate(monkeypatch):
+  """A linear-solver breakdown mid-solve must not raise: a late breakdown
+  returns the tracked best iterate as ALMOST_SOLVED, an immediate one
+  returns FAILED (regression: DUALC8 / brazil3 NaN under QDLDL at 1e-9)."""
+  from qtqp import direct as qtqp_direct
+
+  rng = np.random.default_rng(9700)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  original = qtqp_direct.DirectKktSolver.solve
+
+  calls = {'n': 0}
+  def counting(self, *args, **kwargs):
+    calls['n'] += 1
+    return original(self, *args, **kwargs)
+  monkeypatch.setattr(qtqp_direct.DirectKktSolver, 'solve', counting)
+  full = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert full.status == qtqp.SolutionStatus.SOLVED
+  total = calls['n']
+
+  def breaking_after(limit):
+    state = {'n': 0}
+    def solve(self, *args, **kwargs):
+      state['n'] += 1
+      if state['n'] > limit:
+        raise ValueError('Linear solver returned NaNs.')
+      return original(self, *args, **kwargs)
+    return solve
+
+  # Breakdown on the very last solve: all but the final iteration completed,
+  # so the tracked best iterate qualifies at the ALMOST thresholds.
+  monkeypatch.setattr(
+      qtqp_direct.DirectKktSolver, 'solve', breaking_after(total - 1)
+  )
+  late = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert late.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  assert np.all(np.isfinite(late.x))
+  sv = b - a @ late.x
+  pres = max(np.max(np.abs(sv[:z]), initial=0.0),
+             np.max(np.maximum(-sv[z:], 0.0), initial=0.0))
+  assert pres < 1e-4 * (1 + np.max(np.abs(b)))
+
+  # Breakdown in the first iteration, before any termination check: no
+  # iterate has been tracked, so the solve reports FAILED (and still does
+  # not raise).
+  monkeypatch.setattr(
+      qtqp_direct.DirectKktSolver, 'solve', breaking_after(2)
+  )
+  early_break = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert early_break.status == qtqp.SolutionStatus.FAILED
+
+
 def test_solve_for_tau_handles_linear_equation():
   """Near-zero quadratic coefficient should fall back to a linear solve."""
   p = sparse.csc_matrix((1, 1))

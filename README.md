@@ -147,8 +147,8 @@ This class has a single API method `solve`:
 ```python
 solve(
     *,
-    atol: float = 1e-7,
-    rtol: float = 1e-8,
+    atol: float = 1e-9,
+    rtol: float = 1e-9,
     atol_infeas: float = 1e-8,
     rtol_infeas: float = 1e-9,
     max_iter: int = 100,
@@ -278,7 +278,15 @@ This method will return a `qtqp.Solution` object, with fields:
 -   `y`: (m) Dual variable or certificate of infeasibility.
 -   `s`: (m) Slack variable or certificate of unboundedness.
 -   `status`: (`qtqp.SolutionStatus`) One of `SOLVED`, `INFEASIBLE`,
-    `UNBOUNDED`, `HIT_MAX_ITER`, `FAILED`.
+    `UNBOUNDED`, `ALMOST_SOLVED`, `HIT_MAX_ITER`, `FAILED`.
+    `ALMOST_SOLVED` is returned in place of `HIT_MAX_ITER` (or of a
+    numerical breakdown of the linear solver, which never raises) when
+    the best iterate over the trajectory (by max normalized residual)
+    meets the solved-criteria form at tolerances `1000x` looser than the
+    requested `atol`/`rtol` (so `1e-6` at the defaults): the returned
+    solution is that best iterate, honestly labeled as not meeting the
+    full `SOLVED` contract. `SOLVED` semantics are unchanged. A
+    breakdown whose best iterate does not qualify returns `FAILED`.
 -   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
     `collect_stats=True`. When enabled, includes primal/dual objective,
     residuals, gap, mu, elapsed time, and complementarity statistics.
