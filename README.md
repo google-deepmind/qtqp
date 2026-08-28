@@ -163,7 +163,7 @@ solve(
         qtqp.EquilibrationStrategy.RUIZ
     ),
     collect_stats: bool = False,
-    init_strategy: qtqp.InitStrategy = qtqp.InitStrategy.TRIVIAL,
+    init_strategy: qtqp.InitStrategy = qtqp.InitStrategy.CVXOPT,
     init_mu_scale: float = 1.0,
     refinement_strategy: qtqp.RefinementStrategy = (
         qtqp.RefinementStrategy.RICHARDSON
@@ -214,7 +214,7 @@ Key parameters:
     how corrupted infinity-sentinel bounds were found in the
     Maros-Meszaros benchmark files.
 -   `init_strategy`: Choose the initial interior-point iterate. Defaults to
-    `qtqp.InitStrategy.TRIVIAL`.
+    `qtqp.InitStrategy.CVXOPT`.
 -   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
     set the initial barrier parameter.
 -   `refinement_strategy`: Choose the iterative-refinement method used for KKT
@@ -242,14 +242,17 @@ Choose one with the `equilibration_strategy` argument:
 
 Choose one with the `init_strategy` argument:
 
--   `qtqp.InitStrategy.TRIVIAL`: Default. Starts from `x = 0`, `tau = 1`, and
+-   `qtqp.InitStrategy.TRIVIAL`: Starts from `x = 0`, `tau = 1`, and
     unit inequality components for `y` and `s`.
 -   `qtqp.InitStrategy.ORTHANT`: Closed-form non-negative orthant centering. It
     uses `init_mu_scale * ||b[z:]||_2` as the initial barrier parameter and is
     cheap to compute.
--   `qtqp.InitStrategy.CVXOPT`: CVXOPT-style initialization. It solves a
-    regularized saddle-point system and shifts inequality components of `y` and
-    `s` into the strict interior.
+-   `qtqp.InitStrategy.CVXOPT`: Default. Least-squares initialization in
+    the CVXOPT / Clarabel style: one saddle-point solve for QPs (two, with a
+    shared factorization, for LPs - primal from feasibility, dual from
+    optimality), run through the same linear-solver backend, ordering, static
+    regularization, and iterative refinement as the main loop, then shifted
+    into the strict interior.
 
 #### Refinement strategies
 

@@ -236,12 +236,21 @@ class InitStrategy(enum.Enum):
     beta = b/mu_0. Strictly interior by construction; cost is O(m).
 
   CVXOPT:
-    Solves the regularized saddle-point system
+    Least-squares initialization (CVXOPT / Clarabel style). For QPs,
+    solves the saddle-point system
         [P + eps*I,  A^T ] [x]   [-c]
-        [    A,    -eps*I] [y] = [ b]
-    treating all rows as equalities, then sets s = b - A @ x and shifts the
-    inequality blocks of (y, s) by a uniform constant so min(y[z:]) and
-    min(s[z:]) are at least 1.0 (CVXOPT's standard interior-point shift).
+        [    A,      -I  ] [y] = [ b]
+    treating all rows as equalities; the (2, 2) block is -I, giving the
+    bounded least-squares point y ~ Ax - b. For LPs (P with no
+    nonzeros) the coupled solve is ill-posed, so it splits into two
+    solves with the same factorization - [0; b] for the primal
+    (feasibility only) and [-c; 0] for the dual (optimality only),
+    matching Clarabel's LP initialization. The solves run through the
+    session's DirectKktSolver (same backend, ordering, static
+    regularization, and iterative refinement as the main loop). Then
+    s = b - A @ x, and the inequality blocks of (y, s) are shifted by a
+    uniform constant so min(y[z:]) and min(s[z:]) are at least 1.0
+    (CVXOPT's standard interior-point shift). Default.
   """
 
   TRIVIAL = "trivial"
@@ -526,14 +535,50 @@ class QTQP:
   def _init_cvxopt(self, a, p, b, c, reg=1e-8, interior_margin=1.0):
     """CVXOPT-style init: solve regularized saddle-point KKT, then shift."""
     m, n, z = self.m, self.n, self.z
-    p_reg = (p + reg * sp.eye(n, format="csc")).tocsc()
     a_csc = a.tocsc() if not sp.isspmatrix_csc(a) else a
-    kkt = sp.bmat(
-        [[p_reg, a_csc.T], [a_csc, -reg * sp.eye(m, format="csc")]],
-        format="csc",
-    )
-    rhs = np.concatenate([-c, b])
-    xy = sp.linalg.spsolve(kkt, rhs)
+    # The (2,2) block is -I, not -reg*I: this is the standard
+    # least-squares initialization (CVXOPT/Clarabel), giving y ~ Ax - b.
+    # With -reg*I the block is near-singular and y is amplified by 1/reg
+    # (measured: ||y|| ~ 3e10, mu_0 ~ 2e12 on netlib/25fv47).
+    #
+    # The solve runs through the session's DirectKktSolver - same backend,
+    # symbolic ordering, static regularization, and iterative refinement
+    # as every main-loop solve (a scipy.spsolve here cost +61% total
+    # wall-clock on the kennington instances). The main loop's first
+    # update() refactorizes afterwards as usual.
+    if getattr(self, "_linear_solver", None) is not None:
+      self._linear_solver.update_unit_dual(reg)
+
+      def _saddle_solve(rx, ry):
+        # DirectKktSolver.solve applies [P+reg*I, A'; A, -I] with the
+        # second RHS block negated internally; pass (rx, -ry) so the
+        # solved system is [P+reg*I, A'; A, -I] @ sol = (rx, ry).
+        rhs = np.concatenate([rx, -ry])
+        sol, _ = self._linear_solver.solve(rhs=rhs, warm_start=np.zeros_like(rhs))
+        return sol
+
+    else:
+      # Standalone use (tests): assemble and solve directly.
+      p_reg = (p + reg * sp.eye(n, format="csc")).tocsc()
+      kkt = sp.bmat(
+          [[p_reg, a_csc.T], [a_csc, -sp.eye(m, format="csc")]],
+          format="csc",
+      )
+
+      def _saddle_solve(rx, ry):
+        return sp.linalg.spsolve(kkt, np.concatenate([rx, ry]))
+
+    if p.nnz == 0:
+      # LP initialization (Clarabel's split): solve [0; b] for the primal
+      # (feasibility only) and [-c; 0] for the dual (optimality only).
+      # Coupling both right-hand sides into one solve, as the QP branch
+      # does, is ill-posed when the (1,1) block is empty and produces
+      # wildly scaled initial points (measured mu_0 up to 4e15 on netlib).
+      xy_p = _saddle_solve(np.zeros(n), b)
+      xy_d = _saddle_solve(-c, np.zeros(m))
+      xy = np.concatenate([xy_p[:n], xy_d[n:]])
+    else:
+      xy = _saddle_solve(-c, b)
     if not np.all(np.isfinite(xy)):
       # Fall back to trivial init if the KKT solve produced non-finite values.
       logging.warning(
@@ -579,7 +624,7 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_strategy: InitStrategy = InitStrategy.CVXOPT,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
@@ -641,7 +686,7 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.TRIVIAL,
+      init_strategy: InitStrategy = InitStrategy.CVXOPT,
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
