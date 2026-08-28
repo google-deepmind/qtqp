@@ -309,9 +309,10 @@ class QTQP:
       if not np.all(np.isfinite(p.data)):
         raise ValueError("QP matrix 'p' must contain only finite values.")
       asymmetry = p - p.T
+      p_scale = max(1.0, np.max(np.abs(p.data), initial=0.0))
       if (
           asymmetry.nnz
-          and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12
+          and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12 * p_scale
       ):
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
