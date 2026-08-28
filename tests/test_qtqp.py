@@ -2970,6 +2970,33 @@ def test_delta_path_logged(equilibration):
   assert min(deltas) <= deltas[0]
 
 
+@pytest.mark.parametrize('equilibration', [
+    qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE,
+])
+def test_delta_path_local_logged(equilibration):
+  """delta_path_local is present, finite, and positive every iteration."""
+  rng = np.random.default_rng(9200)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True, equilibration_strategy=equilibration,
+  )
+  lams = [st['delta_path_local'] for st in sol.stats]
+  assert all(np.isfinite(v) and v > 0 for v in lams)
+
+
+def test_lambda_init_logged():
+  """lambda_init is computed at the initial point and surfaced in stats."""
+  rng = np.random.default_rng(9300)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  sol = solver.solve(verbose=False, collect_stats=True)
+  assert np.isfinite(solver.lambda_init) and solver.lambda_init > 0
+  assert sol.stats[0]['lambda_init'] == solver.lambda_init
+  assert 'lambda_init' not in sol.stats[1]
+
+
 def test_delta_path_small_near_path():
   """A well-converged easy instance certifies proximity mid-flight:
   the minimum delta_path over the trajectory is small relative to the
