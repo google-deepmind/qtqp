@@ -2102,14 +2102,16 @@ def test_complementarity_at_convergence():
 
 def test_iterative_refinement_improves_residual():
   """Test that more refinement steps reduce the final linear system residual."""
+  # QDLDL pinned: the ordering assertion compares residuals at the noise
+  # floor, and the multithreaded backends are not run-to-run stable there.
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+  sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(linear_solver=qtqp.LinearSolver.QDLDL, 
       max_iterative_refinement_steps=1, verbose=True, collect_stats=True
   )
-  sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+  sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(linear_solver=qtqp.LinearSolver.QDLDL, 
       max_iterative_refinement_steps=50, verbose=True, collect_stats=True
   )
 
