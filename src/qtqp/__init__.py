@@ -709,135 +709,147 @@ class QTQP:
     alpha = sigma = 0.0
 
     # --- Main Iteration Loop ---
-    # self.it counts IPM steps already taken.
-    for self.it in range(max_iter):
-      stats_i = {}
-      x, y, tau, s = self._normalize(x, y, tau, s)
+    # Numeric failures inside the iteration (singular KKT systems,
+    # NaN propagation, degenerate tau equations) are converted to a
+    # FAILED status carrying the best iterate seen, per the documented
+    # contract, instead of escaping as exceptions. Programming errors
+    # (TypeError, NameError, ...) still propagate.
+    try:
+      # self.it counts IPM steps already taken.
+      for self.it in range(max_iter):
+        stats_i = {}
+        x, y, tau, s = self._normalize(x, y, tau, s)
 
-      mu = (y @ s) / (self.m - self.z)
-      # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
-      # diagonal and the Newton-step linear-residual RHS; cone-product
-      # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
-      mu_p = mu ** self._central_path_exponent
+        mu = (y @ s) / (self.m - self.z)
+        # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
+        # diagonal and the Newton-step linear-residual RHS; cone-product
+        # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
+        mu_p = mu ** self._central_path_exponent
 
-      # --- Take an IPM step ---
-      self._linear_solver.update(mu=mu_p, s=s, y=y)
+        # --- Take an IPM step ---
+        self._linear_solver.update(mu=mu_p, s=s, y=y)
 
-      # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
-      # This is reused for both predictor and corrector parts of the step.
-      self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
-          rhs=self.q, warm_start=self.kinv_q
-      )
-      stats_i["q_lin_sys_stats"] = q_lin_sys_stats
+        # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
+        # This is reused for both predictor and corrector parts of the step.
+        self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
+            rhs=self.q, warm_start=self.kinv_q
+        )
+        stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
-      # --- Step 2: Predictor (Affine) Step ---
-      # Solve KKT with mu_target = 0 to find pure Newton direction.
-      xy[: self.n] = x
-      xy[self.n :] = y
-      x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
-          p=p,
-          mu=mu,
-          mu_target=0.0,
-          r_anchor=xy,
-          tau_anchor=tau,
-          x=x,
-          y=y,
-          s=s,
-          tau=tau,
-          correction=None,
-      )
-      stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+        # --- Step 2: Predictor (Affine) Step ---
+        # Solve KKT with mu_target = 0 to find pure Newton direction.
+        xy[: self.n] = x
+        xy[self.n :] = y
+        x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
+            p=p,
+            mu=mu,
+            mu_target=0.0,
+            r_anchor=xy,
+            tau_anchor=tau,
+            x=x,
+            y=y,
+            s=s,
+            tau=tau,
+            correction=None,
+        )
+        stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
 
-      d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-      # Predictor slack step from the linearized complementarity condition with
-      # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
-      d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+        d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
+        # Predictor slack step from the linearized complementarity condition with
+        # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
+        d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
-      # Pre-compute the Mehrotra cross term in un-divided form only when the
-      # fused-corrector path will consume it (otherwise stay on the legacy
-      # `-d_s * d_y_p / y` formulation verbatim).
-      if self._fused_corrector_division:
-        cross_p = d_s[self.z :] * d_y_p[self.z :]
+        # Pre-compute the Mehrotra cross term in un-divided form only when the
+        # fused-corrector path will consume it (otherwise stay on the legacy
+        # `-d_s * d_y_p / y` formulation verbatim).
+        if self._fused_corrector_division:
+          cross_p = d_s[self.z :] * d_y_p[self.z :]
 
-      # Compute predictor step size and resulting centering parameter (sigma)
-      alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
-      sigma = self._compute_sigma(
-          mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
-      )
-
-      # --- Step 3: Corrector Step ---
-      # Mehrotra's second-order correction accounts for the nonlinear cross-term
-      # that the predictor's linear approximation ignores. Expanding the full
-      # complementarity condition to second order:
-      #   (y + d_y)(s + d_s) = sigma*mu
-      #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
-      # The predictor solved the linearized version (dropping d_y*d_s). Here we
-      # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
-      # (divided by y because the KKT complementarity block is scaled by 1/y),
-      # so the corrector step can incorporate it to land closer to the target.
-      if self._fused_corrector_division:
-        correction = -cross_p / y[self.z :]
-      else:
-        correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
-      xy[: self.n] = x_p
-      xy[self.n :] = y_p
-      x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-          p=p,
-          mu=mu,
-          mu_target=sigma * mu,
-          r_anchor=xy,
-          tau_anchor=tau_p,
-          x=x,
-          y=y,
-          s=s,
-          tau=tau,
-          correction=correction,
-      )
-      stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
-
-      # --- Step 4: Update Iterates ---
-      d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-      if self._fused_corrector_division:
-        # Combined-numerator corrector slack step. Algebraically equivalent
-        # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
-        # numerator before the single division by y[z:], avoiding
-        # catastrophic cancellation when y_i is small and the three terms
-        # have similar magnitudes with opposing signs.
-        d_s[self.z :] = (
-            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
-        ) / y[self.z :]
-      else:
-        # Legacy three-division formula.
-        d_s[self.z :] = (
-            sigma * mu / y[self.z :]
-            + correction
-            - y_c[self.z :] * s[self.z :] / y[self.z :]
+        # Compute predictor step size and resulting centering parameter (sigma)
+        alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
+        sigma = self._compute_sigma(
+            mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
         )
 
-      alpha = self._compute_step_size(y, s, d_y, d_s)
-      step = step_size_scale * alpha
-      x += step * d_x
-      y += step * d_y
-      tau += step * d_tau
-      s += step * d_s
+        # --- Step 3: Corrector Step ---
+        # Mehrotra's second-order correction accounts for the nonlinear cross-term
+        # that the predictor's linear approximation ignores. Expanding the full
+        # complementarity condition to second order:
+        #   (y + d_y)(s + d_s) = sigma*mu
+        #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
+        # The predictor solved the linearized version (dropping d_y*d_s). Here we
+        # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
+        # (divided by y because the KKT complementarity block is scaled by 1/y),
+        # so the corrector step can incorporate it to land closer to the target.
+        if self._fused_corrector_division:
+          correction = -cross_p / y[self.z :]
+        else:
+          correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+        xy[: self.n] = x_p
+        xy[self.n :] = y_p
+        x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
+            p=p,
+            mu=mu,
+            mu_target=sigma * mu,
+            r_anchor=xy,
+            tau_anchor=tau_p,
+            x=x,
+            y=y,
+            s=s,
+            tau=tau,
+            correction=correction,
+        )
+        stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
 
-      # Ensure variables stay strictly in the cone to prevent numerical issues.
-      y[self.z :] = np.maximum(y[self.z :], 1e-30)
-      s[self.z :] = np.maximum(s[self.z :], 1e-30)
-      tau = max(tau, 1e-30)
+        # --- Step 4: Update Iterates ---
+        d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
+        if self._fused_corrector_division:
+          # Combined-numerator corrector slack step. Algebraically equivalent
+          # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
+          # numerator before the single division by y[z:], avoiding
+          # catastrophic cancellation when y_i is small and the three terms
+          # have similar magnitudes with opposing signs.
+          d_s[self.z :] = (
+              sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+          ) / y[self.z :]
+        else:
+          # Legacy three-division formula.
+          d_s[self.z :] = (
+              sigma * mu / y[self.z :]
+              + correction
+              - y_c[self.z :] * s[self.z :] / y[self.z :]
+          )
 
-      status = self._check_termination(
-          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
-      )
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-      if status != SolutionStatus.UNFINISHED:
-        break
-    else:
-      status = SolutionStatus.HIT_MAX_ITER
-      if collect_stats:
-        stats[-1]["status"] = status
+        alpha = self._compute_step_size(y, s, d_y, d_s)
+        step = step_size_scale * alpha
+        x += step * d_x
+        y += step * d_y
+        tau += step * d_tau
+        s += step * d_s
+
+        # Ensure variables stay strictly in the cone to prevent numerical issues.
+        y[self.z :] = np.maximum(y[self.z :], 1e-30)
+        s[self.z :] = np.maximum(s[self.z :], 1e-30)
+        tau = max(tau, 1e-30)
+
+        status = self._check_termination(
+            x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+        )
+        self._log_iteration(stats_i)
+        if collect_stats:
+          stats.append(stats_i)
+        if status != SolutionStatus.UNFINISHED:
+          break
+      else:
+        status = SolutionStatus.HIT_MAX_ITER
+        if collect_stats:
+          stats[-1]["status"] = status
+
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+      logging.warning("Numeric failure at iteration %d: %s", self.it, exc)
+      status = SolutionStatus.UNFINISHED
+      if collect_stats and stats:
+        stats[-1]["status"] = SolutionStatus.FAILED
 
     # We have terminated for one reason or another.
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
