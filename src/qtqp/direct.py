@@ -26,7 +26,7 @@ followed by ``direct.ScipySolver`` continues to work.
 import enum
 import logging
 import math
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
@@ -560,14 +560,14 @@ class DirectKktSolver:
 
 # Re-export all backend solver classes so that ``direct.ScipySolver`` etc.
 # continue to work without changing __init__.py or test imports.
-from .solvers_sparse import AccelerateSolver
-from .solvers_sparse import CholModSolver
-from .solvers_sparse import EigenSolver
-from .solvers_sparse import MklPardisoSolver
-from .solvers_sparse import MumpsSolver
-from .solvers_sparse import QdldlSolver
-from .solvers_sparse import ScipySolver
-from .solvers_sparse import UmfpackSolver
-from .solvers_dense import ScipyDenseSolver
-from .solvers_gpu import CuDssSolver
-from .solvers_gpu import CupyDenseSolver
+from .solvers_sparse import AccelerateSolver  # noqa: F401
+from .solvers_sparse import CholModSolver  # noqa: F401
+from .solvers_sparse import EigenSolver  # noqa: F401
+from .solvers_sparse import MklPardisoSolver  # noqa: F401
+from .solvers_sparse import MumpsSolver  # noqa: F401
+from .solvers_sparse import QdldlSolver  # noqa: F401
+from .solvers_sparse import ScipySolver  # noqa: F401
+from .solvers_sparse import UmfpackSolver  # noqa: F401
+from .solvers_dense import ScipyDenseSolver  # noqa: F401
+from .solvers_gpu import CuDssSolver  # noqa: F401
+from .solvers_gpu import CupyDenseSolver  # noqa: F401
