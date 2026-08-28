@@ -1328,13 +1328,14 @@ def test_newton_step_uses_quadratic_when_converged():
   assert calls == {'quadratic': 1, 'linearized': 0}
 
 
-def test_newton_step_uses_linearized_when_not_converged():
-  """Non-converged KKT solve should use linearized tau fallback."""
+def test_newton_step_attempts_quadratic_when_not_converged():
+  """A non-converged KKT solve still attempts the exact quadratic: the
+  former residual pre-check was measured harmful (d6cube) and removed;
+  the linearized fallback engages only when the quadratic raises."""
   solver, calls = _make_tau_gating_solver(converged=False)
   _, _, tau_new, lin_sys_stats = _run_newton_step(solver)
-  np.testing.assert_allclose(tau_new, 2.0)
-  assert lin_sys_stats['tau_method'] == 'linearized'
-  assert calls == {'quadratic': 0, 'linearized': 1}
+  assert lin_sys_stats['tau_method'] == 'quadratic'
+  assert calls == {'quadratic': 1, 'linearized': 0}
 
 
 def _always_raise_tau(self, *args, **kwargs):
