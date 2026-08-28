@@ -1166,6 +1166,20 @@ class QTQP:
             self._gov_floor_on = True
             self._gov_hist.clear()
             self._gov_trip_ratio = None
+          elif fire:
+            # The recenter budget is exhausted and the trip signal is
+            # still firing: eight recenters plus the pacing floor have
+            # not restored progress, so the governor's model of this
+            # trajectory is wrong. Holding the floor only slows a solve
+            # that is converging on its own terms (the forced-linearized-
+            # fallback stress converges ungoverned in 30 iterations and
+            # died at the cap governed). Stand down for the remainder.
+            logging.debug(
+                "governor: standing down at iteration %d; pacing floor"
+                " off.", self.it,
+            )
+            self._gov_floor_on = False
+            self._governor = False
       else:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
