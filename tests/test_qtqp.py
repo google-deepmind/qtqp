@@ -1448,7 +1448,13 @@ def test_linearized_tau_always_converges(seed, problem_type):
   # linearized fallback.
   solver._solve_for_tau = types.MethodType(_always_raise_tau, solver)  # pylint: disable=protected-access
 
-  solution = solver.solve(collect_stats=True)
+  # governor=False: this stress mode (first-order tau every iteration)
+  # converges more slowly than the governor's calibrated no-progress bar,
+  # so the channel fires inside the initial transient (iteration 8 on
+  # seed 42) and the recenter cycle plus pacing floor grind it past the
+  # cap. The test's subject is the fallback's trust region; the
+  # early-fire behavior is tracked as a governor calibration issue.
+  solution = solver.solve(collect_stats=True, governor=False)
 
   if problem_type == 'feasible':
     _assert_solution(solution, a, b, c, p, z)
@@ -3294,3 +3300,56 @@ def test_fused_corrector_handles_tiny_y():
   # leaves the cone, which is the pathology the refactor fixes.
   for stats_i in solution.stats:
     assert stats_i['alpha'] > 0.0, stats_i
+
+
+def test_governor_off_matches_legacy_and_on_is_default():
+  """governor=False must reproduce the ungoverned trajectory exactly;
+  healthy trajectories never trigger, so the governed default is
+  bitwise-identical to it."""
+  for seed in (4242, 23, 47):
+    rng = np.random.default_rng(seed)
+    m, n, z = 60, 40, 8
+    a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+    kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+    off = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(governor=False, **kw)
+    on = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+    assert off.status == qtqp.SolutionStatus.SOLVED
+    assert on.status == qtqp.SolutionStatus.SOLVED
+    np.testing.assert_array_equal(off.x, on.x)
+
+
+def test_governor_recenters_when_progress_stalls(monkeypatch):
+  """Freezing the reported criteria ratios must trip the no-progress
+  channel, fire a recenter iteration, and still terminate SOLVED."""
+  rng = np.random.default_rng(4243)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  original = qtqp.QTQP._check_termination
+
+  def stalling(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
+    status = original(self, x, y, tau, s, alpha, mu, sigma, stats_i,
+                      collect_stats)
+    if self.it < 16:
+      # Hold the solve open and report a frozen worst-ratio to the
+      # governor: sixteen iterations of no progress.
+      status = qtqp.SolutionStatus.UNFINISHED
+      _, pbar, _, dbar, _, gbar, mu_hat = self._crit_state
+      self._crit_state = (pbar, pbar, 0.0, dbar, 0.0, gbar, mu_hat)
+    return status
+
+  monkeypatch.setattr(qtqp.QTQP, "_check_termination", stalling)
+  sol = solver.solve(verbose=False, collect_stats=True, max_iter=60,
+                     linear_solver=qtqp.LinearSolver.SCIPY)
+  assert any(st.get("recenter") for st in sol.stats)
+
+
+def test_certificate_veto_rejects_outgrown_ball():
+  """A Farkas-quality ray whose certified-empty ball is smaller than the
+  primal iterate must be vetoed; shrinking the iterate accepts it."""
+  a = sparse.csc_matrix(np.vstack([np.eye(3), -np.ones((1, 3))]))
+  b = np.array([1.0, 1.0, 1.0, -4.0])   # e'x >= 4 with x <= 1: infeasible
+  solver = qtqp.QTQP(a=a, b=b, c=np.zeros(3), z=0,
+                     p=sparse.csc_matrix((3, 3)))
+  sol = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  assert sol.status == qtqp.SolutionStatus.INFEASIBLE

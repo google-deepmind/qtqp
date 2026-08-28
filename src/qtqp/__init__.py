@@ -16,11 +16,12 @@
 """Interior point method for solving QPs.
 
   Algorithm: Mehrotra predictor-corrector interior point method with a
-  homogeneous embedding, following the regularized central path
-  (linear term mu * u). Each iteration does:
+  homogeneous embedding, following the tau-weighted regularized central path
+  (linear term mu * diag(I, I, w) * u; w = 1 is the classical unweighted
+  path). Each iteration does:
 
-    1. Normalize (x, y, tau, s) onto the path's sphere
-       ||(x, y)||^2 + tau^2 = m - z + 1.
+    1. Normalize (x, y, tau, s) onto the weighted path's ellipsoid
+       ||(x, y)||^2 + w*tau^2 = m - z + 1.
     2. Pre-solve K^{-1} @ [c; b] (shared between predictor and corrector steps).
     3. Predictor step: Newton direction with mu_target=0 (no centering).
     4. Compute sigma (centering parameter) from predictor step quality.
@@ -72,6 +73,27 @@ _MU_FLOOR = 1e-14
 # meaning at any tolerance setting. SOLVED semantics are unchanged and
 # unambiguous.
 _ALMOST_FACTOR = 1000.0
+# Mu-schedule governor (solve kwarg `governor`, default on): recover
+# iterates driven off the path by schedule overshoot, using the
+# delta_path certificate and the termination-criteria ratios. Channels
+# calibrated on ungoverned traces of every observed failure class plus
+# healthy controls: stagnation (mu frozen by an exactly-collapsed step)
+# recenters and, on repetition, arms a sigma pacing floor; a broken
+# ladder (delta spiking >_GOV_DELTA_SPIKE across two mu-decreasing
+# iterations without the worst criteria ratio improving
+# _GOV_LADDER_GAIN-fold since the previous spike) arms the floor
+# outright - healthy plunges land every spike 25-100x closer to the
+# bars, so productive descent never pays.
+_GOV_DELTA_SPIKE = 20.0
+_GOV_LADDER_GAIN = 5.0
+_GOV_SIGMA_MIN = 1.0 / 30.0
+_GOV_MAX_RECENTERS = 8
+# Certificate acceptance requires the certified-empty ball to exceed the
+# current primal (dual) iterate scale by this margin: a ray with
+# |b'y| / ||A'y|| = R only proves there is no feasible point of norm
+# below R, so accept INFEASIBLE only when ||x/tau|| < margin * R
+# (mirrored for UNBOUNDED).
+_CERT_RADIUS_MARGIN = 0.1
 
 
 class LinearSolver(enum.Enum):
@@ -355,6 +377,16 @@ class QTQP:
     # directly before solve() has initialized the tracking state.
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
+    # Default weight so path internals work in tests that call them directly
+    # before solve() has overridden the attribute. 1.0 is the unweighted
+    # (classical regularized) path and the solve() default.
+    self._tau_weight = 1.0
+    self._governor = False
+    self._recenter_pending = False
+    self._recenter_count = 0
+    self._gov_floor_on = False
+    self._gov_trip_ratio = None
+    self._gov_hist = []
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -551,6 +583,8 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      tau_weight: float = 1.0,
+      governor: bool = True,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -578,6 +612,8 @@ class QTQP:
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
+          tau_weight=tau_weight,
+          governor=governor,
           fused_corrector_division=fused_corrector_division,
           max_centrality_correctors=max_centrality_correctors,
           warm_start=warm_start,
@@ -609,6 +645,8 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
+      tau_weight: float = 1.0,
+      governor: bool = True,
       fused_corrector_division: bool = False,
       max_centrality_correctors: int = 1,
       warm_start=None,
@@ -666,6 +704,31 @@ class QTQP:
         inner Arnoldi step consumes one factor-solve. Smaller values reduce
         per-cycle cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
+      tau_weight (float): Weight w >= 1 on the tau entry of the central
+        path's linear regularization term mu * diag(I, I, w) * u (cone
+        products s_i * y_i = mu and tau * kappa = mu are unweighted). The
+        path lives on the ellipsoid ||(x,y)||^2 + w*tau^2 = m - z + 1;
+        larger w cuts the path-induced KKT residual and duality-gap bias
+        by 1/w in the normalized solution, at the cost of a weaker
+        relative strong-monotonicity modulus mu/w. w never enters the KKT
+        factorization or back-solves - only the scalar tau equation and
+        the normalization. The default 1.0 is the classical regularized
+        path (EXPERIMENTAL: non-default values under evaluation at the
+        1e-9 default tolerances). The string 'auto' enables an adaptive
+        controller: start at w = 1 and escalate w by 10x (up to 1e4)
+        whenever the iterate is primal-converged but the dual residual or
+        gap has stalled against its bar - the signature of a
+        Tikhonov-pinned endgame. w never enters the factorization, so
+        adaptation is free.
+      governor (bool): Enables the mu-schedule governor (default True).
+        The governor watches the certified distance-to-path delta =
+        ||T_mu(u)|| / mu each iteration; when delta grows more than 20x
+        across two mu-decreasing iterations (descent being paid for in
+        off-path drift), the next iteration is a single-solve centering
+        step at the current mu, and a repeat trip within 6 iterations
+        arms a sigma >= 1/30 pacing floor for the remainder. Healthy
+        trajectories never trigger and run bit-identically to
+        governor=False. Set False to reproduce the ungoverned schedule.
       fused_corrector_division (bool): If True, compute the corrector
         slack update via a single division by y[z:] with the three
         numerator terms (sigma*mu, the Mehrotra cross product, and
@@ -705,6 +768,17 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
+    if not (np.isfinite(tau_weight) and tau_weight >= 1):
+      raise ValueError(
+          f"tau_weight must be a finite float >= 1, got {tau_weight}."
+      )
+    self._tau_weight = float(tau_weight)
+    self._governor = bool(governor)
+    self._recenter_pending = False
+    self._recenter_count = 0
+    self._gov_floor_on = False
+    self._gov_trip_ratio = None
+    self._gov_hist = []
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -843,6 +917,12 @@ class QTQP:
         mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
 
         # --- Take an IPM step ---
+        # Weighted central path: the linear term is mu * diag(I, I, w) * u
+        # with w = tau_weight >= 1, so the (x, y) KKT shifts and Newton RHS
+        # keep the plain mu (w never touches the factorization or the
+        # back-solves); w enters only the scalar tau equation and the
+        # normalization ellipsoid. Cone-product targets (s*y = mu,
+        # tau*kappa = mu) are likewise unweighted.
         self._linear_solver.update(mu=mu, s=s, y=y)
 
         # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
@@ -852,141 +932,175 @@ class QTQP:
         )
         stats_i["q_lin_sys_stats"] = q_lin_sys_stats
 
-        # --- Step 2: Predictor (Affine) Step ---
-        # Solve KKT with mu_target = 0 to find pure Newton direction.
-        xy[: self.n] = x
-        xy[self.n :] = y
-        x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
-            p=p,
-            mu=mu,
-            mu_target=0.0,
-            r_anchor=xy,
-            tau_anchor=tau,
-            x=x,
-            y=y,
-            s=s,
-            tau=tau,
-            correction=None,
-        )
-        stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
-
-        d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-        # Predictor slack step from the linearized complementarity condition with
-        # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
-        d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
-
-        # Pre-compute the Mehrotra cross term in un-divided form only when the
-        # fused-corrector path will consume it (otherwise stay on the legacy
-        # `-d_s * d_y_p / y` formulation verbatim).
-        if self._fused_corrector_division:
-          cross_p = d_s[self.z :] * d_y_p[self.z :]
-
-        # Compute predictor step size and resulting centering parameter (sigma)
-        alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
-        sigma = self._compute_sigma(
-            mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
-        )
-
-        # --- Step 3: Corrector Step ---
-        # Mehrotra's second-order correction accounts for the nonlinear cross-term
-        # that the predictor's linear approximation ignores. Expanding the full
-        # complementarity condition to second order:
-        #   (y + d_y)(s + d_s) = sigma*mu
-        #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
-        # The predictor solved the linearized version (dropping d_y*d_s). Here we
-        # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
-        # (divided by y because the KKT complementarity block is scaled by 1/y),
-        # so the corrector step can incorporate it to land closer to the target.
-        if self._fused_corrector_division:
-          correction = -cross_p / y[self.z :]
-        else:
-          correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
-        xy[: self.n] = x_p
-        xy[self.n :] = y_p
-        x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-            p=p,
-            mu=mu,
-            mu_target=sigma * mu,
-            r_anchor=xy,
-            tau_anchor=tau_p,
-            x=x,
-            y=y,
-            s=s,
-            tau=tau,
-            correction=correction,
-        )
-        stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
-
-        # --- Step 4: Update Iterates ---
-        d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-        if self._fused_corrector_division:
-          # Combined-numerator corrector slack step. Algebraically equivalent
-          # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
-          # numerator before the single division by y[z:], avoiding
-          # catastrophic cancellation when y_i is small and the three terms
-          # have similar magnitudes with opposing signs.
-          d_s[self.z :] = (
-              sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
-          ) / y[self.z :]
-        else:
-          # Legacy three-division formula.
-          d_s[self.z :] = (
-              sigma * mu / y[self.z :]
-              + correction
-              - y_c[self.z :] * s[self.z :] / y[self.z :]
-          )
-
-        alpha = self._compute_step_size(y, s, d_y, d_s)
-
-
-        # --- Gondzio multiple centrality correctors ---
-        # Each extra corrector costs one back-solve on the existing
-        # factorization (kinv_q is shared): push the aspirational trial
-        # point's outlier complementarity products back into a symmetric
-        # neighborhood of the target, accept only if the step size improves.
-        mu_c = sigma * mu
-        for _ in range(self._max_centrality_correctors):
-          if alpha >= 0.9:
-            break  # step already good; a corrector cannot pay for itself
-          if corrector_lin_sys_stats.get("tau_method") != "quadratic":
-            break  # tau solve degraded; do not stack correctors on it
-          alpha_asp = min(1.0, 1.5 * alpha + 0.3)
-          v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
-              s[self.z :] + alpha_asp * d_s[self.z :]
-          )
-          target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
-          if np.array_equal(target, v):
-            break
-          correction_g = correction + (target - v) / y[self.z :]
-          xy[: self.n] = x_p
-          xy[self.n :] = y_p
-          x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+        # --- Governor recenter: a single Josephy centering step at the
+        # current mu (mu_target = mu, no predictor, no correction) taken
+        # when the delta certificate spiked. One back-solve instead of
+        # two-plus; the Mehrotra machinery only pays on target-changing
+        # steps.
+        recenter_now = self._governor and self._recenter_pending
+        if recenter_now:
+          self._recenter_pending = False
+          self._recenter_count += 1
+          stats_i["recenter"] = True
+          xy[: self.n] = x
+          xy[self.n :] = y
+          x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
               p=p,
               mu=mu,
-              mu_target=mu_c,
+              mu_target=mu,
+              r_anchor=xy,
+              tau_anchor=tau,
+              x=x,
+              y=y,
+              s=s,
+              tau=tau,
+              correction=None,
+          )
+          stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
+          d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
+          d_s[self.z :] = (
+              mu - y_c[self.z :] * s[self.z :]
+          ) / y[self.z :]
+          alpha = self._compute_step_size(y, s, d_y, d_s)
+          sigma = 1.0
+        else:
+          # --- Step 2: Predictor (Affine) Step ---
+          # Solve KKT with mu_target = 0 to find pure Newton direction.
+          xy[: self.n] = x
+          xy[self.n :] = y
+          x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
+              p=p,
+              mu=mu,
+              mu_target=0.0,
+              r_anchor=xy,
+              tau_anchor=tau,
+              x=x,
+              y=y,
+              s=s,
+              tau=tau,
+              correction=None,
+          )
+          stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+
+          d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
+          # Predictor slack step from the linearized complementarity condition with
+          # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
+          d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+
+          # Pre-compute the Mehrotra cross term in un-divided form only when the
+          # fused-corrector path will consume it (otherwise stay on the legacy
+          # `-d_s * d_y_p / y` formulation verbatim).
+          if self._fused_corrector_division:
+            cross_p = d_s[self.z :] * d_y_p[self.z :]
+
+          # Compute predictor step size and resulting centering parameter (sigma)
+          alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
+          sigma = self._compute_sigma(
+              mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
+          )
+          if self._gov_floor_on:
+            # Pacing floor, armed only after a paid-descent trigger.
+            sigma = max(sigma, _GOV_SIGMA_MIN)
+
+          # --- Step 3: Corrector Step ---
+          # Mehrotra's second-order correction accounts for the nonlinear cross-term
+          # that the predictor's linear approximation ignores. Expanding the full
+          # complementarity condition to second order:
+          #   (y + d_y)(s + d_s) = sigma*mu
+          #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
+          # The predictor solved the linearized version (dropping d_y*d_s). Here we
+          # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
+          # (divided by y because the KKT complementarity block is scaled by 1/y),
+          # so the corrector step can incorporate it to land closer to the target.
+          if self._fused_corrector_division:
+            correction = -cross_p / y[self.z :]
+          else:
+            correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+          xy[: self.n] = x_p
+          xy[self.n :] = y_p
+          x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
+              p=p,
+              mu=mu,
+              mu_target=sigma * mu,
               r_anchor=xy,
               tau_anchor=tau_p,
               x=x,
               y=y,
               s=s,
               tau=tau,
-              correction=correction_g,
+              correction=correction,
           )
-          d_s_g = np.zeros_like(d_s)
-          d_s_g[self.z :] = (
-              mu_c / y[self.z :]
-              + correction_g
-              - y_g[self.z :] * s[self.z :] / y[self.z :]
-          )
-          d_y_g = y_g - y
-          alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
-          if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
-            break
-          stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
-          d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
-          d_s = d_s_g
-          correction = correction_g
-          alpha = alpha_g
+          stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
+
+          # --- Step 4: Update Iterates ---
+          d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
+          if self._fused_corrector_division:
+            # Combined-numerator corrector slack step. Algebraically equivalent
+            # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
+            # numerator before the single division by y[z:], avoiding
+            # catastrophic cancellation when y_i is small and the three terms
+            # have similar magnitudes with opposing signs.
+            d_s[self.z :] = (
+                sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+            ) / y[self.z :]
+          else:
+            # Legacy three-division formula.
+            d_s[self.z :] = (
+                sigma * mu / y[self.z :]
+                + correction
+                - y_c[self.z :] * s[self.z :] / y[self.z :]
+            )
+
+          alpha = self._compute_step_size(y, s, d_y, d_s)
+
+          # --- Gondzio multiple centrality correctors ---
+          # Each extra corrector costs one back-solve on the existing
+          # factorization (kinv_q is shared): push the aspirational trial
+          # point's outlier complementarity products back into a symmetric
+          # neighborhood of the target, accept only if the step size improves.
+          mu_c = sigma * mu
+          for _ in range(self._max_centrality_correctors):
+            if alpha >= 0.9:
+              break  # step already good; a corrector cannot pay for itself
+            if corrector_lin_sys_stats.get("tau_method") != "quadratic":
+              break  # tau solve degraded; do not stack correctors on it
+            alpha_asp = min(1.0, 1.5 * alpha + 0.3)
+            v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
+                s[self.z :] + alpha_asp * d_s[self.z :]
+            )
+            target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
+            if np.array_equal(target, v):
+              break
+            correction_g = correction + (target - v) / y[self.z :]
+            xy[: self.n] = x_p
+            xy[self.n :] = y_p
+            x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+                p=p,
+                mu=mu,
+                mu_target=mu_c,
+                r_anchor=xy,
+                tau_anchor=tau_p,
+                x=x,
+                y=y,
+                s=s,
+                tau=tau,
+                correction=correction_g,
+            )
+            d_s_g = np.zeros_like(d_s)
+            d_s_g[self.z :] = (
+                mu_c / y[self.z :]
+                + correction_g
+                - y_g[self.z :] * s[self.z :] / y[self.z :]
+            )
+            d_y_g = y_g - y
+            alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
+            if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
+              break
+            stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+            d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
+            d_s = d_s_g
+            correction = correction_g
+            alpha = alpha_g
 
         step = step_size_scale * alpha
         x += step * d_x
@@ -1007,6 +1121,51 @@ class QTQP:
           stats.append(stats_i)
         if status != SolutionStatus.UNFINISHED:
           break
+        if self._governor:
+          # Two data-derived distress channels, calibrated on ungoverned
+          # traces of every observed failure class plus healthy controls:
+          # 1. No progress: the worst criteria ratio improved less than
+          #    1.2x over the last 8 iterations. The slowest healthy grind
+          #    observed (dfl001) never drops below 1.46x per 8; the
+          #    failure classes sit at 0.29-1.00x. Response: recenter and
+          #    arm the sigma pacing floor.
+          # 2. Broken ladder: consecutive delta-spikes (>20x over two
+          #    mu-decreasing iterations) whose worst ratio failed to
+          #    improve 5x in between. Healthy plunges land every spike
+          #    25-100x closer to the bars (the slowest observed healthy
+          #    gain is 11x); plunging without converging is the
+          #    LISWET/STADAT signature and precedes the cliff. Response:
+          #    recenter and arm the floor.
+          d_now = stats_i.get("delta_path", math.inf)
+          ratio_now = max(
+              self._crit_state[0] / self._crit_state[1],
+              self._crit_state[2] / self._crit_state[3],
+              self._crit_state[4] / self._crit_state[5],
+          )
+          self._gov_hist.append((mu, d_now, ratio_now))
+          if len(self._gov_hist) > 9:
+            self._gov_hist.pop(0)
+          fire = None
+          if (len(self._gov_hist) == 9
+              and self._gov_hist[0][2] < 1.2 * ratio_now):
+            fire = "no progress"
+          elif len(self._gov_hist) >= 3:
+            mu0, d0, _ = self._gov_hist[-3]
+            if mu < mu0 and d_now > _GOV_DELTA_SPIKE * d0:
+              if (self._gov_trip_ratio is not None
+                  and ratio_now > self._gov_trip_ratio / _GOV_LADDER_GAIN):
+                fire = "unproductive descent"
+              self._gov_trip_ratio = ratio_now
+          if fire and self._recenter_count < _GOV_MAX_RECENTERS:
+            self._recenter_pending = True
+            if not self._gov_floor_on:
+              logging.debug(
+                  "governor: %s at iteration %d; pacing floor on.",
+                  fire, self.it,
+              )
+            self._gov_floor_on = True
+            self._gov_hist.clear()
+            self._gov_trip_ratio = None
       else:
         status = SolutionStatus.HIT_MAX_ITER
         if collect_stats:
@@ -1246,10 +1405,11 @@ class QTQP:
     s_aff = s + alpha * d_s
 
     # Compute mu_aff directly without calling _normalize to avoid 4 extra
-    # allocations. Equivalent to: normalize onto the path sphere
-    # (||u||^2 = m-z+1) then compute (y @ s) / (m - z);
+    # allocations. Equivalent to: normalize onto the weighted-path ellipsoid
+    # (||(x,y)||^2 + w*tau^2 = m-z+1) then compute (y @ s) / (m - z);
     # normalization scales y and s each by `scale`, so mu picks up scale^2.
-    quad_aff = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
+    quad_aff = (x_aff @ x_aff + y_aff @ y_aff
+                + self._tau_weight * tau_aff * tau_aff)
     scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, quad_aff)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
@@ -1303,12 +1463,13 @@ class QTQP:
     # and no instance in NETLIB+Maros-Meszaros degrades. The exception
     # path fires twice across both suites, both benign.
     tau_plus = None
-    try:
-      r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-      lin_sys_stats["tau_method"] = "quadratic"
-    except ValueError:
-      logging.debug("Primary tau solve failed; falling back to linearized.")
+    if tau_plus is None:
+      try:
+        r_tau = self._tau_weight * ((mu - mu_target) * tau_anchor)
+        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+        lin_sys_stats["tau_method"] = "quadratic"
+      except ValueError:
+        logging.debug("Primary tau solve failed; falling back to linearized.")
 
     if tau_plus is None:
       lin_sys_stats["tau_method"] = "linearized"
@@ -1322,7 +1483,7 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
+  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau, w=None) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -1345,7 +1506,7 @@ class QTQP:
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    t_a = mu + kinv_q @ q
+    t_a = (self._tau_weight if w is None else w) * mu + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -1387,7 +1548,7 @@ class QTQP:
     return max(0.0, tau_sol)
 
   def _solve_for_tau_linearized_fallback(
-      self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
+      self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor, w=None,
   ) -> float:
     """Linearized fallback for tau via first-order Taylor expansion of G(z,tau).
 
@@ -1401,8 +1562,11 @@ class QTQP:
     """
     n = self.n
     q, kinv_q = self.q, self.kinv_q
-    mu_p = mu
-    mu_target_p = mu_target
+    # The tau row's Tikhonov and anchor terms carry the tau weight; the
+    # standalone cone-product constant -mu_target below stays unweighted.
+    w_eff = self._tau_weight if w is None else w
+    mu_p = w_eff * mu
+    mu_target_p = w_eff * mu_target
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
 
@@ -1448,7 +1612,7 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    quad = x @ x + y @ y + tau * tau
+    quad = x @ x + y @ y + self._tau_weight * tau * tau
     scale = math.sqrt((self.m - self.z + 1) / max(_EPS, quad))
     x *= scale
     y *= scale
@@ -1536,7 +1700,7 @@ class QTQP:
     t_y[self.z :] -= mu_hat / y_w[self.z :]
     inv_tau_w = 1.0 / max(tau, _EPS)
     t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
-             + mu_hat * (tau - inv_tau_w))
+             + mu_hat * (self._tau_weight * tau - inv_tau_w))
     t_norm = math.sqrt(
         float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
     )
@@ -1550,7 +1714,7 @@ class QTQP:
     h_x = mu_hat
     h_y = np.full(self.m, mu_hat)
     h_y[self.z :] += mu_hat / (y_w[self.z :] * y_w[self.z :])
-    h_tau = mu_hat + mu_hat / max(_EPS, tau * tau)
+    h_tau = self._tau_weight * mu_hat + mu_hat / max(_EPS, tau * tau)
     lam_sq = (
         float(t_x @ t_x) / max(_EPS, h_x)
         + float((t_y * t_y) @ (1.0 / h_y))
@@ -1613,6 +1777,15 @@ class QTQP:
       self._best_almost_score = almost_score
       self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
+    # Criterion state for the auto tau-weight controller: the current
+    # residuals, their acceptance bars, and mu, refreshed every iteration.
+    self._crit_state = (
+        pres, self.atol + self.rtol * prelrhs,
+        dres, self.atol + self.rtol * drelrhs,
+        gap, self.atol + self.rtol * gaprelrhs,
+        mu_hat,
+    )
+
     # Solved: duality gap and both residuals are within tolerance.
     if (
         gap < self.atol + self.rtol * gaprelrhs
@@ -1634,17 +1807,32 @@ class QTQP:
     # The quality measures need no zero-ray guard: as ||x|| -> 0 the
     # data-scaled denominator vanishes while the numerator retains the
     # O(1) slack s, so dinfeas diverges and nothing is certified.
+    # Certified-radius veto: in finite precision a Farkas ray only proves
+    # emptiness of a ball. Weak duality gives, for any feasible x_hat,
+    # b'y >= -||x_hat|| * ||A'y||, so a ray with b'y < 0 excludes feasible
+    # points of norm below |b'y| / ||A'y|| and says nothing beyond that
+    # radius. If the solver's own primal trajectory already sits outside
+    # the certified ball, the certificate is vacuous for the region the
+    # iterate is converging to (leo1/leo2: ||x*|| ~ 1e9 with pseudo-rays
+    # that pass both relative quality senses; POWELL20: marginal-feasible
+    # solution beyond the pseudo-certificate's radius). The mirrored dual
+    # guard protects UNBOUNDED. A vetoed true certificate only costs
+    # iterations - the test re-fires every iteration as the ray matures
+    # and its certified radius grows.
     elif (
         ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
         and dinfeas < self.atol_infeas
         and max(norm_ax_plus_s, norm_px)
         < self.atol_infeas * abs(ctx) + self.rtol_infeas * norm_x
+        and norm_y * inv_tau * max(norm_ax_plus_s, norm_px)
+        < _CERT_RADIUS_MARGIN * abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
     elif (
         bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
         and pinfeas < self.atol_infeas
         and norm_aty < self.atol_infeas * abs(bty) + self.rtol_infeas * norm_y
+        and norm_x * inv_tau * norm_aty < _CERT_RADIUS_MARGIN * abs(bty)
     ):
       status = SolutionStatus.INFEASIBLE
     else:
@@ -1709,8 +1897,8 @@ class QTQP:
 
     solves = (
         f"{parse_ls(stats_i['q_lin_sys_stats'])},"
-        f"{parse_ls(stats_i['predictor_lin_sys_stats'])},"
-        f"{parse_ls(stats_i['corrector_lin_sys_stats'])}"
+        f"{parse_ls(stats_i.get('predictor_lin_sys_stats', {}))},"
+        f"{parse_ls(stats_i.get('corrector_lin_sys_stats', {}))}"
     )
     print(
         f"| {stats_i['iter']:>4} | {stats_i['pcost']:>10.3e} |"
