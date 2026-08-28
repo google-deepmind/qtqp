@@ -171,6 +171,7 @@ solve(
     gmres_restart: int = 10,
     tau_weight: float = 1.0,
     governor: bool = True,
+    anchor_at_init: bool = False,
     fused_corrector_division: bool = False,
     max_centrality_correctors: int = 1,
     warm_start=None,
@@ -213,6 +214,12 @@ Key parameters:
     announces itself by tens of orders of magnitude — this diagnostic is
     how corrupted infinity-sentinel bounds were found in the
     Maros-Meszaros benchmark files.
+-   `anchor_at_init`: Anchor the path's Tikhonov regularization at the
+    initial iterate instead of the origin (default `False`). Shifts the
+    terminal residual identity from `mu * ||x||` to `mu * ||x - x_a||`, so a
+    good initialization buys terminal accuracy on large-norm solutions; costs
+    a directional pull toward the initialization along the whole path. See the
+    `solve()` docstring for the measured trade-offs.
 -   `init_strategy`: Choose the initial interior-point iterate. Defaults to
     `qtqp.InitStrategy.CVXOPT`.
 -   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to

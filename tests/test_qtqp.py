@@ -3375,3 +3375,61 @@ def test_certificate_veto_rejects_outgrown_ball():
                      p=sparse.csc_matrix((3, 3)))
   sol = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
   assert sol.status == qtqp.SolutionStatus.INFEASIBLE
+
+
+def test_anchor_at_init_off_is_bit_identical():
+  """anchor_at_init=False must reproduce the default trajectory exactly."""
+  rng = np.random.default_rng(7)
+  a, b, c, p = _gen_feasible(120, 80, 8, random_state=rng)
+  # QDLDL: deterministic backend, so bitwise trajectory comparison is
+  # meaningful (the multithreaded backends are not run-to-run stable).
+  base = qtqp.QTQP(a=a, b=b, c=c, z=8, p=p).solve(
+      collect_stats=True, linear_solver=qtqp.LinearSolver.QDLDL)
+  off = qtqp.QTQP(a=a, b=b, c=c, z=8, p=p).solve(
+      collect_stats=True, anchor_at_init=False,
+      linear_solver=qtqp.LinearSolver.QDLDL)
+  assert base.status == off.status
+  assert len(base.stats) == len(off.stats)
+  np.testing.assert_array_equal(base.x, off.x)
+
+
+@pytest.mark.parametrize('seed', 42 + np.arange(4))
+def test_anchor_at_init_solves(seed):
+  """The anchored path solves feasible problems."""
+  rng = np.random.default_rng(seed)
+  a, b, c, p = _gen_feasible(150, 100, 10, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=10, p=p).solve(
+      collect_stats=True, anchor_at_init=True)
+  _assert_solution(solution, a, b, c, p, z=10)
+
+
+def test_anchor_at_init_virial_identity():
+  """Iterates satisfy the anchored virial identity after normalization.
+
+  Contracting T_mu(u) = 0 with u gives ||u||^2 - u'u_a = nu + 1 on the
+  anchored path (the sphere proposition at u_a = 0); _normalize projects
+  onto that manifold, so every post-normalization iterate must satisfy
+  it to rounding.
+  """
+  rng = np.random.default_rng(3)
+  a, b, c, p = _gen_feasible(150, 100, 10, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=10, p=p)
+  nu1 = solver.m - solver.z + 1
+  violations = []
+  orig_normalize = qtqp.QTQP._normalize
+
+  def spy(self, x, y, tau, s):
+    out = orig_normalize(self, x, y, tau, s)
+    if self._anchor is not None:
+      xx, yy, tt = out[0], out[1], out[2]
+      ax, ay, at = self._anchor
+      lhs = float(xx @ xx + yy @ yy + tt * tt) - float(
+          xx @ ax + yy @ ay + tt * at)
+      violations.append(abs(lhs - nu1) / nu1)
+    return out
+
+  solver._normalize = types.MethodType(spy, solver)  # pylint: disable=protected-access
+  solution = solver.solve(collect_stats=True, anchor_at_init=True)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
+  assert violations, "anchor was never set"
+  assert max(violations) < 1e-10
