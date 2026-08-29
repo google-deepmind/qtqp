@@ -769,6 +769,30 @@ class QTQP:
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
+
+    # Initial-point diagnostic: the local-norm distance-to-path measure
+    # lambda = ||T_mu(u)||_{H^-1} (H = mu*I + mu*hess(Phi)) evaluated at
+    # the deterministic initial iterate, before the first step. Three
+    # matvecs. Healthy problems measure small (<= ~1e7 across NETLIB +
+    # Maros-Meszaros); pathologically scaled data announces itself here
+    # by tens of orders of magnitude — this diagnostic is how corrupted
+    # infinity-sentinel bounds in the benchmark datasets were found.
+    mu0 = float(y @ s) / (self.m - self.z)
+    t_x0 = p @ x + a.T @ y + c * tau + mu0 * x
+    t_y0 = -(a @ x) + b * tau + mu0 * y
+    t_y0[self.z :] -= mu0 / y[self.z :]
+    px0_ = float(x @ (p @ x)) if p.nnz else 0.0
+    t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
+            + mu0 * (tau - 1.0 / max(_EPS, tau)))
+    h_y0 = np.full(self.m, mu0)
+    h_y0[self.z :] += mu0 / (y[self.z :] * y[self.z :])
+    h_t0 = mu0 + mu0 / max(_EPS, tau * tau)
+    self.lambda_init = math.sqrt(
+        float(t_x0 @ t_x0) / max(_EPS, mu0)
+        + float((t_y0 * t_y0) @ (1.0 / h_y0))
+        + t_t0 * t_t0 / max(_EPS, h_t0)
+    )
+
     self._log_header()
 
     # Pre-allocate [x; y] and d_s to avoid repeated allocation each iteration.
@@ -787,6 +811,8 @@ class QTQP:
       # self.it counts IPM steps already taken.
       for self.it in range(max_iter):
         stats_i = {}
+        if self.it == 0:
+          stats_i["lambda_init"] = self.lambda_init
         x, y, tau, s = self._normalize(x, y, tau, s)
 
         mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
@@ -1441,6 +1467,22 @@ class QTQP:
         float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
     )
     stats_i["delta_path"] = t_norm / max(_EPS, mu_hat)
+    # Local-norm proximity measure (diagnostic): the same T vector weighted
+    # by the inverse of H = mu*I + mu*diag(hess barrier), the barrier's
+    # local metric. Deflates the barrier rows that make the Euclidean
+    # certificate conservative on aggressively centered iterates
+    # (Newton-decrement flavor), and remains informative for aggressive
+    # iterates where the Euclidean bound saturates.
+    h_x = mu_hat
+    h_y = np.full(self.m, mu_hat)
+    h_y[self.z :] += mu_hat / (y_w[self.z :] * y_w[self.z :])
+    h_tau = mu_hat + mu_hat / max(_EPS, tau * tau)
+    lam_sq = (
+        float(t_x @ t_x) / max(_EPS, h_x)
+        + float((t_y * t_y) @ (1.0 / h_y))
+        + t_tau * t_tau / max(_EPS, h_tau)
+    )
+    stats_i["delta_path_local"] = math.sqrt(max(0.0, lam_sq))
 
     # Infeasibility certificates (Farkas-type, from the embedding structure).
     # If the primal is unbounded (dual infeasible) this produces a ray x with
