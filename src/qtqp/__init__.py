@@ -50,6 +50,21 @@ _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
+# ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown, the
+# best iterate seen is returned as ALMOST_SOLVED when it meets the same
+# criteria form at tolerances this factor looser than the user-requested
+# atol/rtol (at the 1e-9 defaults: 1e-6-grade, still a usable solution).
+_ALMOST_FACTOR = 1000.0
+# Floor on the complementarity parameter mu wherever it enters the
+# algorithm (KKT shift, corrector targets, barrier terms). Below this
+# scale mu carries no information in double precision relative to O(1)
+# equilibrated data, and letting it underflow leaves the Newton system
+# effectively unregularized: at the 1e-9 default tolerances the endgame
+# reaches depths where an underflowed mu makes the KKT factorization
+# effectively singular (observed: CHOLMOD NotPositiveDefinite on
+# Windows). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
+# touch the floor.
+_MU_FLOOR = 1e-14
 
 
 class LinearSolver(enum.Enum):
@@ -134,6 +149,7 @@ class SolutionStatus(enum.Enum):
   INFEASIBLE = "infeasible"
   UNBOUNDED = "unbounded"
   HIT_MAX_ITER = "hit_max_iter"
+  ALMOST_SOLVED = "almost_solved"
   FAILED = "failed"
   UNFINISHED = "unfinished"
 
@@ -331,6 +347,10 @@ class QTQP:
     # Default exponent so _newton_step works in tests that call it directly
     # before solve() has overridden the attribute.
     self._central_path_exponent = 1.0
+    # Defaults so _check_termination works in tests that call it directly
+    # before solve() has initialized the tracking state.
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -483,8 +503,8 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -537,8 +557,8 @@ class QTQP:
   def _solve_impl(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
+      atol: float = 1e-9,
+      rtol: float = 1e-9,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -699,6 +719,8 @@ class QTQP:
     x, y, s, tau, _ = self._init_variables(
         init_strategy, init_mu_scale, a, p, b, c
     )
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
     self._log_header()
 
@@ -720,7 +742,7 @@ class QTQP:
         stats_i = {}
         x, y, tau, s = self._normalize(x, y, tau, s)
 
-        mu = (y @ s) / (self.m - self.z)
+        mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
         # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
         # diagonal and the Newton-step linear-residual RHS; cone-product
         # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
@@ -874,16 +896,30 @@ class QTQP:
         x, s = x / abs_ctx, s / abs_ctx
         y, s = self._postsolve(y, s, y_dropped=np.nan)
         return Solution(x, y, s, stats, status)
-      case SolutionStatus.HIT_MAX_ITER:
-        self._log_footer("Hit maximum iterations")
+      case SolutionStatus.HIT_MAX_ITER | SolutionStatus.UNFINISHED:
+        # Salvage: the best iterate seen, if it meets the criteria at
+        # _ALMOST_FACTOR looser tolerances, is an honestly-labeled
+        # near-solution - more useful than the raw final iterate after a
+        # cap-out or a numerical breakdown. The stored iterate is already
+        # unequilibrated (captured inside _check_termination).
+        if (
+            self._best_almost_iterate is not None
+            and self._best_almost_score < 1.0
+        ):
+          bx, by, bs, btau = self._best_almost_iterate
+          self._log_footer("Almost solved (best iterate salvage)")
+          bx, by, bs = bx / btau, by / btau, bs / btau
+          by, bs = self._postsolve(by, bs, s_dropped=self._dropped_slack(bx))
+          return Solution(bx, by, bs, stats, SolutionStatus.ALMOST_SOLVED)
+        if status is SolutionStatus.HIT_MAX_ITER:
+          self._log_footer("Hit maximum iterations")
+          final = status
+        else:
+          self._log_footer("Failed to converge")
+          final = SolutionStatus.FAILED
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
-        return Solution(x, y, s, stats, status)
-      case SolutionStatus.UNFINISHED:
-        self._log_footer("Failed to converge")
-        x, y, s = x / tau, y / tau, s / tau
-        y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
-        return Solution(x, y, s, stats, SolutionStatus.FAILED)
+        return Solution(x, y, s, stats, final)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
 
@@ -1118,16 +1154,21 @@ class QTQP:
         warm_start=r_anchor,
     )
 
-    # Tau solve: exact quadratic when KKT solve converged, linearized
-    # fallback when noisy (avoids squaring O(eps) into O(eps^2)).
+    # Tau solve: always attempt the exact quadratic; fall back to the
+    # linearized form only when it fails. The former residual pre-check
+    # (skip the quadratic unless converged or residual < 1e-7) was
+    # measured to be harmful on the one instance where it fired
+    # materially: under a deterministic backend, d6cube flips from
+    # HIT_MAX_ITER to SOLVED when the quadratic is always attempted,
+    # and no instance in NETLIB+Maros-Meszaros degrades. The exception
+    # path fires twice across both suites, both benign.
     tau_plus = None
-    if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
-      try:
-        r_tau = (mu_p - mu_target_p) * tau_anchor
-        tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
-        lin_sys_stats["tau_method"] = "quadratic"
-      except ValueError:
-        logging.debug("Primary tau solve failed; falling back to linearized.")
+    try:
+      r_tau = (mu_p - mu_target_p) * tau_anchor
+      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+      lin_sys_stats["tau_method"] = "quadratic"
+    except ValueError:
+      logging.debug("Primary tau solve failed; falling back to linearized.")
 
     if tau_plus is None:
       lin_sys_stats["tau_method"] = "linearized"
@@ -1364,6 +1405,21 @@ class QTQP:
       status = SolutionStatus.INFEASIBLE
     else:
       status = SolutionStatus.UNFINISHED
+
+    # Track the best iterate seen, scored by the max normalized residual
+    # at the ALMOST_SOLVED thresholds (same criteria form, looser
+    # constants). Used to return an honestly-labeled near-solution when
+    # the iteration cap is reached without meeting the SOLVED contract.
+    almost_atol = _ALMOST_FACTOR * self.atol
+    almost_rtol = _ALMOST_FACTOR * self.rtol
+    almost_score = max(
+        gap / (almost_atol + almost_rtol * min(abs(pcost), abs(dcost))),
+        pres / (almost_atol + almost_rtol * prelrhs),
+        dres / (almost_atol + almost_rtol * drelrhs),
+    )
+    if almost_score < self._best_almost_score:
+      self._best_almost_score = almost_score
+      self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
     stats_i.update({
         "iter": self.it,

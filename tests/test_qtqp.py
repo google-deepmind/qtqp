@@ -525,7 +525,6 @@ def test_equality_only_lp(seed):
   y_star = rng.normal(size=m)
   b = a @ x_star
   c = -(a.T @ y_star)
-  p = sparse.csc_matrix((n, n))
   with pytest.raises(ValueError, match='effective z == m'):
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=True)
 
@@ -548,7 +547,6 @@ def test_presolve_drops_all_inequalities():
   rng = np.random.default_rng(842)
   m_eq, n = 5, 20
   m_ineq = 5
-  m = m_eq + m_ineq
   z = m_eq
   a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
   a, b = _append_dropped_inequalities(
@@ -1315,13 +1313,14 @@ def test_newton_step_uses_quadratic_when_converged():
   assert calls == {'quadratic': 1, 'linearized': 0}
 
 
-def test_newton_step_uses_linearized_when_not_converged():
-  """Non-converged KKT solve should use linearized tau fallback."""
+def test_newton_step_attempts_quadratic_when_not_converged():
+  """A non-converged KKT solve still attempts the exact quadratic: the
+  former residual pre-check was measured harmful (d6cube) and removed;
+  the linearized fallback engages only when the quadratic raises."""
   solver, calls = _make_tau_gating_solver(converged=False)
   _, _, tau_new, lin_sys_stats = _run_newton_step(solver)
-  np.testing.assert_allclose(tau_new, 2.0)
-  assert lin_sys_stats['tau_method'] == 'linearized'
-  assert calls == {'quadratic': 0, 'linearized': 1}
+  assert lin_sys_stats['tau_method'] == 'quadratic'
+  assert calls == {'quadratic': 1, 'linearized': 0}
 
 
 def _always_raise_tau(self, *args, **kwargs):
@@ -1519,8 +1518,14 @@ def test_p_none_equivalent_to_zero_matrix():
   a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
   p_zero = sparse.csc_matrix((n, n))
 
-  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(verbose=True)
-  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(verbose=True)
+  # QDLDL: the multithreaded backends are not run-to-run deterministic,
+  # and this test compares two full trajectories to 1e-8 - at the 1e-9
+  # default tolerances the trajectories are long enough that backend
+  # noise flips the comparison on most platforms.
+  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(
+      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
+  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(
+      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
 
   assert sol_none.status == qtqp.SolutionStatus.SOLVED
   assert sol_zero.status == qtqp.SolutionStatus.SOLVED
@@ -2094,14 +2099,16 @@ def test_complementarity_at_convergence():
 
 def test_iterative_refinement_improves_residual():
   """Test that more refinement steps reduce the final linear system residual."""
+  # QDLDL pinned: the ordering assertion compares residuals at the noise
+  # floor; multithreaded backends are not run-to-run stable there.
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+  sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(linear_solver=qtqp.LinearSolver.QDLDL, 
       max_iterative_refinement_steps=1, verbose=True, collect_stats=True
   )
-  sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+  sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(linear_solver=qtqp.LinearSolver.QDLDL, 
       max_iterative_refinement_steps=50, verbose=True, collect_stats=True
   )
 
@@ -3053,3 +3060,86 @@ def test_fused_corrector_handles_tiny_y():
   # leaves the cone, which is the pathology the refactor fixes.
   for stats_i in solution.stats:
     assert stats_i['alpha'] > 0.0, stats_i
+
+
+
+def test_default_tolerances_are_1e9():
+  import inspect
+  sig = inspect.signature(qtqp.QTQP.solve)
+  assert sig.parameters['atol'].default == 1e-9
+  assert sig.parameters['rtol'].default == 1e-9
+
+
+def test_almost_solved_near_cap():
+  """Capping one iteration below the solve count returns the best iterate
+  with ALMOST_SOLVED (it meets the 1e-6 criteria form), while a very early
+  cap still returns HIT_MAX_ITER."""
+  rng = np.random.default_rng(9600)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  full = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(collect_stats=True, **kw)
+  assert full.status == qtqp.SolutionStatus.SOLVED
+  n_it = len(full.stats)
+  near = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=n_it - 1, **kw)
+  assert near.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  # The returned best iterate is a genuine near-solution.
+  sv = b - a @ near.x
+  pres = max(np.max(np.abs(sv[:z]), initial=0.0),
+             np.max(np.maximum(-sv[z:], 0.0), initial=0.0))
+  assert pres < 1e-4 * (1 + np.max(np.abs(b)))
+  early = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(max_iter=2, **kw)
+  assert early.status == qtqp.SolutionStatus.HIT_MAX_ITER
+
+
+def test_linear_solver_breakdown_returns_best_iterate(monkeypatch):
+  """A linear-solver breakdown mid-solve must not raise: a late breakdown
+  returns the tracked best iterate as ALMOST_SOLVED, an immediate one
+  returns FAILED (regression: DUALC8 / brazil3 NaN under QDLDL at 1e-9)."""
+  from qtqp import direct as qtqp_direct
+
+  rng = np.random.default_rng(9700)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  original = qtqp_direct.DirectKktSolver.solve
+
+  calls = {'n': 0}
+  def counting(self, *args, **kwargs):
+    calls['n'] += 1
+    return original(self, *args, **kwargs)
+  monkeypatch.setattr(qtqp_direct.DirectKktSolver, 'solve', counting)
+  full = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert full.status == qtqp.SolutionStatus.SOLVED
+  total = calls['n']
+
+  def breaking_after(limit):
+    state = {'n': 0}
+    def solve(self, *args, **kwargs):
+      state['n'] += 1
+      if state['n'] > limit:
+        raise ValueError('Linear solver returned NaNs.')
+      return original(self, *args, **kwargs)
+    return solve
+
+  # Breakdown on the very last solve: all but the final iteration completed,
+  # so the tracked best iterate qualifies at the ALMOST thresholds.
+  monkeypatch.setattr(
+      qtqp_direct.DirectKktSolver, 'solve', breaking_after(total - 1)
+  )
+  late = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert late.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  assert np.all(np.isfinite(late.x))
+  sv = b - a @ late.x
+  pres = max(np.max(np.abs(sv[:z]), initial=0.0),
+             np.max(np.maximum(-sv[z:], 0.0), initial=0.0))
+  assert pres < 1e-4 * (1 + np.max(np.abs(b)))
+
+  # Breakdown in the first iteration, before any termination check: no
+  # iterate has been tracked, so the solve reports FAILED (and still does
+  # not raise).
+  monkeypatch.setattr(
+      qtqp_direct.DirectKktSolver, 'solve', breaking_after(2)
+  )
+  early_break = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  assert early_break.status == qtqp.SolutionStatus.FAILED
