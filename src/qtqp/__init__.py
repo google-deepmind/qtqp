@@ -1465,26 +1465,42 @@ class QTQP:
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = norm_aty / (abs(bty) + _EPS)
 
-    # Primal residual tolerance relative scale.
+    norm_x = _norm(x, np.inf)
+    norm_y = _norm(y, np.inf)
+
+    # Residual tolerance relative scales. Each is the max of two families:
+    # the summand norms (the floor below which the residual cannot even be
+    # evaluated in floating point) and the iterate norm (the backward-error
+    # allowance: dres <= rtol * ||x||/tau accepts a point that is exactly
+    # dual-feasible for P + dP with ||dP|| <= rtol, which is precisely the
+    # mu*I perturbation the regularized path itself commits; likewise
+    # pres <= rtol * ||y||/tau on the primal side).
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
         _norm(s, np.inf) * inv_tau,
         self._norm_b,
+        norm_y * inv_tau,
     )
 
-    # Dual residual tolerance relative scale.
     drelrhs = max(
         norm_px * inv_tau,
         norm_aty * inv_tau,
         self._norm_c,
+        norm_x * inv_tau,
     )
 
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
+    # Gap tolerance relative scale: the cost magnitudes (measurement floor)
+    # or the first-power iterate norm (the empirically calibrated allowance
+    # for the regularized path's O(mu*||u||^2) objective bias; see the
+    # criteria validation on NETLIB + Maros-Meszaros).
+    gaprelrhs = max(
+        min(abs(pcost), abs(dcost)),
+        (norm_x + norm_y) * inv_tau,
+    )
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
-        gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
+        gap < self.atol + self.rtol * gaprelrhs
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
@@ -1509,7 +1525,7 @@ class QTQP:
     almost_atol = _ALMOST_FACTOR * self.atol
     almost_rtol = _ALMOST_FACTOR * self.rtol
     almost_score = max(
-        gap / (almost_atol + almost_rtol * min(abs(pcost), abs(dcost))),
+        gap / (almost_atol + almost_rtol * gaprelrhs),
         pres / (almost_atol + almost_rtol * prelrhs),
         dres / (almost_atol + almost_rtol * drelrhs),
     )

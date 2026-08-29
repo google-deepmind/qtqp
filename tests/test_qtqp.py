@@ -291,18 +291,26 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
   pres = np.linalg.norm(a @ x + s - b, np.inf)
   dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
   gap = np.abs(c @ x + b @ y + x @ p @ x)
+  # Relative scales mirror the solver's termination criteria: the summand
+  # norms (evaluation floor) plus the iterate norms (the backward-error
+  # allowance of the regularized path).
+  norm_x = np.linalg.norm(x, np.inf)
+  norm_y = np.linalg.norm(y, np.inf)
   prelrhs = max(
       np.linalg.norm(a @ x, np.inf),
       np.linalg.norm(s, np.inf),
       np.linalg.norm(b, np.inf),
+      norm_y,
   )
   drelrhs = max(
       np.linalg.norm(p @ x, np.inf),
       np.linalg.norm(a.T @ y, np.inf),
       np.linalg.norm(c, np.inf),
+      norm_x,
   )
+  gaprelrhs = max(min(abs(pcost), abs(dcost)), norm_x + norm_y)
   assert solution.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_array_less(gap, atol + rtol * min(abs(pcost), abs(dcost)))
+  np.testing.assert_array_less(gap, atol + rtol * gaprelrhs)
   np.testing.assert_array_less(pres, atol + rtol * prelrhs)
   np.testing.assert_array_less(dres, atol + rtol * drelrhs)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
@@ -1903,7 +1911,7 @@ def test_equilibrate_unequilibrate_roundtrip(strategy):
 # =============================================================================
 
 def test_normalize_invariant():
-  """Test that _normalize enforces ||(x,y,tau)||^2 == m - z + 1."""
+  """_normalize enforces ||(x,y)||^2 + tau^2 == m - z + 1."""
   rng = np.random.default_rng(42)
   m, n, z = 20, 10, 3
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
@@ -1916,8 +1924,8 @@ def test_normalize_invariant():
 
   x_n, y_n, tau_n, _ = solver._normalize(x, y, tau, s)  # pylint: disable=protected-access
 
-  xyt_norm_sq = x_n @ x_n + y_n @ y_n + tau_n ** 2
-  np.testing.assert_allclose(xyt_norm_sq, m - z + 1, atol=1e-12, rtol=1e-12)
+  quad = x_n @ x_n + y_n @ y_n + tau_n ** 2
+  np.testing.assert_allclose(quad, m - z + 1, atol=1e-12, rtol=1e-12)
 
 
 # =============================================================================
