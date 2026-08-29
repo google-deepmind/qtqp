@@ -3236,8 +3236,7 @@ def test_richardson_stall_rollback_regimes():
 
 # =============================================================================
 # warm_start: certified warm starts via the distance-to-path certificate
-# =============================================================================
-
+# ======================================================================
 @pytest.mark.parametrize('equilibration', [
     qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE,
 ])
@@ -3335,3 +3334,49 @@ def test_warm_start_bad_inputs_raise():
       qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
           verbose=False, warm_start=good, warm_start_threshold=bad
       )
+
+
+# =============================================================================
+# adaptive_step_size: endgame fraction-to-boundary schedule
+# =============================================================================
+
+@pytest.mark.parametrize('seed', 7600 + np.arange(3))
+def test_adaptive_step_size_solve(seed):
+  """The adaptive schedule must converge to a valid optimal solution."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      adaptive_step_size=True, verbose=False,
+  )
+  _assert_solution(solution, a, b, c, p, z)
+
+
+def test_adaptive_step_size_agrees_with_default():
+  """Adaptive and constant schedules reach the same optimum."""
+  rng = np.random.default_rng(7700)
+  m, n, z = 50, 30, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      adaptive_step_size=True, verbose=False
+  )
+  obj_a = c @ sol_a.x + 0.5 * sol_a.x @ p @ sol_a.x
+  obj_b = c @ sol_b.x + 0.5 * sol_b.x @ p @ sol_b.x
+  np.testing.assert_allclose(obj_a, obj_b, atol=1e-5, rtol=1e-5)
+
+
+def test_adaptive_step_size_infeasible_unbounded():
+  """The schedule must not disturb certificate detection."""
+  rng = np.random.default_rng(7800)
+  a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      adaptive_step_size=True, verbose=False
+  )
+  _assert_infeasible(sol, a, b, 5)
+  rng = np.random.default_rng(7900)
+  a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
+      adaptive_step_size=True, verbose=False
+  )
+  _assert_unbounded(sol, a, c, p, 5)
