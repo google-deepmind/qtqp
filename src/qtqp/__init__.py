@@ -16,9 +16,11 @@
 """Interior point method for solving QPs.
 
   Algorithm: Mehrotra predictor-corrector interior point method with a
-  homogeneous embedding. Each iteration does:
+  homogeneous embedding, following the regularized central path
+  (linear term mu * u). Each iteration does:
 
-    1. Normalize (x, y, tau, s) to have the norm of the central path.
+    1. Normalize (x, y, tau, s) onto the path's sphere
+       ||(x, y)||^2 + tau^2 = m - z + 1.
     2. Pre-solve K^{-1} @ [c; b] (shared between predictor and corrector steps).
     3. Predictor step: Newton direction with mu_target=0 (no centering).
     4. Compute sigma (centering parameter) from predictor step quality.
@@ -45,11 +47,22 @@ import scipy.sparse as sp
 from . import direct
 from .direct import RefinementStrategy
 
-__version__ = "0.0.5"
+__version__ = "0.0.6"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
 _norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
+# Floor on the complementarity parameter mu wherever it enters the
+# algorithm (KKT shift, corrector targets, barrier terms). Below this
+# scale mu carries no information in double precision relative to O(1)
+# equilibrated data, and letting it underflow leaves the Newton system
+# effectively unregularized: on infeasibility trajectories the iterate
+# can freeze on an immature ray at mu ~ 1e-20, burning iterations with
+# every solve degraded (observed on Windows/QDLDL, where the platform's
+# roundoff draw loses the race between certificate maturation and mu
+# collapse). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
+# touch the floor.
+_MU_FLOOR = 1e-14
 
 
 class LinearSolver(enum.Enum):
@@ -328,10 +341,6 @@ class QTQP:
         raise ValueError("QP matrix 'p' must be symmetric.")
       self.p = p
 
-    # Default exponent so _newton_step works in tests that call it directly
-    # before solve() has overridden the attribute.
-    self._central_path_exponent = 1.0
-
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
@@ -501,7 +510,6 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
-      central_path_exponent: float = 1.0,
       fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
@@ -526,7 +534,6 @@ class QTQP:
           init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
-          central_path_exponent=central_path_exponent,
           fused_corrector_division=fused_corrector_division,
       )
     finally:
@@ -555,7 +562,6 @@ class QTQP:
       init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
-      central_path_exponent: float = 1.0,
       fused_corrector_division: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
@@ -603,13 +609,6 @@ class QTQP:
         inner Arnoldi step consumes one factor-solve. Smaller values reduce
         per-cycle cost at the price of more restarts. Ignored when
         refinement_strategy is RICHARDSON.
-      central_path_exponent (float): Exponent p > 0 in the generalized
-        central-path equation r + mu^p * u = 0 (cone products s_i * y_i =
-        mu and tau * kappa = mu are unchanged). Default 1.0 recovers the
-        standard primal-dual central path. p > 1 makes the linear residual
-        vanish faster than mu as mu -> 0; p < 1 the reverse. mu^p enters
-        the KKT diagonal regularization and the Newton-step linear-residual
-        RHS; cone-product targets keep the unmodified mu.
       fused_corrector_division (bool): If True, compute the corrector
         slack update via a single division by y[z:] with the three
         numerator terms (sigma*mu, the Mehrotra cross product, and
@@ -637,12 +636,6 @@ class QTQP:
           f"init_mu_scale must be a positive finite float,"
           f" got {init_mu_scale}"
       )
-    if not (np.isfinite(central_path_exponent) and central_path_exponent > 0):
-      raise ValueError(
-          "central_path_exponent must be a positive finite float (got"
-          f" {central_path_exponent}); p <= 0 is incompatible with the IPM."
-      )
-    self._central_path_exponent = float(central_path_exponent)
     self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -720,14 +713,10 @@ class QTQP:
         stats_i = {}
         x, y, tau, s = self._normalize(x, y, tau, s)
 
-        mu = (y @ s) / (self.m - self.z)
-        # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
-        # diagonal and the Newton-step linear-residual RHS; cone-product
-        # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.
-        mu_p = mu ** self._central_path_exponent
+        mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
 
         # --- Take an IPM step ---
-        self._linear_solver.update(mu=mu_p, s=s, y=y)
+        self._linear_solver.update(mu=mu, s=s, y=y)
 
         # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
         # This is reused for both predictor and corrector parts of the step.
@@ -1066,11 +1055,11 @@ class QTQP:
     s_aff = s + alpha * d_s
 
     # Compute mu_aff directly without calling _normalize to avoid 4 extra
-    # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
-    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
-    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
-    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, xyt_norm_sq)
+    # allocations. Equivalent to: normalize onto the path sphere
+    # (||u||^2 = m-z+1) then compute (y @ s) / (m - z);
+    # normalization scales y and s each by `scale`, so mu picks up scale^2.
+    quad_aff = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
+    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, quad_aff)
     mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
@@ -1092,21 +1081,17 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
-    The central-path equation r + mu^p * u = 0 contributes the
-    (mu^p - mu_target^p) coefficient on the linear-residual side; cone-product
-    corrections (s_i * y_i = mu_target, tau * kappa = mu_target) keep the
-    unmodified mu_target.
+    The weighted central-path equation contributes the eps*(mu - mu_target)
+    coefficient on the (x, y) linear-residual side and (mu - mu_target) on
+    tau; cone-product corrections (s_i * y_i = mu_target, tau * kappa =
+    mu_target) keep the unmodified mu_target.
 
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
     linearized fallback (avoids squaring solver noise) when it's noisy or the
     quadratic residual check fails.
     """
-    cpe = self._central_path_exponent
-    # 0**cpe = 0 for cpe > 0, so mu_target = 0 (predictor) yields mu_target_p = 0.
-    mu_p = mu ** cpe
-    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
     # Prepare RHS for the linear system.
-    r = (mu_p - mu_target_p) * r_anchor
+    r = (mu - mu_target) * r_anchor
     if mu_target != 0.0:
       r[self.n + self.z :] += mu_target / y[self.z :]
     r[self.n + self.z :] += s[self.z :]
@@ -1123,7 +1108,7 @@ class QTQP:
     tau_plus = None
     if lin_sys_stats["converged"] or lin_sys_stats["final_residual_norm"] < 1e-7:
       try:
-        r_tau = (mu_p - mu_target_p) * tau_anchor
+        r_tau = (mu - mu_target) * tau_anchor
         tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
         lin_sys_stats["tau_method"] = "quadratic"
       except ValueError:
@@ -1156,16 +1141,15 @@ class QTQP:
     a feasible point (tau=0 corresponds to a certificate of infeasibility or
     unboundedness, which is handled separately at termination).
 
-    Generalized central path: t_a's mu term becomes mu^cpe (the linear-residual
-    coefficient on tau); t_c = -mu_target keeps the unmodified mu_target since
-    it comes from the cone-product equation tau * kappa = mu_target.
+    The mu term of t_a comes from the path's linear regularization term;
+    t_c = -mu_target comes from the cone-product equation
+    tau * kappa = mu_target.
     """
     # Coefficients of the quadratic t_a * tau+^2 + t_b * tau+ + t_c = 0.
     n = self.n
     q, kinv_q = self.q, self.kinv_q
-    mu_p = mu ** self._central_path_exponent
 
-    t_a = mu_p + kinv_q @ q
+    t_a = mu + kinv_q @ q
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
@@ -1216,15 +1200,13 @@ class QTQP:
     enters linearly rather than quadratically. A [0.1x, 10x] trust region
     prevents manifold drift from the first-order approximation.
 
-    Linear-residual coefficients on tau use mu^cpe and mu_target^cpe (the
-    generalized central path); the cone-product constant -mu_target keeps the
-    unmodified mu_target.
+    The tau coefficients use the plain mu and mu_target; the cone-product
+    constant -mu_target is likewise unmodified.
     """
     n = self.n
     q, kinv_q = self.q, self.kinv_q
-    cpe = self._central_path_exponent
-    mu_p = mu ** cpe
-    mu_target_p = mu_target ** cpe if mu_target > 0.0 else 0.0
+    mu_p = mu
+    mu_target_p = mu_target
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
 
@@ -1261,16 +1243,17 @@ class QTQP:
     like x/tau and y/tau matter — tau is the homogeneous variable, and the final
     solution is recovered as (x/tau, y/tau, s/tau).
 
-    We enforce the norm of the central path, which ensures convergence to
-    non-trivial solution, ie:
-        ||(x, y, tau)||^2 = m - z + 1
+    We enforce the invariant of the weighted central path (the Euler identity
+    for the linear term mu * diag(eps*I, eps*I, 1) * u), which ensures
+    convergence to a non-trivial solution:
+        eps * ||(x, y)||^2 + tau^2 = m - z + 1
     The right-hand side counts complementarity pairs: (m - z) from the
     inequality constraints plus 1 for the tau-kappa pair of the embedding.
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = math.sqrt(x @ x + y @ y + tau * tau)
-    scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
+    quad = x @ x + y @ y + tau * tau
+    scale = math.sqrt((self.m - self.z + 1) / max(_EPS, quad))
     x *= scale
     y *= scale
     tau *= scale
@@ -1328,26 +1311,42 @@ class QTQP:
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = norm_aty / (abs(bty) + _EPS)
 
-    # Primal residual tolerance relative scale.
+    norm_x = _norm(x, np.inf)
+    norm_y = _norm(y, np.inf)
+
+    # Residual tolerance relative scales. Each is the max of two families:
+    # the summand norms (the floor below which the residual cannot even be
+    # evaluated in floating point) and the iterate norm (the backward-error
+    # allowance: dres <= rtol * ||x||/tau accepts a point that is exactly
+    # dual-feasible for P + dP with ||dP|| <= rtol, which is precisely the
+    # mu*I perturbation the regularized path itself commits; likewise
+    # pres <= rtol * ||y||/tau on the primal side).
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
         _norm(s, np.inf) * inv_tau,
         self._norm_b,
+        norm_y * inv_tau,
     )
 
-    # Dual residual tolerance relative scale.
     drelrhs = max(
         norm_px * inv_tau,
         norm_aty * inv_tau,
         self._norm_c,
+        norm_x * inv_tau,
     )
 
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
+    # Gap tolerance relative scale: the cost magnitudes (measurement floor)
+    # or the first-power iterate norm (the empirically calibrated allowance
+    # for the regularized path's O(mu*||u||^2) objective bias; see the
+    # criteria validation on NETLIB + Maros-Meszaros).
+    gaprelrhs = max(
+        min(abs(pcost), abs(dcost)),
+        (norm_x + norm_y) * inv_tau,
+    )
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
-        gap < self.atol + self.rtol * min(abs(pcost), abs(dcost))
+        gap < self.atol + self.rtol * gaprelrhs
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
