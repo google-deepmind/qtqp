@@ -199,7 +199,16 @@ Key parameters:
     at the current `mu` (from the strong monotonicity of the regularized path
     map); it is informative when small, conservative for aggressively
     centered iterates, and saturates at the floating-point floor in the
-    final iterations.
+    final iterations. Its local-norm companion `delta_path_local` measures
+    the same residual in the barrier metric `H = mu*I + mu*hess(Phi)`
+    (a Newton-decrement analogue): it weights each component by the
+    curvature resisting it and remains informative for aggressive
+    iterates. `lambda_init` (also an attribute on the solver) is the same
+    measure at the deterministic initial point, before the first step:
+    healthy problems measure small, while pathologically scaled data
+    announces itself by tens of orders of magnitude — this diagnostic is
+    how corrupted infinity-sentinel bounds were found in the
+    Maros-Meszaros benchmark files.
 -   `init_strategy`: Choose the initial interior-point iterate. Defaults to
     `qtqp.InitStrategy.CVXOPT`.
 -   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
