@@ -1518,8 +1518,14 @@ def test_p_none_equivalent_to_zero_matrix():
   a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
   p_zero = sparse.csc_matrix((n, n))
 
-  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(verbose=True)
-  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(verbose=True)
+  # QDLDL: the multithreaded backends are not run-to-run deterministic,
+  # and this test compares two full trajectories to 1e-8 - at the 1e-9
+  # default tolerances the trajectories are long enough that backend
+  # noise flips the comparison on most platforms.
+  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(
+      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
+  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(
+      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
 
   assert sol_none.status == qtqp.SolutionStatus.SOLVED
   assert sol_zero.status == qtqp.SolutionStatus.SOLVED
