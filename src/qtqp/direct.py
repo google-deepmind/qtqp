@@ -368,7 +368,8 @@ class DirectKktSolver:
     for solves in range(1, self.max_iterative_refinement_steps + 1):
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
-      sol += self._solver.solve(residual)
+      correction = self._solver.solve(residual)
+      sol += correction
       residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
@@ -377,7 +378,13 @@ class DirectKktSolver:
         status = "converged"
         break
 
-      # Check for stalling (residual not improving).
+      # Check for stalling (residual not improving). Roll back the
+      # correction that made things worse so the caller receives the best
+      # iterate seen, not the degraded one (the GMRES path already tracks
+      # and returns its best solution; this mirrors that contract).
+      # final_residual_norm gates the exact tau solve downstream, so
+      # returning the degraded iterate would both report a worse residual
+      # and hand back the worse solution it belongs to.
       if residual_norm >= old_residual_norm:
         logging.debug(
             "Iterative refinement stalled at step %d. Old res: %e, New res: %e",
@@ -385,6 +392,8 @@ class DirectKktSolver:
             old_residual_norm,
             residual_norm,
         )
+        sol -= correction
+        residual_norm = old_residual_norm
         status = "stalled"
         break
     else:

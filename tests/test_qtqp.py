@@ -3142,3 +3142,70 @@ def test_lambda_init_logged():
   assert np.isfinite(solver.lambda_init) and solver.lambda_init > 0
   assert sol.stats[0]['lambda_init'] == solver.lambda_init
   assert 'lambda_init' not in sol.stats[1]
+
+
+def test_richardson_stall_rolls_back_degrading_correction():
+  """On a refinement stall, the caller receives the pre-stall best iterate
+  and its residual norm, not the degraded ones (mirrors the GMRES-path
+  contract). The vector rollback is float-approximate (sol -= correction
+  after sol += correction re-rounds), so the solution is compared with a
+  tolerance scaled to the injected corruption; the scalar residual-norm
+  restore is exact."""
+  rng = np.random.default_rng(4242)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+
+  class _CorruptSecondSolve:
+    """Delegates to ScipySolver; the second solve() returns garbage."""
+
+    def __init__(self):
+      self._inner = qtqp.direct.ScipySolver()
+      self._solve_calls = 0
+
+    def __getattr__(self, name):
+      return getattr(self._inner, name)
+
+    def __matmul__(self, other):
+      return self._inner @ other
+
+    def solve(self, rhs):
+      self._solve_calls += 1
+      out = self._inner.solve(rhs)
+      if self._solve_calls == 2:
+        return out + 1e6 * np.ones_like(out)
+      return out
+
+  def make(steps, backend):
+    solver = qtqp.direct.DirectKktSolver(
+        a=a,
+        p=p,
+        z=z,
+        min_static_regularization=1e-8,
+        max_iterative_refinement_steps=steps,
+        atol=0.0,
+        rtol=0.0,
+        solver=backend,
+    )
+    solver.update(mu=mu, s=s, y=y)
+    return solver
+
+  q = np.concatenate([c, b])
+  warm = np.zeros(n + m)
+  sol_stalled, stats = make(10, _CorruptSecondSolve()).solve(
+      rhs=q, warm_start=warm
+  )
+  # Reference: the identical solver stopped before the corrupted step.
+  sol_best, stats_best = make(1, qtqp.direct.ScipySolver()).solve(
+      rhs=q, warm_start=warm
+  )
+
+  assert stats["status"] == "stalled"
+  assert stats["solves"] == 2
+  # Exact scalar restore: the reported residual belongs to the returned sol.
+  assert stats["final_residual_norm"] == stats_best["final_residual_norm"]
+  # Approximate vector restore: error is ~ ||corruption|| * eps.
+  np.testing.assert_allclose(sol_stalled, sol_best, rtol=0.0, atol=1e-8)
