@@ -55,6 +55,16 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # criteria form at tolerances this factor looser than the user-requested
 # atol/rtol (at the 1e-9 defaults: 1e-6-grade, still a usable solution).
 _ALMOST_FACTOR = 1000.0
+# Floor on the complementarity parameter mu wherever it enters the
+# algorithm (KKT shift, corrector targets, barrier terms). Below this
+# scale mu carries no information in double precision relative to O(1)
+# equilibrated data, and letting it underflow leaves the Newton system
+# effectively unregularized: at the 1e-9 default tolerances the endgame
+# reaches depths where an underflowed mu makes the KKT factorization
+# effectively singular (observed: CHOLMOD NotPositiveDefinite on
+# Windows). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
+# touch the floor.
+_MU_FLOOR = 1e-14
 
 
 class LinearSolver(enum.Enum):
@@ -732,7 +742,7 @@ class QTQP:
         stats_i = {}
         x, y, tau, s = self._normalize(x, y, tau, s)
 
-        mu = (y @ s) / (self.m - self.z)
+        mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
         # Generalized central path: r + mu^p * u = 0. mu_p enters the KKT
         # diagonal and the Newton-step linear-residual RHS; cone-product
         # targets (s*y = mu, tau*kappa = mu) keep the unmodified mu.

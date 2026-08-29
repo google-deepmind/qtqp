@@ -139,7 +139,14 @@ class CholModSolver(LinearSolver):
       self.factorization = self.cholmod.CholeskyFactor(
           self._kkt, supernodal_mode="simplicial", lower=False
       )
-    self.factorization.factorize(self._kkt, ldl=True)
+    try:
+      self.factorization.factorize(self._kkt, ldl=True)
+    except self.cholmod.CholmodError as exc:
+      # Translate backend-specific factorization failures into the
+      # solver's documented breakdown contract (ValueError), so the
+      # caller's salvage path handles them instead of a raw backend
+      # exception escaping.
+      raise ValueError(f"CHOLMOD factorization failed: {exc}") from exc
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     return self.factorization.solve(rhs)
