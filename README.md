@@ -169,7 +169,6 @@ solve(
         qtqp.RefinementStrategy.RICHARDSON
     ),
     gmres_restart: int = 10,
-    central_path_exponent: float = 1.0,
     fused_corrector_division: bool = False,
 ) -> qtqp.Solution
 ```
@@ -217,8 +216,6 @@ Key parameters:
     solves. Defaults to `qtqp.RefinementStrategy.RICHARDSON`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
     Ignored by Richardson refinement.
--   `central_path_exponent`: Positive exponent for the generalized central-path
-    residual equation. The default `1.0` is the standard central path.
 -   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
     update with one fused division. The default False preserves legacy
     arithmetic.
@@ -264,9 +261,6 @@ Choose one with the `refinement_strategy` argument:
 
 #### Advanced numerical options
 
--   `central_path_exponent`: Uses `mu**central_path_exponent` in the linear
-    residual part of the central-path equations while keeping cone-product
-    targets at `mu`. Values must be positive and finite.
 -   `fused_corrector_division`: Fuses the corrector slack numerator before
     dividing by `y[z:]`. This is useful when small `y` components make the
     legacy three-division form vulnerable to cancellation.
