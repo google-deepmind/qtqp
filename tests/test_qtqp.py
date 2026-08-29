@@ -3142,3 +3142,85 @@ def test_lambda_init_logged():
   assert np.isfinite(solver.lambda_init) and solver.lambda_init > 0
   assert sol.stats[0]['lambda_init'] == solver.lambda_init
   assert 'lambda_init' not in sol.stats[1]
+
+
+def test_richardson_stall_rollback_regimes():
+  """A stalled correction is rolled back only when it materially degraded
+  the residual (> _STALL_ROLLBACK_FACTOR x): the caller then gets the
+  pre-stall iterate and its exactly-restored residual norm. A mild stall
+  keeps the last iterate and reports its own (slightly worse) residual —
+  the legacy contract certificate endgames are calibrated to. The vector
+  rollback is float-approximate (sol -= correction re-rounds), so solution
+  comparisons carry a tolerance scaled to the corruption; the scalar
+  residual-norm restore is exact."""
+  rng = np.random.default_rng(4242)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+
+  class _CorruptSecondSolve:
+    """Delegates to ScipySolver, recording returned corrections; the
+    second solve() is corrupted by corrupt_fn."""
+
+    def __init__(self, corrupt_fn):
+      self._inner = qtqp.direct.ScipySolver()
+      self._corrupt_fn = corrupt_fn
+      self._solve_calls = 0
+      self.returned = []
+
+    def __getattr__(self, name):
+      return getattr(self._inner, name)
+
+    def __matmul__(self, other):
+      return self._inner @ other
+
+    def solve(self, rhs):
+      self._solve_calls += 1
+      out = self._inner.solve(rhs)
+      if self._solve_calls == 2:
+        out = self._corrupt_fn(out)
+      self.returned.append(out.copy())
+      return out
+
+  def run(backend, steps=10):
+    solver = qtqp.direct.DirectKktSolver(
+        a=a,
+        p=p,
+        z=z,
+        min_static_regularization=1e-8,
+        max_iterative_refinement_steps=steps,
+        atol=0.0,
+        rtol=0.0,
+        solver=backend,
+    )
+    solver.update(mu=mu, s=s, y=y)
+    return solver.solve(rhs=np.concatenate([c, b]), warm_start=np.zeros(n + m))
+
+  # Reference: the identical solver stopped before the corrupted step.
+  _, stats_best = run(qtqp.direct.ScipySolver(), steps=1)
+
+  # Material blowup (~1e6 x): rolled back to the pre-stall iterate.
+  blowup = _CorruptSecondSolve(lambda out: out + 1e6 * np.ones_like(out))
+  sol_rb, stats_rb = run(blowup)
+  assert stats_rb['status'] == 'stalled'
+  assert stats_rb['solves'] == 2
+  # Exact scalar restore: the reported residual belongs to the returned sol.
+  assert stats_rb['final_residual_norm'] == stats_best['final_residual_norm']
+  # Approximate vector restore: error ~ ||corruption|| * eps.
+  np.testing.assert_allclose(
+      sol_rb, np.zeros(n + m) + blowup.returned[0], rtol=0.0, atol=1e-8
+  )
+
+  # Mild stall (negated correction, ~2x degradation): last iterate kept.
+  mild = _CorruptSecondSolve(lambda out: -out)
+  sol_keep, stats_keep = run(mild)
+  assert stats_keep['status'] == 'stalled'
+  assert stats_keep['solves'] == 2
+  # Legacy contract: the degraded iterate and its own residual are returned.
+  assert stats_keep['final_residual_norm'] >= stats_best['final_residual_norm']
+  np.testing.assert_array_equal(
+      sol_keep, np.zeros(n + m) + mild.returned[0] + mild.returned[1]
+  )

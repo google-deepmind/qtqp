@@ -39,6 +39,13 @@ from scipy.linalg import solve_triangular
 # (Bjorck/Paige): orthogonality is recovered to working precision.
 _DGKS_REORTH_THRESHOLD = 1.0 / math.sqrt(2.0)
 
+# A stalled Richardson correction is rolled back only when it degraded the
+# residual by more than this factor: beyond it the correction is a divergent
+# step from a near-singular factor, not refinement noise. At or below it the
+# last iterate is kept (the legacy contract certificate endgames are
+# calibrated to).
+_STALL_ROLLBACK_FACTOR = 10.0
+
 
 class RefinementStrategy(enum.Enum):
   """Available iterative refinement strategies for DirectKktSolver.
@@ -368,7 +375,8 @@ class DirectKktSolver:
     for solves in range(1, self.max_iterative_refinement_steps + 1):
       # Perform correction step using the linear system solver.
       old_residual_norm = residual_norm
-      sol += self._solver.solve(residual)
+      correction = self._solver.solve(residual)
+      sol += correction
       residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
@@ -385,6 +393,20 @@ class DirectKktSolver:
             old_residual_norm,
             residual_norm,
         )
+        # Roll back the correction only when it MATERIALLY degraded the
+        # residual (a divergent correction from a near-singular factor):
+        # the caller then receives the best iterate seen rather than the
+        # blown-up one, and final_residual_norm — which gates the exact
+        # tau solve downstream — reports the residual of the iterate
+        # actually returned (the GMRES path already returns its best
+        # iterate; this mirrors that contract where it matters). Plain
+        # noise-floor stalls (residual oscillating within a small factor)
+        # keep the last iterate: certificate trajectories terminate in
+        # that regime and are calibrated to the legacy behavior, and the
+        # two iterates are numerically equivalent there anyway.
+        if residual_norm > _STALL_ROLLBACK_FACTOR * old_residual_norm:
+          sol -= correction
+          residual_norm = old_residual_norm
         status = "stalled"
         break
     else:
