@@ -1351,7 +1351,10 @@ def test_linearized_tau_always_converges(seed, problem_type):
   # linearized fallback.
   solver._solve_for_tau = types.MethodType(_always_raise_tau, solver)  # pylint: disable=protected-access
 
-  solution = solver.solve(collect_stats=True)
+  # Pin the backend to SCIPY: forcing every tau solve through the linearized
+  # fallback makes the trajectory sensitive to backend rounding, and the
+  # multithreaded backends are not run-to-run reproducible.
+  solution = solver.solve(collect_stats=True, linear_solver=qtqp.LinearSolver.SCIPY)
 
   if problem_type == 'feasible':
     _assert_solution(solution, a, b, c, p, z)
@@ -1530,10 +1533,9 @@ def test_p_none_equivalent_to_zero_matrix():
   # and this test compares two full trajectories to 1e-8 - at the 1e-9
   # default tolerances the trajectories are long enough that backend
   # noise flips the comparison on most platforms.
-  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(
-      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
-  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(
-      verbose=True, linear_solver=qtqp.LinearSolver.QDLDL)
+  kwargs = dict(verbose=True, linear_solver=qtqp.LinearSolver.SCIPY)
+  sol_none = qtqp.QTQP(a=a, b=b, c=c, z=z, p=None).solve(**kwargs)
+  sol_zero = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_zero).solve(**kwargs)
 
   assert sol_none.status == qtqp.SolutionStatus.SOLVED
   assert sol_zero.status == qtqp.SolutionStatus.SOLVED
@@ -2116,12 +2118,12 @@ def test_iterative_refinement_improves_residual():
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      linear_solver=qtqp.LinearSolver.QDLDL,
+      linear_solver=qtqp.LinearSolver.SCIPY,
       init_strategy=qtqp.InitStrategy.TRIVIAL,
       max_iterative_refinement_steps=1, verbose=True, collect_stats=True
   )
   sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      linear_solver=qtqp.LinearSolver.QDLDL,
+      linear_solver=qtqp.LinearSolver.SCIPY,
       init_strategy=qtqp.InitStrategy.TRIVIAL,
       max_iterative_refinement_steps=50, verbose=True, collect_stats=True
   )
