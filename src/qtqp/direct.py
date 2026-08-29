@@ -251,19 +251,31 @@ class DirectKktSolver:
     self._true_diags[self.n : self.n + self.z] = mu
     self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
 
-    # "Regularized" diagonals for stable factorization.
-    np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
-    # Flip the sign of the cone variables.
-    self._true_diags[self.n :] *= -1.0
-    self._reg_diags[self.n :] *= -1.0
+    # Flip the sign of the cone variables on the true diagonals.
+    abs_true = np.abs(self._true_diags)
+    self._true_diags[self.n :] = -np.abs(self._true_diags[self.n :])
+    self._true_diags[: self.n] = np.abs(self._true_diags[: self.n])
 
-    # Inject regularized diagonals and factorize. The solver sees one consistent
-    # matrix throughout. During iterative refinement, DirectKktSolver adds
-    # diag_correction * sol to the residual to account for the difference
-    # between the regularized matrix (used for factorization and matvec) and
-    # the true matrix (whose solution we seek), converging to the exact answer.
-    self._solver.update_diag(self._reg_diags)
-    self._solver.factorize()
+    # Inject regularized diagonals and factorize; on a factorization
+    # breakdown at extreme conditioning, retry with a boosted clamp.
+    # Iterative refinement applies diag_correction against the TRUE
+    # diagonals, so a larger clamp costs refinement steps, never
+    # accuracy - the refined solution still solves the true system.
+    clamp = self.min_static_regularization
+    for attempt in range(3):
+      np.maximum(abs_true, clamp, out=self._reg_diags)
+      self._reg_diags[self.n :] *= -1.0
+      self._solver.update_diag(self._reg_diags)
+      try:
+        self._solver.factorize()
+        break
+      except ValueError:
+        if attempt == 2:
+          raise
+        clamp *= 1e4
+        logging.debug(
+            "Factorization breakdown; retrying with clamp %.1e", clamp
+        )
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
   def solve(
