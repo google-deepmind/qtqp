@@ -3232,3 +3232,106 @@ def test_richardson_stall_rollback_regimes():
   np.testing.assert_array_equal(
       sol_keep, np.zeros(n + m) + mild.returned[0] + mild.returned[1]
   )
+
+
+# =============================================================================
+# warm_start: certified warm starts via the distance-to-path certificate
+# =============================================================================
+
+@pytest.mark.parametrize('equilibration', [
+    qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE,
+])
+def test_warm_start_same_problem_accepted_and_fast(equilibration):
+  """Re-solving from a solution certifies near-path and cuts iterations."""
+  rng = np.random.default_rng(9400)
+  m, n, z = 80, 50, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  cold = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True, equilibration_strategy=equilibration
+  )
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, equilibration_strategy=equilibration
+  )
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, collect_stats=True, warm_start=(sol.x, sol.y, sol.s),
+      equilibration_strategy=equilibration,
+  )
+  _assert_solution(warm, a, b, c, p, z)
+  assert solver.warm_accepted
+  assert solver.warm_lambda < 10.0
+  assert len(warm.stats) < len(cold.stats)
+
+
+def test_warm_start_perturbed_problem_accepted():
+  """The intended use: warm-starting a perturbed problem from the previous
+  solution is certified, converges, and does not cost iterations over cold."""
+  rng = np.random.default_rng(9450)
+  m, n, z = 80, 50, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  base = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  c2 = c * (1.0 + 0.01 * rng.normal(size=n))
+  cold = qtqp.QTQP(a=a, b=b, c=c2, z=z, p=p).solve(
+      verbose=False, collect_stats=True
+  )
+  solver = qtqp.QTQP(a=a, b=b, c=c2, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, collect_stats=True,
+      warm_start=(base.x, base.y, base.s),
+  )
+  _assert_solution(warm, a, b, c2, p, z)
+  assert solver.warm_accepted
+  assert np.isfinite(solver.warm_lambda) and solver.warm_lambda > 0
+  assert len(warm.stats) <= len(cold.stats)
+
+
+def test_warm_start_junk_vetoed():
+  """A junk warm point is vetoed by the certificate; solve falls back to
+  the configured init and still converges."""
+  rng = np.random.default_rng(9500)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  junk = (1e12 * rng.normal(size=n), 1e12 * rng.normal(size=m),
+          np.abs(rng.normal(size=m)))
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, collect_stats=True, warm_start=junk,
+      warm_start_threshold=10.0,
+  )
+  _assert_solution(warm, a, b, c, p, z)
+  assert not solver.warm_accepted
+  assert solver.warm_lambda > 10.0
+
+
+def test_warm_start_tiny_threshold_vetoes_good_point():
+  """The threshold is the gate: even a same-problem re-entry is vetoed
+  under an absurdly small threshold, and the solve still converges cold."""
+  rng = np.random.default_rng(9550)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, warm_start=(sol.x, sol.y, sol.s),
+      warm_start_threshold=1e-12,
+  )
+  _assert_solution(warm, a, b, c, p, z)
+  assert not solver.warm_accepted
+  assert solver.warm_lambda > 1e-12
+
+
+def test_warm_start_bad_inputs_raise():
+  """Wrong shapes and invalid thresholds raise clear ValueErrors."""
+  rng = np.random.default_rng(9600)
+  m, n, z = 30, 20, 4
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  good = (np.zeros(n), np.ones(m), np.ones(m))
+  with pytest.raises(ValueError, match='warm_start'):
+    qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+        verbose=False, warm_start=(np.zeros(n + 1), np.ones(m), np.ones(m))
+    )
+  for bad in (0.0, -1.0, float('nan')):
+    with pytest.raises(ValueError, match='warm_start_threshold'):
+      qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+          verbose=False, warm_start=good, warm_start_threshold=bad
+      )
