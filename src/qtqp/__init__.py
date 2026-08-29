@@ -414,6 +414,34 @@ class QTQP:
       return 0.0
     return ps.b_dropped - ps.a_dropped @ x
 
+  def _lambda_local(self, x, y, s, tau, a, p, b, c):
+    """Local-norm distance-to-path measure at a working-scale point.
+
+    lambda = ||T_mu(u)||_{H^-1} with H = mu*I + mu*hess(Phi) (diagonal),
+    evaluated at the point's own complementarity mu = y's/(m-z). Three
+    matvecs. Certified-distance semantics when small; a scaled residual
+    score when large. Returns inf when the point has no positive
+    complementarity to define a barrier parameter at (e.g. junk warm
+    points with sign-mixed y), which reads as maximally far from the path.
+    """
+    mu0 = float(y @ s) / (self.m - self.z)
+    if not np.isfinite(mu0) or mu0 <= 0.0:
+      return math.inf
+    t_x0 = p @ x + a.T @ y + c * tau + mu0 * x
+    t_y0 = -(a @ x) + b * tau + mu0 * y
+    t_y0[self.z :] -= mu0 / y[self.z :]
+    px0_ = float(x @ (p @ x)) if p.nnz else 0.0
+    t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
+            + mu0 * (tau - 1.0 / max(_EPS, tau)))
+    h_y0 = np.full(self.m, mu0)
+    h_y0[self.z :] += mu0 / (y[self.z :] * y[self.z :])
+    h_t0 = mu0 + mu0 / max(_EPS, tau * tau)
+    return math.sqrt(
+        float(t_x0 @ t_x0) / max(_EPS, mu0)
+        + float((t_y0 * t_y0) @ (1.0 / h_y0))
+        + t_t0 * t_t0 / max(_EPS, h_t0)
+    )
+
   def _init_variables(self, strategy, mu_scale, a, p, b, c):
     """Dispatch to the requested initialization strategy.
 
@@ -564,6 +592,8 @@ class QTQP:
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       fused_corrector_division: bool = False,
+      warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+      warm_start_threshold: float = 100.0,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -588,6 +618,8 @@ class QTQP:
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
           fused_corrector_division=fused_corrector_division,
+          warm_start=warm_start,
+          warm_start_threshold=warm_start_threshold,
       )
     finally:
       if self._linear_solver is not None:
@@ -616,6 +648,8 @@ class QTQP:
       refinement_strategy: RefinementStrategy = RefinementStrategy.RICHARDSON,
       gmres_restart: int = 10,
       fused_corrector_division: bool = False,
+      warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+      warm_start_threshold: float = 100.0,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -670,6 +704,19 @@ class QTQP:
         avoids catastrophic cancellation when y_i is small and the
         terms have similar magnitudes with opposing signs. Default False
         preserves the legacy bit-for-bit behavior.
+      warm_start (tuple | None): Optional (x, y, s) from a nearby problem
+        (original scale, e.g. a previous Solution's arrays). The point is
+        equilibrated into the operating scale, embedded interior at a few
+        centering shifts, and the best embedding is accepted only when the
+        distance-to-path certificate measures lambda <=
+        warm_start_threshold; otherwise the solve falls back to the
+        configured init_strategy. After solve, `warm_lambda` (the measured
+        lambda, or None when no warm start was given) and `warm_accepted`
+        are available as attributes on the solver.
+      warm_start_threshold (float): Acceptance threshold for the certified
+        warm start. Default 100.0: poisoned or mis-scaled points measure
+        orders of magnitude above it, same-problem re-entries orders of
+        magnitude below.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -751,28 +798,59 @@ class QTQP:
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
 
-    # Initial-point diagnostic: the local-norm distance-to-path measure
-    # lambda = ||T_mu(u)||_{H^-1} (H = mu*I + mu*hess(Phi)) evaluated at
-    # the deterministic initial iterate, before the first step. Three
-    # matvecs. Healthy problems measure small (<= ~1e7 across NETLIB +
+    # Certified warm start: ingest a caller-supplied (x, y, s) from a
+    # nearby problem, embed it interior at a few centering shifts, and
+    # accept the best embedding only when the certificate says it is
+    # actually near the path (lambda <= warm_start_threshold). A vetoed
+    # warm start falls back to the configured init: the certificate makes
+    # warm starting safe, which heuristic IPM warm starts are not.
+    self.warm_lambda = None
+    self.warm_accepted = False
+    if warm_start is not None:
+      if not (np.isfinite(warm_start_threshold) and warm_start_threshold > 0):
+        raise ValueError(
+            "warm_start_threshold must be a positive finite float, got"
+            f" {warm_start_threshold}"
+        )
+      wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
+      if wx.shape != (self.n,) or wy.shape != (self.m,) or ws.shape != (self.m,):
+        raise ValueError(
+            "warm_start must be (x, y, s) with shapes"
+            f" ({self.n},), ({self.m},), ({self.m},); got"
+            f" {wx.shape}, {wy.shape}, {ws.shape}"
+        )
+      if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+        wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
+      best = (math.inf, None)
+      for eta in (1e-6, 1e-4, 1e-2, 1.0):
+        cx = wx.copy()
+        cy = wy.copy()
+        cs = ws.copy()
+        cy[self.z :] = np.maximum(cy[self.z :], eta)
+        cs[self.z :] = np.maximum(cs[self.z :], eta)
+        cs[: self.z] = 0.0
+        ctau = 1.0
+        cx, cy, ctau, cs = self._normalize(cx, cy, ctau, cs)
+        lam = self._lambda_local(cx, cy, cs, ctau, a, p, b, c)
+        if lam < best[0]:
+          best = (lam, (cx, cy, cs, ctau))
+      self.warm_lambda = best[0]
+      if best[0] <= warm_start_threshold:
+        cx, cy, cs, ctau = best[1]
+        x, y, s, tau = cx, cy, cs, ctau
+        self.warm_accepted = True
+      logging.debug(
+          "warm start: lambda = %e, accepted = %s",
+          self.warm_lambda, self.warm_accepted,
+      )
+
+    # Initial-point diagnostic: the local-norm distance-to-path measure at
+    # the starting iterate (warm or configured init), before the first
+    # step. Healthy problems measure small (<= ~1e7 across NETLIB +
     # Maros-Meszaros); pathologically scaled data announces itself here
     # by tens of orders of magnitude — this diagnostic is how corrupted
     # infinity-sentinel bounds in the benchmark datasets were found.
-    mu0 = float(y @ s) / (self.m - self.z)
-    t_x0 = p @ x + a.T @ y + c * tau + mu0 * x
-    t_y0 = -(a @ x) + b * tau + mu0 * y
-    t_y0[self.z :] -= mu0 / y[self.z :]
-    px0_ = float(x @ (p @ x)) if p.nnz else 0.0
-    t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
-            + mu0 * (tau - 1.0 / max(_EPS, tau)))
-    h_y0 = np.full(self.m, mu0)
-    h_y0[self.z :] += mu0 / (y[self.z :] * y[self.z :])
-    h_t0 = mu0 + mu0 / max(_EPS, tau * tau)
-    self.lambda_init = math.sqrt(
-        float(t_x0 @ t_x0) / max(_EPS, mu0)
-        + float((t_y0 * t_y0) @ (1.0 / h_y0))
-        + t_t0 * t_t0 / max(_EPS, h_t0)
-    )
+    self.lambda_init = self._lambda_local(x, y, s, tau, a, p, b, c)
 
     self._log_header()
 

@@ -219,6 +219,18 @@ Key parameters:
 -   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
     update with one fused division. The default False preserves legacy
     arithmetic.
+-   `warm_start`: Optional `(x, y, s)` from a nearby problem (original scale,
+    e.g. a previous solution's arrays). The point is equilibrated into the
+    operating scale, embedded interior at a few centering shifts, and the
+    best embedding is accepted only when the distance-to-path certificate
+    measures `lambda <= warm_start_threshold`; a vetoed point falls back to
+    the configured `init_strategy`, so warm starting is never worse than a
+    cold solve by more than the certificate evaluation (three matvecs per
+    shift). After `solve`, the measured `warm_lambda` and the `warm_accepted`
+    decision are attributes on the solver.
+-   `warm_start_threshold`: Acceptance threshold for the certified warm
+    start (default `100.0`). Poisoned or mis-scaled points measure orders of
+    magnitude above it; same-problem re-entries orders of magnitude below.
 
 #### Equilibration strategies
 
