@@ -30,6 +30,18 @@ def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) 
   return (kkt + kkt.T - diag).asformat(format)
 
 
+def _data_source_map(kkt: sp.spmatrix, transform) -> np.ndarray:
+  """Map each data position of transform(kkt) to its source position in kkt.data.
+
+  Pushes tags (arange + 1) through the same structural transform; each output
+  entry inherits the tag of its unique source entry (diagonals sum to their
+  own tag under the symmetric reconstruction).
+  """
+  tags = kkt.copy()
+  tags.data = np.arange(kkt.nnz, dtype=np.float64) + 1.0
+  return transform(tags).data.astype(np.intp) - 1
+
+
 class MklPardisoSolver(LinearSolver):
   """Wrapper around pymklpardiso.PardisoSolver."""
 
@@ -103,10 +115,16 @@ class ScipySolver(LinearSolver):
     super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
     self._full_diag_idxs = diag_data_indices(self._full_kkt)
+    self._full_src = _data_source_map(
+        kkt, lambda t: _full_symmetric_from_upper(t, "csc")
+    )
 
   def update_diag(self, diag: np.ndarray) -> None:
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
+
+  def sync_values(self) -> None:
+    self._full_kkt.data[:] = self._kkt.data[self._full_src]
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x
@@ -163,11 +181,16 @@ class EigenSolver(LinearSolver):
     # the shared upper-triangular KKT into the lower triangle here.  The base
     # symmetric matvec works with either stored triangle, so we only keep the
     # lower-triangular view.
+    self._shared_data = kkt.data
+    self._src = _data_source_map(kkt, lambda t: t.T.tocsc())
     super().set_kkt(kkt.T.tocsc())
 
   def update_diag(self, diag: np.ndarray) -> None:
     self._kkt.data[self._kkt_diag_idxs] = diag
     np.copyto(self._kkt_diag, diag)
+
+  def sync_values(self) -> None:
+    self._kkt.data[:] = self._shared_data[self._src]
 
   def factorize(self):
     if self._solver is None:
@@ -340,10 +363,16 @@ class UmfpackSolver(LinearSolver):
     super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
     self._full_diag_idxs = diag_data_indices(self._full_kkt)
+    self._full_src = _data_source_map(
+        kkt, lambda t: _full_symmetric_from_upper(t, "csc")
+    )
 
   def update_diag(self, diag: np.ndarray) -> None:
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
+
+  def sync_values(self) -> None:
+    self._full_kkt.data[:] = self._kkt.data[self._full_src]
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     return self._full_kkt @ x

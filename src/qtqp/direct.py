@@ -86,6 +86,11 @@ class LinearSolver:
     self._kkt_diag = kkt.diagonal()
     self._kkt_diag_idxs = diag_data_indices(kkt)
 
+  # Whether off-diagonal scaffold updates reach this backend (directly or via
+  # sync_values). Backends with private copies that don't implement a sync
+  # (dense, GPU) set this False.
+  supports_value_sync = True
+
   def update_diag(self, diag: np.ndarray) -> None:
     """Updates the KKT diagonal in place; called each iteration before factorize.
 
@@ -95,6 +100,14 @@ class LinearSolver:
     """
     self._kkt.data[self._kkt_diag_idxs] = diag
     np.copyto(self._kkt_diag, diag)
+
+  def sync_values(self) -> None:
+    """Propagates off-diagonal scaffold value changes; called before update_diag.
+
+    No-op for backends that factorize the shared scaffold; backends holding
+    private copies override this to refresh them.
+    """
+    pass
 
   def factorize(self) -> None:
     """Factorizes the stored KKT matrix (with regularized diagonals).
@@ -143,6 +156,7 @@ class DirectKktSolver:
       atol: float,
       rtol: float,
       solver: LinearSolver,
+      internal_scaling: str = "off",
   ):
     """Initializes the DirectKktSolver.
 
@@ -157,6 +171,12 @@ class DirectKktSolver:
       atol: Absolute tolerance for iterative refinement.
       rtol: Relative tolerance for iterative refinement.
       solver: An instance of a direct solver class (e.g., MklPardisoSolver).
+      internal_scaling: "off", "thresh", or "all". Symmetric row scaling of the
+        constraint block applied inside the solver: rows whose true diagonal
+        magnitude t falls below the threshold (rho_min for "thresh", 1 for
+        "all") are scaled by d = 1/sqrt(t) so their KKT diagonal is exactly 1
+        and the static clamp never binds there. Exact: solves map back to the
+        original frame; iterates and termination are unaffected.
     """
     self.gmres_restart = max_iterative_refinement_steps
     # Create KKT scaffold with NaNs where we will update values each iteration.
@@ -195,6 +215,33 @@ class DirectKktSolver:
     self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
     self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
 
+    if internal_scaling not in ("off", "thresh", "all"):
+      raise ValueError(f"Unknown internal_scaling: {internal_scaling!r}")
+    if internal_scaling != "off" and not self._solver.supports_value_sync:
+      logging.debug(
+          "Backend %s does not support value sync; internal scaling disabled.",
+          type(self._solver).__name__,
+      )
+      internal_scaling = "off"
+    self._internal_scaling = internal_scaling
+    if internal_scaling != "off":
+      self._scale_threshold = (
+          min_static_regularization if internal_scaling == "thresh" else 1.0
+      )
+      # Map A-block entries in the scaffold data array to their constraint row.
+      indptr, indices = self._kkt.indptr, self._kkt.indices
+      outer = np.repeat(np.arange(len(indptr) - 1), np.diff(indptr))
+      rows, cols = (
+          (indices, outer) if self._kkt.format == "csc" else (outer, indices)
+      )
+      mask = (rows < self.n) & (cols >= self.n)
+      self._at_idxs = np.nonzero(mask)[0]
+      self._at_rows = cols[mask] - self.n
+      self._at_vals0 = self._kkt.data[self._at_idxs].copy()
+      self._d_scale = np.ones(self.m)
+      self._n_scaled = 0
+      self._p_diag_min = float(self._p_diags.min()) if self.n else 0.0
+
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
 
@@ -215,6 +262,25 @@ class DirectKktSolver:
     self._true_diags[: self.n] += mu
     self._true_diags[self.n : self.n + self.z] = mu
     self._true_diags[self.n + self.z :] = s[self.z :] / y[self.z :] + mu
+
+    if self._internal_scaling != "off":
+      # Scale constraint rows with small true diagonal t by d = 1/sqrt(t):
+      # their scaled diagonal is exactly 1, so the clamp never binds there.
+      # Recomputed fresh each update; solves map back exactly in solve().
+      # Gated off while the x-block sits below the floor: amplified A entries
+      # meeting sub-floor pivots cause fatal element growth in the no-pivot
+      # LDL (measured: LP endgames, x-diag = mu clamped, growth ~ d/rho).
+      t = self._true_diags[self.n :]
+      d = np.ones(self.m)
+      self._n_scaled = 0
+      if self._p_diag_min + mu >= self.min_static_regularization:
+        small = (t < self._scale_threshold) & np.isfinite(t) & (t > 0)
+        d[small] = 1.0 / np.sqrt(t[small])
+        t[small] = 1.0
+        self._n_scaled = int(np.count_nonzero(small))
+      self._kkt.data[self._at_idxs] = self._at_vals0 * d[self._at_rows]
+      self._solver.sync_values()
+      self._d_scale = d
 
     # "Regularized" diagonals for stable factorization.
     np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
@@ -259,13 +325,27 @@ class DirectKktSolver:
     # Use pre-allocated buffer to avoid a copy allocation on every call.
     np.copyto(self._kkt_rhs, rhs)
     self._kkt_rhs[self.n :] *= -1.0
+    # Tolerance from the original-frame rhs: enforcing it on the scaled-frame
+    # residual is never weaker than today's contract (all d_scale >= 1).
     rhs_norm = np.linalg.norm(self._kkt_rhs, np.inf)
     tolerance = self._atol + self._rtol * rhs_norm
+    scaled = self._internal_scaling != "off" and self._n_scaled > 0
+    if scaled:
+      # Scaled frame: K_scaled = S K S with S = diag(I, d). Solve
+      # K_scaled (S^-1 w) = S rhs, then map back w = S w_tilde.
+      self._kkt_rhs[self.n :] *= self._d_scale
+      warm_scaled = warm_start.copy()
+      warm_scaled[self.n :] /= self._d_scale
 
     tolerance = max(
         tolerance, _NEED_ETA * getattr(self, "_mu", 0.0) * rhs_norm
     )
-    sol, stats = self._solve_escalate(rhs_norm, tolerance, warm_start)
+    sol, stats = self._solve_escalate(
+        rhs_norm, tolerance, warm_scaled if scaled else warm_start
+    )
+    if scaled:
+      sol[self.n :] *= self._d_scale
+      stats["scaled_rows"] = self._n_scaled
 
     if np.any(np.isnan(sol)):
       # Breakdown: hand back the finite warm start and a status the

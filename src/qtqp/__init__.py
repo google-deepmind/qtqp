@@ -423,6 +423,7 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       rescue_scale: bool = False,
       rescue_trigger: str = "plain",
+      internal_scaling: str = "all",
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -449,6 +450,7 @@ class QTQP:
           init_strategy=InitStrategy(init_strategy),
           rescue_scale=rescue_scale,
           rescue_trigger=rescue_trigger,
+          internal_scaling=internal_scaling,
       )
     finally:
       if self._linear_solver is not None:
@@ -476,6 +478,7 @@ class QTQP:
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       rescue_scale: bool = False,
       rescue_trigger: str = "plain",
+      internal_scaling: str = "all",
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -515,6 +518,10 @@ class QTQP:
         diagnostics are needed.
       init_strategy (InitStrategy): Which initialization to use for (x, y, s,
         tau). See InitStrategy for descriptions. Defaults to BALANCED.
+      internal_scaling (str): "off", "thresh", or "all". Exact symmetric row
+        scaling of small constraint-block KKT diagonals inside the linear
+        solver (see direct.DirectKktSolver); iterates and termination are
+        unaffected.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -579,6 +586,7 @@ class QTQP:
         atol=linear_solver_atol,
         rtol=linear_solver_rtol,
         solver=linear_solver_backend,
+        internal_scaling=internal_scaling,
     )
 
     stats = []
@@ -627,6 +635,7 @@ class QTQP:
               atol=linear_solver_atol,
               rtol=linear_solver_rtol,
               solver=_resolve_linear_solver(linear_solver)[1],
+              internal_scaling=internal_scaling,
           )
           solver_new.update(
               mu=(y_new @ s_new) / (self.m - self.z), s=s_new, y=y_new

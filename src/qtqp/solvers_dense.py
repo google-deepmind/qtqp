@@ -55,6 +55,8 @@ class ScipyDenseSolver(LinearSolver):
   so that A_scaled' A_scaled = A' D^{-1} A, exploiting BLAS3 symmetry.
   """
 
+  supports_value_sync = False
+
   def __init__(self):
     from scipy.linalg import lapack, blas  # pylint: disable=g-import-not-at-top
 

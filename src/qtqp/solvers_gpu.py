@@ -35,6 +35,8 @@ class CuDssSolver(LinearSolver):
   (which would invalidate the plan).
   """
 
+  supports_value_sync = False
+
   def __init__(self):
     import cupy  # pylint: disable=g-import-not-at-top
     import cupyx.scipy.sparse  # pylint: disable=g-import-not-at-top
@@ -122,6 +124,8 @@ class CupyDenseSolver(LinearSolver):
   Gram derivation.  Forms G = H + A' D^{-1} A on the GPU and factorizes
   with Cholesky via cupy.linalg.cholesky.
   """
+
+  supports_value_sync = False
 
   def __init__(self):
     import cupy  # pylint: disable=g-import-not-at-top

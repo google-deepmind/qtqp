@@ -771,6 +771,75 @@ def test_direct_linear_solver(seed, linear_solver):
   )
 
 
+@pytest.mark.parametrize('policy', ['thresh', 'all'])
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_direct_internal_scaling_exact(policy, linear_solver):
+  """Internally scaled solves must satisfy the original-frame KKT system."""
+  rng = np.random.default_rng(97)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  p = sparse.csc_matrix(p + sparse.eye(n))  # healthy x-diag: scaling gate open
+  mu = 1e-12
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+  s[z : z + 20] = 1e-13 * y[z : z + 20]  # cone diagonals far below rho_min
+  backend = linear_solver.value()
+  kwargs = dict(
+      a=a, p=p, z=z, min_static_regularization=1e-8,
+      max_iterative_refinement_steps=10, atol=1e-12, rtol=1e-12,
+  )
+  solver = qtqp.direct.DirectKktSolver(
+      solver=backend, internal_scaling=policy, **kwargs
+  )
+  if not backend.supports_value_sync:
+    assert solver._internal_scaling == 'off'  # graceful fallback
+    solver.free()
+    return
+  solver.update(mu=mu, s=s, y=y)
+  q = np.concatenate([c, b])
+  sol, stats = solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  solver.free()
+  assert stats['scaled_rows'] >= 20
+  d = np.concatenate([np.zeros(z), s[z:] / y[z:]])
+  np.testing.assert_allclose(
+      p @ sol[:n] + mu * sol[:n] + a.T @ sol[n:], c, atol=1e-8, rtol=1e-8
+  )
+  np.testing.assert_allclose(
+      -a @ sol[:n] + (d + mu) * sol[n:], b, atol=1e-8, rtol=1e-8
+  )
+
+
+@pytest.mark.parametrize('linear_solver', _SOLVERS)
+def test_direct_internal_scaling_thresh_inert_when_no_small_rows(linear_solver):
+  """thresh must be bit-identical to off when no diagonal is below rho_min."""
+  if linear_solver is qtqp.LinearSolver.ACCELERATE:
+    pytest.skip('Accelerate LDLT is nondeterministic run-to-run.')
+  backend = linear_solver.value()
+  if not backend.supports_value_sync:
+    return
+  rng = np.random.default_rng(31)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(low=0.5, size=m)
+  y = rng.uniform(low=0.5, size=m)
+  s[:z] = 0.0
+  q = np.concatenate([c, b])
+  sols = []
+  for scaling in ('off', 'thresh'):
+    solver = qtqp.direct.DirectKktSolver(
+        a=a, p=p, z=z, min_static_regularization=1e-8,
+        max_iterative_refinement_steps=10, atol=1e-12, rtol=1e-12,
+        solver=linear_solver.value(), internal_scaling=scaling,
+    )
+    solver.update(mu=mu, s=s, y=y)
+    sol, _ = solver.solve(rhs=q, warm_start=np.zeros(n + m))
+    solver.free()
+    sols.append(sol)
+  np.testing.assert_array_equal(sols[0], sols[1])
+
+
 def test_upper_triangular_kkt_matvec_matches_full():
   """Upper-triangular KKT storage must reproduce the full symmetric matvec."""
   rng = np.random.default_rng(2026)
