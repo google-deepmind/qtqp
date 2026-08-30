@@ -433,13 +433,24 @@ class QTQP:
     px0_ = float(x @ (p @ x)) if p.nnz else 0.0
     t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
             + mu0 * (tau - 1.0 / max(_EPS, tau)))
-    h_y0 = np.full(self.m, mu0)
-    h_y0[self.z :] += mu0 / (y[self.z :] * y[self.z :])
-    h_t0 = mu0 + mu0 / max(_EPS, tau * tau)
+    return self._local_metric_norm(t_x0, t_y0, t_t0, y, tau, mu0)
+
+  def _local_metric_norm(self, t_x, t_y, t_tau, y, tau, mu):
+    """||(t_x, t_y, t_tau)||_{H^-1} with H = mu*I + mu*diag(hess barrier).
+
+    The barrier metric deflates the boundary-adjacent rows that make the
+    Euclidean certificate conservative on aggressively centered iterates
+    (Newton-decrement flavor). Shared by lambda_init, the warm-start
+    certification, and the delta_path_local diagnostic so the three
+    measures stay definitionally identical.
+    """
+    h_y = np.full(self.m, mu)
+    h_y[self.z :] += mu / (y[self.z :] * y[self.z :])
+    h_tau = mu + mu / max(_EPS, tau * tau)
     return math.sqrt(
-        float(t_x0 @ t_x0) / max(_EPS, mu0)
-        + float((t_y0 * t_y0) @ (1.0 / h_y0))
-        + t_t0 * t_t0 / max(_EPS, h_t0)
+        float(t_x @ t_x) / max(_EPS, mu)
+        + float((t_y * t_y) @ (1.0 / h_y))
+        + t_tau * t_tau / max(_EPS, h_tau)
     )
 
   def _init_variables(self, strategy, mu_scale, a, p, b, c):
@@ -1595,55 +1606,47 @@ class QTQP:
     dres = _norm(px_plus_aty * inv_tau + self.c, np.inf)
     gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
-    # A posteriori distance-to-path certificate. The regularized path map
-    # T_mu is mu-strongly monotone, so
-    #     ||u - u*(mu)|| <= ||T_mu(u)|| / mu  =: delta_path,
-    # computable at every iterate. Basically free: the three SpMVs above
-    # are reused via diagonal rescaling into the operating scale. The
-    # bound saturates at the floating-point floor once mu approaches
-    # roundoff of the summands (late endgame); treat large-mu iterates as
-    # the informative regime.
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
-      se = self.sigma_eq * self.e
-      sd = self.sigma_eq * self.d
-      sig2 = self.sigma_eq * self.sigma_eq
-      ax_w = sd * ax
-      aty_w = se * aty
-      px_w = se * px
-      ctx_w, bty_w, xpx_w = sig2 * ctx, sig2 * bty, sig2 * xpx
-    else:
-      ax_w, aty_w, px_w = ax, aty, px
-      ctx_w, bty_w, xpx_w = ctx, bty, xpx
-    b_op = getattr(self, "_b_op", self.b)
-    c_op = getattr(self, "_c_op", self.c)
-    t_x = px_w + aty_w + c_op * tau
-    t_x += mu_hat * x_w
-    t_y = -ax_w + b_op * tau
-    t_y += mu_hat * y_w
-    t_y[self.z :] -= mu_hat / y_w[self.z :]
-    inv_tau_w = 1.0 / max(tau, _EPS)
-    t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
-             + mu_hat * (tau - inv_tau_w))
-    t_norm = math.sqrt(
-        float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
-    )
-    stats_i["delta_path"] = t_norm / max(_EPS, mu_hat)
-    # Local-norm proximity measure (diagnostic): the same T vector weighted
-    # by the inverse of H = mu*I + mu*diag(hess barrier), the barrier's
-    # local metric. Deflates the barrier rows that make the Euclidean
-    # certificate conservative on aggressively centered iterates
-    # (Newton-decrement flavor), and remains informative for aggressive
-    # iterates where the Euclidean bound saturates.
-    h_x = mu_hat
-    h_y = np.full(self.m, mu_hat)
-    h_y[self.z :] += mu_hat / (y_w[self.z :] * y_w[self.z :])
-    h_tau = mu_hat + mu_hat / max(_EPS, tau * tau)
-    lam_sq = (
-        float(t_x @ t_x) / max(_EPS, h_x)
-        + float((t_y * t_y) @ (1.0 / h_y))
-        + t_tau * t_tau / max(_EPS, h_tau)
-    )
-    stats_i["delta_path_local"] = math.sqrt(max(0.0, lam_sq))
+    # Distance-to-path diagnostics are pure stats consumers: skip the
+    # per-iteration vector work entirely on the default fast path.
+    if collect_stats:
+      # A posteriori distance-to-path certificate. The regularized path map
+      # T_mu is mu-strongly monotone, so
+      #     ||u - u*(mu)|| <= ||T_mu(u)|| / mu  =: delta_path,
+      # computable at every iterate. Basically free: the three SpMVs above
+      # are reused via diagonal rescaling into the operating scale. The
+      # bound saturates at the floating-point floor once mu approaches
+      # roundoff of the summands (late endgame); treat large-mu iterates as
+      # the informative regime.
+      if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+        se = self.sigma_eq * self.e
+        sd = self.sigma_eq * self.d
+        sig2 = self.sigma_eq * self.sigma_eq
+        ax_w = sd * ax
+        aty_w = se * aty
+        px_w = se * px
+        ctx_w, bty_w, xpx_w = sig2 * ctx, sig2 * bty, sig2 * xpx
+      else:
+        ax_w, aty_w, px_w = ax, aty, px
+        ctx_w, bty_w, xpx_w = ctx, bty, xpx
+      b_op = getattr(self, "_b_op", self.b)
+      c_op = getattr(self, "_c_op", self.c)
+      t_x = px_w + aty_w + c_op * tau
+      t_x += mu_hat * x_w
+      t_y = -ax_w + b_op * tau
+      t_y += mu_hat * y_w
+      t_y[self.z :] -= mu_hat / y_w[self.z :]
+      inv_tau_w = 1.0 / max(tau, _EPS)
+      t_tau = (-(ctx_w + bty_w) - xpx_w * inv_tau_w
+               + mu_hat * (tau - inv_tau_w))
+      t_norm = math.sqrt(
+          float(t_x @ t_x) + float(t_y @ t_y) + t_tau * t_tau
+      )
+      stats_i["delta_path"] = t_norm / max(_EPS, mu_hat)
+      # Local-norm proximity measure (diagnostic): the same T vector in the
+      # barrier metric (Newton-decrement flavor); see _local_metric_norm.
+      stats_i["delta_path_local"] = self._local_metric_norm(
+          t_x, t_y, t_tau, y_w, tau, mu_hat
+      )
 
     norm_x = _norm(x, np.inf)
     norm_y = _norm(y, np.inf)

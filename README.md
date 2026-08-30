@@ -96,7 +96,7 @@ print(f'{sol.s=}')
 You should see output similar to
 
 ```
-| QTQP v0.0.3: m=3, n=2, z=1, nnz(A)=4, nnz(P)=4, linear_solver=SCIPY
+| QTQP v0.0.5: m=3, n=2, z=1, nnz(A)=4, nnz(P)=4, linear_solver=SCIPY
 |------|------------|------------|----------|----------|----------|----------|----------|----------|----------|
 | iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |
 |------|------------|------------|----------|----------|----------|----------|----------|----------|----------|
