@@ -464,7 +464,7 @@ class DirectKktSolver:
     g = np.zeros(max_inner + 1)
 
     beta = float(np.linalg.norm(residual))
-    if beta == 0.0:
+    if beta == 0.0 or not np.isfinite(beta):
       return 0
 
     v[0] = residual / beta
@@ -493,6 +493,10 @@ class DirectKktSolver:
         h_next = float(np.linalg.norm(w))
       h[j + 1, j] = h_next
 
+      # Non-finite Arnoldi data poisons h/g; drop this column and exit.
+      if not np.isfinite(h_next):
+        break
+
       breakdown = h_next == 0.0
       if not breakdown:
         v[j + 1] = w / h_next
@@ -514,6 +518,10 @@ class DirectKktSolver:
       g[j + 1] = -sn[j] * g[j]
       g[j] = cs[j] * g[j]
 
+      # A degenerate rotation (rho == 0) poisons g; drop this column and exit.
+      if not np.isfinite(g[j + 1]):
+        break
+
       j_done = j + 1
       if abs(g[j + 1]) < tolerance or breakdown:
         break
@@ -523,6 +531,8 @@ class DirectKktSolver:
     # sol += M^{-1}(V.T @ y), but consumes no additional factor-solve at
     # cycle exit -- which keeps each cycle's apply count equal to the
     # number of Arnoldi steps performed.
+    if j_done == 0:
+      return 0
     y = solve_triangular(h[:j_done, :j_done], g[:j_done])
     sol += z[:j_done].T @ y
     return j_done
