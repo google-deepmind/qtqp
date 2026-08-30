@@ -166,9 +166,9 @@ solve(
     init_strategy: qtqp.InitStrategy = qtqp.InitStrategy.CVXOPT,
     init_mu_scale: float = 1.0,
     refinement_strategy: qtqp.RefinementStrategy = (
-        qtqp.RefinementStrategy.RICHARDSON
+        qtqp.RefinementStrategy.GMRES
     ),
-    gmres_restart: int = 10,
+    gmres_restart: int = 20,
     fused_corrector_division: bool = False,
 ) -> qtqp.Solution
 ```
@@ -213,9 +213,11 @@ Key parameters:
 -   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
     set the initial barrier parameter.
 -   `refinement_strategy`: Choose the iterative-refinement method used for KKT
-    solves. Defaults to `qtqp.RefinementStrategy.RICHARDSON`.
+    solves. Defaults to `qtqp.RefinementStrategy.GMRES`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
-    Ignored by Richardson refinement.
+    Defaults to `20`: one uninterrupted Krylov cycle spanning the full
+    refinement budget, avoiding restart stagnation. Ignored by Richardson
+    refinement.
 -   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
     update with one fused division. The default False preserves legacy
     arithmetic.
@@ -276,11 +278,13 @@ Choose one with the `init_strategy` argument:
 
 Choose one with the `refinement_strategy` argument:
 
--   `qtqp.RefinementStrategy.RICHARDSON`: Default. Classical iterative
-    refinement using the factorized regularized KKT matrix as a preconditioner.
--   `qtqp.RefinementStrategy.GMRES`: Restarted right-preconditioned GMRES on the
-    true KKT system. Each Arnoldi step consumes one factor-solve, and
-    `gmres_restart` controls the restart length.
+-   `qtqp.RefinementStrategy.GMRES`: Default. Restarted right-preconditioned
+    GMRES on the true KKT system. Each Arnoldi step consumes one factor-solve,
+    and `gmres_restart` controls the restart length.
+-   `qtqp.RefinementStrategy.RICHARDSON`: Classical iterative refinement using
+    the factorized regularized KKT matrix as a preconditioner (a smoother; its
+    best-effort iterates behave differently from GMRES's residual-optimal ones
+    in the deep endgame).
 
 #### Advanced numerical options
 
