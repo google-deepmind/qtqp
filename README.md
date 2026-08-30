@@ -220,7 +220,7 @@ Key parameters:
     update with one fused division. The default False preserves legacy
     arithmetic.
 -   `adaptive_step_size`: If True (the default), once `mu < 1e-3` the
-    fraction-to-boundary scale follows `min(0.999, max(step_size_scale,
+    fraction-to-boundary scale follows `min(0.9999, max(step_size_scale,
     1 - 10*mu))`: the margin to the cone boundary shrinks proportionally
     to `mu`, unlocking the superlinear endgame that a constant haircut
     caps at a linear rate. Set False for the constant legacy schedule.
