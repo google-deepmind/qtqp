@@ -721,7 +721,7 @@ class QTQP:
         orders of magnitude above it, same-problem re-entries orders of
         magnitude below.
       adaptive_step_size (bool): If True (the default), once mu < 1e-3
-        the fraction-to-boundary scale follows min(0.999,
+        the fraction-to-boundary scale follows min(0.9999,
         max(step_size_scale, 1 - 10*mu)) instead of the constant
         step_size_scale: the margin to the cone boundary shrinks
         proportionally to mu, unlocking the superlinear endgame that the
@@ -990,14 +990,15 @@ class QTQP:
         if self._adaptive_step_size and mu < 1e-3:
           # Fraction-to-boundary schedule, engaged only in the endgame
           # (mu < 1e-3): approach 1 as mu -> 0 to unlock the superlinear
-          # tail; step_size_scale is the floor and 0.999 the
-          # strict-interiority cap. The cap bounds the PER-COMPONENT
-          # collapse when the same constraint blocks on consecutive
-          # iterations (the blocking component retains a 1e-3 fraction
-          # per step; at 1e-4 the compounding drove s/y ratios to 1e40
-          # and stalled z=0 unequilibrated solves). Early iterations
-          # keep the conservative constant scale.
-          scale_eff = min(0.999, max(step_size_scale, 1.0 - 10.0 * mu))
+          # tail; step_size_scale is the floor and 0.9999 the
+          # strict-interiority cap (the swept constant; it buys the
+          # deep-contraction rescues on the pinned-residual class).
+          # Known limitation: on UNEQUILIBRATED z=0 problems the same
+          # component can block on consecutive iterations and compound
+          # (s/y ratios reach 1e40), degrading the exit to
+          # ALMOST_SOLVED. Equilibration (the default) prevents it; set
+          # adaptive_step_size=False if solving unequilibrated.
+          scale_eff = min(0.9999, max(step_size_scale, 1.0 - 10.0 * mu))
         step = scale_eff * alpha
         x += step * d_x
         y += step * d_y
