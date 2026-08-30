@@ -163,8 +163,6 @@ solve(
         qtqp.EquilibrationStrategy.RUIZ
     ),
     collect_stats: bool = False,
-    init_strategy: qtqp.InitStrategy = qtqp.InitStrategy.CVXOPT,
-    init_mu_scale: float = 1.0,
     refinement_strategy: qtqp.RefinementStrategy = (
         qtqp.RefinementStrategy.GMRES
     ),
@@ -208,10 +206,6 @@ Key parameters:
     announces itself by tens of orders of magnitude — this diagnostic is
     how corrupted infinity-sentinel bounds were found in the
     Maros-Meszaros benchmark files.
--   `init_strategy`: Choose the initial interior-point iterate. Defaults to
-    `qtqp.InitStrategy.CVXOPT`.
--   `init_mu_scale`: Positive scale used only by `qtqp.InitStrategy.ORTHANT` to
-    set the initial barrier parameter.
 -   `refinement_strategy`: Choose the iterative-refinement method used for KKT
     solves. Defaults to `qtqp.RefinementStrategy.GMRES`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
