@@ -2773,61 +2773,17 @@ def test_gmres_rollback_on_stalled_refinement():
 
 
 # =============================================================================
-# fused_corrector_division: single-division Mehrotra corrector
+# Fused (single-division) Mehrotra corrector slack update
 # =============================================================================
 
 
-def test_fused_corrector_off_is_bitwise_legacy():
-  """Default (flag absent) and explicit fused_corrector_division=False must
-  produce bit-for-bit identical solutions on a deterministic backend: the
-  legacy code path stays untouched. Pin the backend to SCIPY because the
-  AUTO/Accelerate path has multi-threaded BLAS reductions that aren't
-  bit-deterministic across consecutive calls."""
-  rng = np.random.default_rng(8100)
-  a, b, c, p = _gen_feasible(50, 30, 5, random_state=rng)
-
-  kwargs = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
-  sol_default = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(**kwargs)
-  sol_explicit = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      **kwargs, fused_corrector_division=False
-  )
-
-  np.testing.assert_array_equal(sol_default.x, sol_explicit.x)
-  np.testing.assert_array_equal(sol_default.y, sol_explicit.y)
-  np.testing.assert_array_equal(sol_default.s, sol_explicit.s)
-
-
-def test_fused_corrector_on_matches_off_on_well_conditioned():
-  """Flag-on and flag-off must produce KKT-equivalent solutions on a
-  well-conditioned problem: the refactor is algebraically equivalent, so
-  the only differences come from float round-off and are tiny."""
-  rng = np.random.default_rng(8200)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-
-  sol_off = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, fused_corrector_division=False
-  )
-  sol_on = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, fused_corrector_division=True
-  )
-
-  assert sol_off.status == qtqp.SolutionStatus.SOLVED
-  assert sol_on.status == qtqp.SolutionStatus.SOLVED
-  _assert_solution(sol_off, a, b, c, p, z)
-  _assert_solution(sol_on, a, b, c, p, z)
-  obj_off = c @ sol_off.x + 0.5 * sol_off.x @ p @ sol_off.x
-  obj_on = c @ sol_on.x + 0.5 * sol_on.x @ p @ sol_on.x
-  np.testing.assert_allclose(obj_on, obj_off, rtol=1e-10, atol=1e-10)
-
-
 @pytest.mark.parametrize('seed', 8300 + np.arange(3))
-def test_fused_corrector_on_feasible_battery(seed):
-  """Flag-on must solve a feasible QP to optimality."""
+def test_fused_corrector_feasible_battery(seed):
+  """The fused corrector must solve a feasible QP to optimality."""
   rng = np.random.default_rng(seed)
   a, b, c, p = _gen_feasible(80, 50, 10, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=10, p=p).solve(
-      verbose=False, fused_corrector_division=True
+      verbose=False
   )
   _assert_solution(solution, a, b, c, p, 10)
 
@@ -2837,7 +2793,7 @@ def test_fused_corrector_on_infeasible():
   rng = np.random.default_rng(8400)
   a, b, c, p = _gen_infeasible(40, 25, 5, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      verbose=False, fused_corrector_division=True
+      verbose=False
   )
   _assert_infeasible(solution, a, b, 5)
 
@@ -2847,7 +2803,7 @@ def test_fused_corrector_on_unbounded():
   rng = np.random.default_rng(8401)
   a, b, c, p = _gen_unbounded(40, 25, 5, random_state=rng)
   solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      verbose=False, fused_corrector_division=True
+      verbose=False
   )
   _assert_unbounded(solution, a, c, p, 5)
 
@@ -2870,7 +2826,6 @@ def test_fused_corrector_handles_tiny_y():
   # near optimality, which is the regime the refactor protects against.
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       verbose=False,
-      fused_corrector_division=True,
       collect_stats=True,
   )
   assert solution.status == qtqp.SolutionStatus.SOLVED

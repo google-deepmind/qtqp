@@ -167,7 +167,6 @@ solve(
         qtqp.RefinementStrategy.GMRES
     ),
     gmres_restart: int = 20,
-    fused_corrector_division: bool = False,
 ) -> qtqp.Solution
 ```
 
@@ -212,9 +211,6 @@ Key parameters:
     Defaults to `20`: one uninterrupted Krylov cycle spanning the full
     refinement budget, avoiding restart stagnation. Ignored by Richardson
     refinement.
--   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
-    update with one fused division. The default False preserves legacy
-    arithmetic.
 -   `max_centrality_correctors`: Maximum Gondzio-style centrality correctors
     per iteration, each one extra back-solve on the existing factorization,
     recentering the aspirational trial point's outlier complementarity
@@ -288,12 +284,6 @@ Choose one with the `refinement_strategy` argument:
     path itself commits: residuals are judged against the larger of the
     floating-point measurement floor of their summands and the perturbation
     allowance of the path.
--   `fused_corrector_division`: Fuses the corrector slack numerator before
-    dividing by `y[z:]`. This is useful when small `y` components make the
-    legacy three-division form vulnerable to cancellation.
-
-This method will return a `qtqp.Solution` object, with fields:
-
 -   `x`: (n) Primal variable or certificate of unboundedness.
 -   `y`: (m) Dual variable or certificate of infeasibility.
 -   `s`: (m) Slack variable or certificate of unboundedness.
