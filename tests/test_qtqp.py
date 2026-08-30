@@ -3352,14 +3352,21 @@ def test_adaptive_step_size_solve(seed):
   _assert_solution(solution, a, b, c, p, z)
 
 
-def test_adaptive_step_size_agrees_with_default():
-  """Adaptive and constant schedules reach the same optimum."""
+def test_adaptive_step_size_default_on_and_off_agree():
+  """The default (adaptive) and the legacy constant schedule reach the
+  same optimum, and the default is the adaptive schedule (bitwise)."""
   rng = np.random.default_rng(7700)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  sol_a = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  kw = dict(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  sol_d = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(**kw)
+  sol_t = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      adaptive_step_size=True, **kw
+  )
+  np.testing.assert_array_equal(sol_d.x, sol_t.x)
+  sol_a = sol_d
   sol_b = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      adaptive_step_size=True, verbose=False
+      adaptive_step_size=False, verbose=False
   )
   obj_a = c @ sol_a.x + 0.5 * sol_a.x @ p @ sol_a.x
   obj_b = c @ sol_b.x + 0.5 * sol_b.x @ p @ sol_b.x

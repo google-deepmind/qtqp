@@ -594,7 +594,7 @@ class QTQP:
       fused_corrector_division: bool = False,
       warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
       warm_start_threshold: float = 100.0,
-      adaptive_step_size: bool = False,
+      adaptive_step_size: bool = True,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -652,7 +652,7 @@ class QTQP:
       fused_corrector_division: bool = False,
       warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
       warm_start_threshold: float = 100.0,
-      adaptive_step_size: bool = False,
+      adaptive_step_size: bool = True,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -720,12 +720,17 @@ class QTQP:
         warm start. Default 100.0: poisoned or mis-scaled points measure
         orders of magnitude above it, same-problem re-entries orders of
         magnitude below.
-      adaptive_step_size (bool): If True, once mu < 1e-3 the
-        fraction-to-boundary scale follows min(0.9999, max(step_size_scale,
-        1 - 10*mu)) instead of the constant step_size_scale, approaching 1
-        as the iterate converges. On NETLIB this cuts total time ~25% and
-        rescues borderline instances, but it can stall rare marginal
-        instances (e.g. Maros-Meszaros QISRAEL), so it is off by default.
+      adaptive_step_size (bool): If True (the default), once mu < 1e-3
+        the fraction-to-boundary scale follows min(0.999,
+        max(step_size_scale, 1 - 10*mu)) instead of the constant
+        step_size_scale: the margin to the cone boundary shrinks
+        proportionally to mu, unlocking the superlinear endgame that the
+        constant 1% haircut caps at a linear rate. Isolation-validated on
+        Maros-Meszaros + NETLIB + MIPLIB at 1e-9 (+10 net solved
+        instances including two time-limit rescues, no detection changes,
+        slightly faster overall; the historical stall risk on marginal
+        instances did not reproduce under the current endgame
+        safeguards). Set False for the constant legacy schedule.
 
     Returns:
       A Solution object containing the solution and solve stats.
@@ -985,11 +990,14 @@ class QTQP:
         if self._adaptive_step_size and mu < 1e-3:
           # Fraction-to-boundary schedule, engaged only in the endgame
           # (mu < 1e-3): approach 1 as mu -> 0 to unlock the superlinear
-          # tail; step_size_scale is the floor and 0.9999 the
-          # strict-interiority cap. Early iterations keep the conservative
-          # constant scale, where aggressive steps can destabilize marginal
-          # instances.
-          scale_eff = min(0.9999, max(step_size_scale, 1.0 - 10.0 * mu))
+          # tail; step_size_scale is the floor and 0.999 the
+          # strict-interiority cap. The cap bounds the PER-COMPONENT
+          # collapse when the same constraint blocks on consecutive
+          # iterations (the blocking component retains a 1e-3 fraction
+          # per step; at 1e-4 the compounding drove s/y ratios to 1e40
+          # and stalled z=0 unequilibrated solves). Early iterations
+          # keep the conservative constant scale.
+          scale_eff = min(0.999, max(step_size_scale, 1.0 - 10.0 * mu))
         step = scale_eff * alpha
         x += step * d_x
         y += step * d_y

@@ -219,6 +219,11 @@ Key parameters:
 -   `fused_corrector_division`: If True, computes the Mehrotra corrector slack
     update with one fused division. The default False preserves legacy
     arithmetic.
+-   `adaptive_step_size`: If True (the default), once `mu < 1e-3` the
+    fraction-to-boundary scale follows `min(0.999, max(step_size_scale,
+    1 - 10*mu))`: the margin to the cone boundary shrinks proportionally
+    to `mu`, unlocking the superlinear endgame that a constant haircut
+    caps at a linear rate. Set False for the constant legacy schedule.
 -   `warm_start`: Optional `(x, y, s)` from a nearby problem (original scale,
     e.g. a previous solution's arrays). The point is equilibrated into the
     operating scale, embedded interior at a few centering shifts, and the
