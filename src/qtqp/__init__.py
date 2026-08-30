@@ -421,8 +421,6 @@ class QTQP:
       ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      rescue_scale: bool = False,
-      rescue_trigger: str = "plain",
       internal_scaling: str = "all",
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
@@ -448,8 +446,6 @@ class QTQP:
           ruiz_iters=ruiz_iters,
           collect_stats=collect_stats,
           init_strategy=InitStrategy(init_strategy),
-          rescue_scale=rescue_scale,
-          rescue_trigger=rescue_trigger,
           internal_scaling=internal_scaling,
       )
     finally:
@@ -476,8 +472,6 @@ class QTQP:
       ruiz_iters: int = 10,
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
-      rescue_scale: bool = False,
-      rescue_trigger: str = "plain",
       internal_scaling: str = "all",
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
@@ -602,56 +596,10 @@ class QTQP:
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
     alpha = sigma = 0.0
-    pending_rescale = False
-    rescaled = False
-    score_track: list = []
-    eta_prev = 0.0
-
     # --- Main Iteration Loop ---
     # self.it counts IPM steps already taken.
     for self.it in range(max_iter):
       stats_i = {}
-      if pending_rescale:
-        # NT-flavored row rescale: d = sqrt(y/s) makes cone KKT diagonals
-        # exactly 1 (clamp inactive); the Schur complement is invariant. d is
-        # folded into the ruiz row scaling so termination stays original-units.
-        # Trial-factorize; on any failure revert fully and continue un-rescued.
-        pending_rescale = False
-        rescaled = True
-        d_row = np.ones(self.m)
-        d_row[self.z :] = np.clip(
-            np.sqrt(y[self.z :] / s[self.z :]), 1e-12, 1e12
-        )
-        a_new = sp.csc_matrix(sp.diags(d_row) @ a)
-        s_new = d_row * s
-        y_new = y / d_row
-        try:
-          solver_new = direct.DirectKktSolver(
-              a=a_new,
-              p=p,
-              z=self.z,
-              min_static_regularization=min_static_regularization,
-              max_iterative_refinement_steps=max_iterative_refinement_steps,
-              atol=linear_solver_atol,
-              rtol=linear_solver_rtol,
-              solver=_resolve_linear_solver(linear_solver)[1],
-              internal_scaling=internal_scaling,
-          )
-          solver_new.update(
-              mu=(y_new @ s_new) / (self.m - self.z), s=s_new, y=y_new
-          )
-        except Exception as exc:
-          logging.debug("Rescale trial factorization failed; reverted: %s", exc)
-          stats_i["rescale_reverted"] = True
-        else:
-          a, s, y = a_new, s_new, y_new
-          b = d_row * b
-          self.d = self.d * d_row
-          self.q = np.concatenate([c, b])
-          self._linear_solver.free()
-          self._linear_solver = solver_new
-          self.kinv_q = np.zeros_like(self.q)
-          stats_i["rescaled"] = True
       x, y, tau, s = self._normalize(x, y, tau, s)
 
       mu = (y @ s) / (self.m - self.z)
@@ -714,25 +662,6 @@ class QTQP:
       eps_mu = _EPS * max(mu, 1.0)
       mu_target = (sigma * mu
                    * (max(mu_resid, eps_mu) / max(mu, _EPS)) ** path_gamma)
-      if (rescue_scale and not rescaled
-          and mu < (2.220446049250313e-16 ** 0.5) * mu_resid
-          and mu < tau * tau):
-        if rescue_trigger == "proj":
-          # Stall = cannot reach the termination score within the budget
-          # at the measured geometric rate (window 6 as estimation horizon).
-          fire = False
-          if len(score_track) > 6 and score_track[-1 - 6] > 0:
-            rho = (score_track[-1] / score_track[-1 - 6]) ** (1.0 / 6.0)
-            fire = score_track[-1] * rho ** (max_iter - self.it) > 1.0
-        elif rescue_trigger == "eta":
-          # Stall = the corrector solve's achieved relative residual is
-          # garbage (mu-starved RHS): worse than the zero vector.
-          fire = eta_prev >= 1.0
-        else:
-          fire = True
-        if fire:
-          pending_rescale = True
-          stats_i["rescue_fired_at"] = self.it
       sigma = mu_target / max(mu, _EPS)
 
       # --- Step 3: Corrector Step ---
@@ -761,8 +690,6 @@ class QTQP:
           correction=correction,
       )
       stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
-      eta_prev = (corrector_lin_sys_stats["final_residual_norm"]
-                  / max(corrector_lin_sys_stats["rhs_norm"], _EPS))
       if corrector_lin_sys_stats["status"] == "breakdown":
         break
 
@@ -789,10 +716,6 @@ class QTQP:
       status = self._check_termination(
           x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
       )
-      score_track.append(max(
-          stats_i["pres"] / (atol + rtol * stats_i["prelrhs"]),
-          stats_i["dres"] / (atol + rtol * stats_i["drelrhs"]),
-      ))
       self._log_iteration(stats_i)
       if collect_stats:
         stats.append(stats_i)
