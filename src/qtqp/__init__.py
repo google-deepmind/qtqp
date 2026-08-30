@@ -530,7 +530,6 @@ class QTQP:
       collect_stats: bool = False,
       refinement_strategy: RefinementStrategy = RefinementStrategy.GMRES,
       gmres_restart: int = 20,
-      fused_corrector_division: bool = False,
       warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
       warm_start_threshold: float = 100.0,
       adaptive_step_size: bool = True,
@@ -556,7 +555,6 @@ class QTQP:
           collect_stats=collect_stats,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
-          fused_corrector_division=fused_corrector_division,
           warm_start=warm_start,
           warm_start_threshold=warm_start_threshold,
           adaptive_step_size=adaptive_step_size,
@@ -586,7 +584,6 @@ class QTQP:
       collect_stats: bool = False,
       refinement_strategy: RefinementStrategy = RefinementStrategy.GMRES,
       gmres_restart: int = 20,
-      fused_corrector_division: bool = False,
       warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
       warm_start_threshold: float = 100.0,
       adaptive_step_size: bool = True,
@@ -646,14 +643,6 @@ class QTQP:
         stagnation; shorter cycles reduce orthogonalization cost at the
         price of more restarts. Ignored when refinement_strategy is
         RICHARDSON.
-      fused_corrector_division (bool): If True, compute the corrector
-        slack update via a single division by y[z:] with the three
-        numerator terms (sigma*mu, the Mehrotra cross product, and
-        y_c*s) assembled first. Algebraically equivalent to the default
-        three-division formula `sigma*mu/y + correction - y_c*s/y`, but
-        avoids catastrophic cancellation when y_i is small and the
-        terms have similar magnitudes with opposing signs. Default False
-        preserves the legacy bit-for-bit behavior.
       warm_start (tuple | None): Optional (x, y, s) from a nearby problem
         (original scale, e.g. a previous Solution's arrays). The point is
         equilibrated into the operating scale, embedded interior at a few
@@ -705,7 +694,6 @@ class QTQP:
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
-    self._fused_corrector_division = bool(fused_corrector_division)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
@@ -884,11 +872,9 @@ class QTQP:
         # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
         d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
 
-        # Pre-compute the Mehrotra cross term in un-divided form only when the
-        # fused-corrector path will consume it (otherwise stay on the legacy
-        # `-d_s * d_y_p / y` formulation verbatim).
-        if self._fused_corrector_division:
-          cross_p = d_s[self.z :] * d_y_p[self.z :]
+        # The Mehrotra cross term in un-divided form; consumed by the
+        # corrector RHS and by the fused slack update below.
+        cross_p = d_s[self.z :] * d_y_p[self.z :]
 
         # Compute predictor step size and resulting centering parameter (sigma)
         alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
@@ -906,10 +892,7 @@ class QTQP:
         # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
         # (divided by y because the KKT complementarity block is scaled by 1/y),
         # so the corrector step can incorporate it to land closer to the target.
-        if self._fused_corrector_division:
-          correction = -cross_p / y[self.z :]
-        else:
-          correction = -d_s[self.z :] * d_y_p[self.z :] / y[self.z :]
+        correction = -cross_p / y[self.z :]
         xy[: self.n] = x_p
         xy[self.n :] = y_p
         x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
@@ -928,22 +911,19 @@ class QTQP:
 
         # --- Step 4: Update Iterates ---
         d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-        if self._fused_corrector_division:
-          # Combined-numerator corrector slack step. Algebraically equivalent
-          # to `sigma*mu/y + correction - y_c*s/y`, but assembles the
-          # numerator before the single division by y[z:], avoiding
-          # catastrophic cancellation when y_i is small and the three terms
-          # have similar magnitudes with opposing signs.
-          d_s[self.z :] = (
-              sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
-          ) / y[self.z :]
-        else:
-          # Legacy three-division formula.
-          d_s[self.z :] = (
-              sigma * mu / y[self.z :]
-              + correction
-              - y_c[self.z :] * s[self.z :] / y[self.z :]
-          )
+        # Combined-numerator corrector slack step: assemble the numerator
+        # before the single division by y[z:], avoiding catastrophic
+        # cancellation when y_i is small and the three terms have similar
+        # magnitudes with opposing signs — the regime the adaptive endgame
+        # deliberately operates in (boundary margins ~1e-4). The legacy
+        # three-division form (sigma*mu/y + correction - y_c*s/y) rounds
+        # each quotient before the cancellation, amplifying the error by
+        # 1/y_i; at corpus scale the two are indistinguishable, but the
+        # fused form is correct by construction and occasionally prevents
+        # corrector directions that instantly exit the cone.
+        d_s[self.z :] = (
+            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+        ) / y[self.z :]
 
         alpha = self._compute_step_size(y, s, d_y, d_s)
         # --- Gondzio multiple centrality correctors ---
