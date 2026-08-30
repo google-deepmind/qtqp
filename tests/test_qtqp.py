@@ -1492,17 +1492,15 @@ def test_infeasible_lp(equilibration, seed, linear_solver, record_iterations):
   m, n, z = 50, 30, 5
   a, b, c, _ = _gen_infeasible(m, n, z, random_state=rng)
 
-  # init_strategy pinned: under the CVXOPT init the EIGEN/seed-4145/
-  # unequilibrated cell freezes near the certificate on Windows (the ray
-  # forms - infeasibility measure 1e-10 - but repeated linear-solver
-  # breakdowns at mu ~ 2e-9 stall the declaration and the solve hits the
-  # cap; macOS certifies the same cell in 6 iterations). Real
-  # certificate-endgame fragility, tracked alongside the held-out
-  # infeasibility misses; this test pins the trivial init so it keeps
-  # exercising detection across the full backend matrix meanwhile.
+  # Historical note: under the pre-#110 certificate judging this cell
+  # (EIGEN/seed-4145/unequilibrated) froze near the certificate on
+  # Windows under the CVXOPT init, and was pinned to the trivial init as
+  # mitigation. The trivial init is gone (CVXOPT is the only init); the
+  # data-scaled certificate rework and the GMRES refinement default both
+  # postdate the fragility - watch this cell on Windows CI.
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(
       equilibration_strategy=equilibration, linear_solver=linear_solver, collect_stats=True,
-      verbose=True, init_strategy=qtqp.InitStrategy.TRIVIAL,
+      verbose=True,
   )
 
   record_iterations(solution.stats[-1]['iter'], solution.stats[-1]['time'])
@@ -2134,20 +2132,16 @@ def test_iterative_refinement_improves_residual():
   """Test that more refinement steps reduce the final linear system residual."""
   # QDLDL pinned: the ordering assertion compares residuals at the noise
   # floor; multithreaded backends are not run-to-run stable there.
-  # init_strategy pinned: the test asserts properties of the refinement
-  # behavior on its calibrated (trivial-init) trajectory.
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   sol_1 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       linear_solver=qtqp.LinearSolver.SCIPY,
-      init_strategy=qtqp.InitStrategy.TRIVIAL,
       max_iterative_refinement_steps=1, verbose=True, collect_stats=True
   )
   sol_50 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       linear_solver=qtqp.LinearSolver.SCIPY,
-      init_strategy=qtqp.InitStrategy.TRIVIAL,
       max_iterative_refinement_steps=50, verbose=True, collect_stats=True
   )
 
@@ -2209,13 +2203,11 @@ def test_raise_error_negative_z():
 
 def test_stats_monotonicity():
   """Test that mu decreases and time increases across iterations."""
-  # init_strategy pinned: this test asserts properties of the
-  # stats bookkeeping on its calibrated (trivial-init) trajectory.
   rng = np.random.default_rng(42)
   m, n, z = 50, 30, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(init_strategy=qtqp.InitStrategy.TRIVIAL, 
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
       verbose=True, collect_stats=True
   )
 
@@ -2226,13 +2218,15 @@ def test_stats_monotonicity():
   times = [s['time'] for s in solution.stats]
   alphas = [s['alpha'] for s in solution.stats]
 
-  # mu is the complementarity of the current iterate and should decrease
-  # strictly as the IPM drives iterates toward the central path.
-  assert mus[0] > 0.0
-  for i in range(1, len(mus)):
-    assert mus[i] < mus[i - 1], (
-        f"mu not decreasing: mu[{i}]={mus[i]} >= mu[{i-1}]={mus[i-1]}"
-    )
+  # mu is the complementarity of the current iterate. Per-iteration strict
+  # monotonicity was a property of the retired trivial-init trajectory,
+  # not an algorithm invariant: the CVXOPT init starts near the path and
+  # the first Mehrotra step can legitimately recenter mu upward. The
+  # contract is positivity and overall convergence.
+  assert all(m_ > 0.0 for m_ in mus)
+  assert mus[-1] < 1e-6 * mus[0], (
+      f"mu did not converge: mu[0]={mus[0]}, mu[-1]={mus[-1]}"
+  )
 
   # Time should be monotonically non-decreasing.
   for i in range(1, len(times)):
@@ -2401,135 +2395,8 @@ def test_nonfinite_p_rejected():
 
 
 # =============================================================================
-# InitStrategy: ORTHANT and CVXOPT-style initialization
+# CVXOPT-style initialization
 # =============================================================================
-
-_INIT_STRATEGIES = [
-    qtqp.InitStrategy.TRIVIAL,
-    qtqp.InitStrategy.ORTHANT,
-    qtqp.InitStrategy.CVXOPT,
-]
-
-
-@pytest.mark.parametrize('init_strategy', _INIT_STRATEGIES)
-@pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
-@pytest.mark.parametrize('seed', 42 + np.arange(3))
-def test_init_strategy_solve(init_strategy, equilibration, seed):
-  """Every init strategy must solve a feasible QP to optimality."""
-  rng = np.random.default_rng(seed)
-  m, n, z = 50, 30, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      equilibration_strategy=equilibration,
-      init_strategy=init_strategy,
-      verbose=False,
-  )
-  _assert_solution(solution, a, b, c, p, z)
-
-
-@pytest.mark.parametrize('init_strategy', _INIT_STRATEGIES)
-def test_init_strategy_infeasible(init_strategy):
-  """Every init strategy must still detect primal infeasibility."""
-  rng = np.random.default_rng(142)
-  a, b, c, p = _gen_infeasible(50, 30, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      init_strategy=init_strategy, verbose=False
-  )
-  _assert_infeasible(solution, a, b, 5)
-
-
-@pytest.mark.parametrize('init_strategy', _INIT_STRATEGIES)
-def test_init_strategy_unbounded(init_strategy):
-  """Every init strategy must still detect primal unboundedness."""
-  rng = np.random.default_rng(242)
-  a, b, c, p = _gen_unbounded(50, 30, 5, random_state=rng)
-  solution = qtqp.QTQP(a=a, b=b, c=c, z=5, p=p).solve(
-      init_strategy=init_strategy, verbose=False
-  )
-  _assert_unbounded(solution, a, c, p, 5)
-
-
-@pytest.mark.parametrize('mu_scale', [0.1, 1.0, 5.0])
-def test_init_orthant_centering(mu_scale):
-  """ORTHANT init must satisfy the closed-form centering condition exactly.
-
-  For each inequality row i:  mu_0 * y_i + b_i - mu_0 / y_i  ==  0
-  with mu_0 = mu_scale * ||b[z:]||_2 and y_i computed from the closed form.
-  """
-  rng = np.random.default_rng(7)
-  m, n, z = 40, 25, 5
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE  # _init_trivial branch needs the attribute
-  x, y, s, tau, meta = solver._init_orthant(b, mu_scale)
-
-  assert tau == 1.0
-  assert np.all(x == 0.0)
-  assert np.all(y[z:] > 0)
-  assert np.all(s[z:] > 0)
-  mu_0 = meta['mu_0']
-  expected_mu = mu_scale * np.linalg.norm(b[z:], 2)
-  np.testing.assert_allclose(mu_0, expected_mu, rtol=1e-12)
-  # Middle-block centering residual.
-  resid = mu_0 * y[z:] + b[z:] - mu_0 / y[z:]
-  np.testing.assert_allclose(
-      resid, 0.0, atol=1e-10 * (np.linalg.norm(b[z:]) + mu_0)
-  )
-  # Complementarity: y * s == mu_0 componentwise.
-  np.testing.assert_allclose(y[z:] * s[z:], mu_0, rtol=1e-12)
-
-
-def test_init_orthant_zero_b():
-  """ORTHANT init must handle b[z:] == 0 without dividing by zero."""
-  m, n, z = 6, 4, 2
-  a = sparse.eye(m, n, format='csc')
-  b = np.zeros(m)
-  c = np.zeros(n)
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  x, y, s, tau, meta = solver._init_orthant(b, mu_scale=1.0)
-  assert tau == 1.0
-  assert np.all(x == 0.0)
-  np.testing.assert_array_equal(y[z:], 1.0)
-  np.testing.assert_array_equal(s[z:], meta['mu_0'])
-
-
-@pytest.mark.parametrize('bad_value', [0.0, -1.0, float('nan'), float('inf')])
-def test_init_orthant_rejects_invalid_mu_scale(bad_value):
-  """Non-positive or non-finite init_mu_scale must raise a clear error."""
-  rng = np.random.default_rng(0)
-  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
-  with pytest.raises(ValueError, match='init_mu_scale'):
-    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
-        init_strategy=qtqp.InitStrategy.ORTHANT,
-        init_mu_scale=bad_value,
-        verbose=False,
-    )
-
-
-def test_init_orthant_stable_for_large_positive_beta():
-  """The branch-selected formula must avoid catastrophic cancellation.
-
-  Small mu_scale drives beta = b / (mu_scale * ||b||) to large magnitudes; for
-  beta >> 0 the naive form 0.5*(-beta + sqrt(beta^2+4)) loses all precision,
-  while the alternate form 2/(beta + sqrt(beta^2+4)) does not. The centering
-  residual stays at machine epsilon either way only with the branched form.
-  """
-  m, n, z = 4, 2, 0
-  c = np.zeros(n)
-  b = np.array([10.0, 1.0, 0.5, 2.0])
-  solver = qtqp.QTQP(a=sparse.eye(m, n, format='csc'), b=b, c=c, z=z)
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  mu_scale = 1e-7  # forces beta to ~1e6 in magnitude
-  _, y, s, _, meta = solver._init_orthant(b, mu_scale=mu_scale)
-  mu_0 = meta['mu_0']
-  # Centering residual must remain near machine precision (the naive
-  # cancellation-prone form would blow this up by ~beta^2 ~ 1e12).
-  resid = mu_0 * y + b - mu_0 / y
-  np.testing.assert_allclose(resid / mu_0, 0.0, atol=1e-7)
-  assert np.all(y > 0)
-  assert np.all(s > 0)
-
 
 def test_init_cvxopt_strict_interior():
   """CVXOPT init must produce strictly interior y[z:] and s[z:]."""
@@ -2548,18 +2415,13 @@ def test_init_cvxopt_strict_interior():
   assert np.min(s[z:]) >= 1.0 - 1e-12
 
 
-def test_init_strategy_mostly_equality_problem():
-  """All strategies must work when most rows are equalities (z close to m)."""
+def test_init_mostly_equality_problem():
+  """The init must work when most rows are equalities (z close to m)."""
   rng = np.random.default_rng(21)
   m, n, z = 25, 30, 22  # 22 equality rows + 3 inequality rows
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-  for strat in _INIT_STRATEGIES:
-    solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        init_strategy=strat, verbose=False
-    )
-    assert solution.status == qtqp.SolutionStatus.SOLVED, (
-        f"strategy {strat} failed on mostly-equality problem"
-    )
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert solution.status == qtqp.SolutionStatus.SOLVED
 
 
 # =============================================================================

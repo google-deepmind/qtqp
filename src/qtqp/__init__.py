@@ -191,44 +191,6 @@ class EquilibrationStrategy(enum.Enum):
   AUGMENTED = "augmented"
 
 
-class InitStrategy(enum.Enum):
-  """Available initialization strategies for the IPM iterates.
-
-  TRIVIAL:
-    Unit vectors: y[z:] = s[z:] = 1, x = 0, tau = 1. Cheap, dimensionless.
-    Default for backward compatibility.
-
-  ORTHANT:
-    Closed-form non-negative orthant centering. Picks mu_0 = mu_scale *
-    ||b[z:]|| (see the init_mu_scale solve() kwarg) and solves the
-    per-component centering condition
-        mu_0 * y_i + b_i - mu_0 / y_i = 0
-    for inequality rows, giving y_i = (-beta_i + sqrt(beta_i^2 + 4)) / 2 with
-    beta = b/mu_0. Strictly interior by construction; cost is O(m).
-
-  CVXOPT:
-    Least-squares initialization (CVXOPT / Clarabel style). For QPs,
-    solves the saddle-point system
-        [P + eps*I,  A^T ] [x]   [-c]
-        [    A,      -I  ] [y] = [ b]
-    treating all rows as equalities; the (2, 2) block is -I, giving the
-    bounded least-squares point y ~ Ax - b. For LPs (P with no
-    nonzeros) the coupled solve is ill-posed, so it splits into two
-    solves with the same factorization - [0; b] for the primal
-    (feasibility only) and [-c; 0] for the dual (optimality only),
-    matching Clarabel's LP initialization. The solves run through the
-    session's DirectKktSolver (same backend, ordering, static
-    regularization, and iterative refinement as the main loop). Then
-    s = b - A @ x, and the inequality blocks of (y, s) are shifted by a
-    uniform constant so min(y[z:]) and min(s[z:]) are at least 1.0
-    (CVXOPT's standard interior-point shift). Default.
-  """
-
-  TRIVIAL = "trivial"
-  ORTHANT = "orthant"
-  CVXOPT = "cvxopt"
-
-
 @dataclasses.dataclass(frozen=True)
 class Solution:
   """Contains the solution to the QP problem.
@@ -453,22 +415,15 @@ class QTQP:
         + t_tau * t_tau / max(_EPS, h_tau)
     )
 
-  def _init_variables(self, strategy, mu_scale, a, p, b, c):
-    """Dispatch to the requested initialization strategy.
+  def _init_variables(self, a, p, b, c):
+    """Produce the initial IPM iterates (CVXOPT-style residual embedding).
 
-    The (a, p, b, c) passed in are the operating-scale problem data: equilibrated
-    if equilibration is on, original otherwise. The selected strategy produces
-    iterates already in that scale, with the exception of TRIVIAL which keeps
-    its historical behavior (build unit iterates and then equilibrate via
-    _equilibrate_iterates) for backward compatibility.
+    The (a, p, b, c) passed in are the operating-scale problem data:
+    equilibrated if equilibration is on, original otherwise. The iterates
+    are produced in that scale. Falls back to the trivial unit init if the
+    initialization KKT solve degenerates (see _init_cvxopt).
     """
-    if strategy is InitStrategy.TRIVIAL:
-      return self._init_trivial()
-    if strategy is InitStrategy.ORTHANT:
-      return self._init_orthant(b, mu_scale)
-    if strategy is InitStrategy.CVXOPT:
-      return self._init_cvxopt(a, p, b, c)
-    raise ValueError(f"Unknown init strategy: {strategy}")
+    return self._init_cvxopt(a, p, b, c)
 
   def _init_trivial(self):
     """Unit-vector init: y[z:] = s[z:] = 1, x = 0, tau = 1."""
@@ -480,31 +435,6 @@ class QTQP:
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
-
-  def _init_orthant(self, b, mu_scale):
-    """Closed-form non-negative orthant init (see InitStrategy.ORTHANT)."""
-    m, n, z = self.m, self.n, self.z
-    x = np.zeros(n)
-    y = np.zeros(m)
-    s = np.zeros(m)
-
-    b_ineq = b[z:]
-    norm_b = _norm(b_ineq, 2)
-    if norm_b == 0.0:
-      mu_0 = max(mu_scale, np.finfo(np.float64).tiny)
-      y[z:] = 1.0
-      s[z:] = mu_0  # complementarity y_i * s_i = mu_0 with y_i = 1.
-    else:
-      mu_0 = mu_scale * norm_b
-      beta = b_ineq / mu_0
-      sq = np.sqrt(beta * beta + 4.0)
-      # Branch-selected stable form: cancellation-free for both signs of beta.
-      y_ineq = np.where(beta <= 0, 0.5 * (-beta + sq), 2.0 / (beta + sq))
-      assert np.all(y_ineq > 0), "orthant init produced non-positive y component"
-      y[z:] = y_ineq
-      s[z:] = mu_0 / y_ineq
-
-    return x, y, s, 1.0, {"mu_0": mu_0}
 
   def _init_cvxopt(self, a, p, b, c, reg=1e-8, interior_margin=1.0):
     """CVXOPT-style init: solve regularized saddle-point KKT, then shift."""
@@ -598,8 +528,6 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.CVXOPT,
-      init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.GMRES,
       gmres_restart: int = 20,
       fused_corrector_division: bool = False,
@@ -626,8 +554,6 @@ class QTQP:
           verbose=verbose,
           equilibration_strategy=equilibration_strategy,
           collect_stats=collect_stats,
-          init_strategy=init_strategy,
-          init_mu_scale=init_mu_scale,
           refinement_strategy=refinement_strategy,
           gmres_restart=gmres_restart,
           fused_corrector_division=fused_corrector_division,
@@ -658,8 +584,6 @@ class QTQP:
       verbose: bool = True,
       equilibration_strategy: EquilibrationStrategy = EquilibrationStrategy.RUIZ,
       collect_stats: bool = False,
-      init_strategy: InitStrategy = InitStrategy.CVXOPT,
-      init_mu_scale: float = 1.0,
       refinement_strategy: RefinementStrategy = RefinementStrategy.GMRES,
       gmres_restart: int = 20,
       fused_corrector_division: bool = False,
@@ -706,13 +630,6 @@ class QTQP:
         statistics, complementarity, etc.) and return them in Solution.stats.
         Defaults to False for faster throughput; set True when per-iteration
         diagnostics are needed.
-      init_strategy (InitStrategy): Which initialization to use for (x, y, s,
-        tau). See InitStrategy for descriptions. Defaults to TRIVIAL.
-      init_mu_scale (float): Multiplier on ||b[z:]|| that sets the initial
-        barrier parameter mu_0 = init_mu_scale * ||b[z:]|| for
-        InitStrategy.ORTHANT. Larger values produce iterates closer to the
-        canonical center; smaller values produce more aggressive starts. Must
-        be positive and finite. Ignored for other strategies.
       refinement_strategy (RefinementStrategy): Which iterative-refinement
         scheme drives each KKT solve. See RefinementStrategy for
         descriptions. Defaults to GMRES: at a full-budget restart length
@@ -784,11 +701,6 @@ class QTQP:
     assert max_iterative_refinement_steps >= 1
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
-    if not (np.isfinite(init_mu_scale) and init_mu_scale > 0):
-      raise ValueError(
-          f"init_mu_scale must be a positive finite float,"
-          f" got {init_mu_scale}"
-      )
     self._adaptive_step_size = bool(adaptive_step_size)
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
@@ -856,9 +768,7 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, _ = self._init_variables(
-        init_strategy, init_mu_scale, a, p, b, c
-    )
+    x, y, s, tau, _ = self._init_variables(a, p, b, c)
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
