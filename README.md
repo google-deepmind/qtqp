@@ -151,8 +151,8 @@ This class has a single API method `solve`:
 ```python
 solve(
     *,
-    atol: float = 1e-9,
-    rtol: float = 1e-9,
+    atol: float = 1e-7,
+    rtol: float = 1e-8,
     atol_infeas: float = 1e-8,
     rtol_infeas: float = 1e-9,
     max_iter: int = 100,
@@ -295,7 +295,8 @@ Choose one with the `refinement_strategy` argument:
     numerical breakdown of the linear solver, which never raises) when
     the best iterate over the trajectory (by max normalized residual)
     meets the solved-criteria form at tolerances `1000x` looser than the
-    requested `atol`/`rtol` (so `1e-6` at the defaults): the returned
+    requested `atol`/`rtol` (so `1e-4` absolute and `1e-5` relative at
+    the defaults): the returned
     solution is that best iterate, honestly labeled as not meeting the
     full `SOLVED` contract. `SOLVED` semantics are unchanged. A
     breakdown whose best iterate does not qualify returns `FAILED`.

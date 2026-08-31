@@ -2836,16 +2836,19 @@ def test_fused_corrector_handles_tiny_y():
     assert stats_i['alpha'] > 0.0, stats_i
 
 
-def test_default_tolerances_are_1e9():
+def test_default_tolerances_match_summand_only_criteria():
+  '''Defaults are calibrated to the summand-only termination scales: the
+  pre-tightening tier (atol=1e-7, rtol=1e-8) that the original criteria
+  were validated with.'''
   import inspect
   sig = inspect.signature(qtqp.QTQP.solve)
-  assert sig.parameters['atol'].default == 1e-9
-  assert sig.parameters['rtol'].default == 1e-9
+  assert sig.parameters['atol'].default == 1e-7
+  assert sig.parameters['rtol'].default == 1e-8
 
 
 def test_almost_solved_near_cap():
   """Capping one iteration below the solve count returns the best iterate
-  with ALMOST_SOLVED (it meets the 1e-6 criteria form), while a very early
+  with ALMOST_SOLVED (it meets the 1000x-loosened criteria form), while a very early
   cap still returns HIT_MAX_ITER."""
   rng = np.random.default_rng(9600)
   m, n, z = 60, 40, 8
@@ -3598,16 +3601,19 @@ def test_noncanonical_int64_duplicates_wrap_is_caught_for_p():
 
 
 def test_almost_solved_stats_status_consistent():
-  """When salvage returns ALMOST_SOLVED, the last stats row must agree."""
+  '''When salvage returns ALMOST_SOLVED, the last stats row must agree.
+  Unreachable tolerances with a full budget make the salvage fire
+  deterministically (the 1e-9-quality best iterate meets the
+  _ALMOST_FACTOR-loosened bar while 1e-15 never converges).'''
   rng = np.random.default_rng(4800)
   m, n, z = 60, 40, 8
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, collect_stats=True, max_iter=4,
+      verbose=False, collect_stats=True, atol=1e-15, rtol=1e-15,
+      linear_solver=qtqp.LinearSolver.SCIPY,
   )
-  if sol.status == qtqp.SolutionStatus.ALMOST_SOLVED:
-    assert sol.stats[-1]["status"] == qtqp.SolutionStatus.ALMOST_SOLVED
-
+  assert sol.status == qtqp.SolutionStatus.ALMOST_SOLVED
+  assert sol.stats[-1]["status"] == qtqp.SolutionStatus.ALMOST_SOLVED
 
 def test_sentinel_threshold_matches_contract():
   '''Only representation-noise-level deviations from 1e20 are sentinels:
@@ -3642,6 +3648,83 @@ def test_stats_mu_is_current_complementarity():
     # by tau^2); mu is the embedded iterate's mean s'y. The defining
     # relation ties them through tau exactly.
     np.testing.assert_allclose(
-        st["mu"] * (m - z) / max(st["tau"], 1e-15) ** 2,
+        st["mu"] * (m - z) / st["tau"] ** 2,
         st["complementarity"], rtol=1e-9, atol=1e-30,
     )
+def test_unbounded_lp_not_reported_solved():
+  """An unbounded LP must never exit SOLVED, even from an adversarial
+  warm start: the kappa < tau gate blocks acceptance once the iterate
+  diverges (mu/tau^2 explodes), regardless of how the iterate norm
+  inflates the relative tolerance scales."""
+  a = sparse.csc_matrix(np.array([[0.0]]))
+  b = np.array([1.0])
+  c = np.array([-1.0])
+  strategies = (qtqp.EquilibrationStrategy.RUIZ,
+                qtqp.EquilibrationStrategy.NONE,
+                qtqp.EquilibrationStrategy.AUGMENTED)
+  for equil in strategies:
+    for warm in (None, (np.array([1e6]), np.array([1e-6]), np.array([1.0]))):
+      sol = qtqp.QTQP(a=a, b=b, c=c, z=0).solve(
+          verbose=False, equilibration_strategy=equil, warm_start=warm,
+      )
+      assert sol.status != qtqp.SolutionStatus.SOLVED, (equil, warm)
+      assert sol.status != qtqp.SolutionStatus.ALMOST_SOLVED, (equil, warm)
+
+
+def test_infeasible_qp_not_solved_via_quadratic_bar():
+  """The dichotomy gate must be the pure-number comp < nu comparison: a
+  tolerance-scaled bar is launderable because QP objective values grow
+  quadratically along a divergence (reviewer repro: an infeasible QP
+  exited SOLVED with comp ~ 2.5e6 against an inflated 5e10 bar)."""
+  a = sparse.csc_matrix(np.array([[0.0]]))
+  b = np.array([-1.0])
+  c = np.array([-1e10])
+  p = sparse.csc_matrix(np.array([[1.0]]))
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=0, p=p).solve(
+      verbose=False,
+      equilibration_strategy=qtqp.EquilibrationStrategy.AUGMENTED,
+      warm_start=(np.array([1e10]), np.array([1e10]), np.array([1e-12])),
+  )
+  assert sol.status != qtqp.SolutionStatus.SOLVED
+  assert sol.status != qtqp.SolutionStatus.ALMOST_SOLVED
+
+
+def test_weak_separation_ray_not_certified():
+  """Round-7 root cause of the physiciansched6-2 false INFEASIBLE: a ray
+  with excellent relative dual residual but separation |b'y| / ||y|| far
+  below its violation level must not be certified - the pure-slope sense
+  requires ||A'y|| <= atol_infeas * |b'y|, with no rtol * ||ray|| slack
+  for the ray's own norm to launder."""
+  m, z = 3, 0
+  a = sparse.csc_matrix(np.eye(3, 2))
+  b = np.array([-0.05, -0.05, 0.0])
+  c = np.zeros(2)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z)
+  solver.atol, solver.rtol = 1e-7, 1e-8
+  solver.atol_infeas, solver.rtol_infeas = 1e-8, 1e-9
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
+  solver._norm_b = np.linalg.norm(b, np.inf)
+  solver._norm_c = 0.0
+  abs_a = abs(solver.a)
+  solver._norm_a_inf = float(abs_a.sum(axis=1).max())
+  solver._norm_a_one = float(abs_a.sum(axis=0).max())
+  solver._norm_p_inf = 0.0
+  solver.it = 0
+  solver.start_time = 0.0
+  # y >= 0 with its mass in null(A') (the b_3 = 0 row): b'y = -1 while
+  # ||y|| = 1e10, so separation per unit norm is 1e-10; ||A'y|| = 10 is
+  # residual-level relative to ||A||*||y|| (1e-9, passes data-scaled) and
+  # sits just under the OLD slope bar 1e-8 + 1e-9 * 1e10 ~ 10.00000001 -
+  # exactly the physiciansched regime. The pure-slope bar is 1e-8 * 1.
+  y = np.array([10.0, 10.0, 1e10])
+  assert float(b @ y) == pytest.approx(-1.0)
+  x = np.zeros(2)
+  s = np.full(m, 1e-9)
+  tau = 1e-9  # certificate side: y's >> nu * tau^2
+  status = solver._check_termination(  # pylint: disable=protected-access
+      x, y, tau, s, alpha=0.5, mu=1.0, sigma=0.5, stats_i={},
+      collect_stats=False,
+  )
+  assert status != qtqp.SolutionStatus.INFEASIBLE, status
+
+
