@@ -422,6 +422,8 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       internal_scaling: str = "all",
+      max_centrality_correctors: int = 0,
+      adaptive_step_size: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -447,6 +449,8 @@ class QTQP:
           collect_stats=collect_stats,
           init_strategy=InitStrategy(init_strategy),
           internal_scaling=internal_scaling,
+          max_centrality_correctors=max_centrality_correctors,
+          adaptive_step_size=adaptive_step_size,
       )
     finally:
       if self._linear_solver is not None:
@@ -473,6 +477,8 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       internal_scaling: str = "all",
+      max_centrality_correctors: int = 0,
+      adaptive_step_size: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -539,6 +545,7 @@ class QTQP:
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
+    assert max_centrality_correctors >= 0
     assert ruiz_iters >= 0
     self.ruiz_iters = int(ruiz_iters)
     if verbose:
@@ -596,6 +603,10 @@ class QTQP:
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
     alpha = sigma = 0.0
+    carry = None  # post-step (a@x, a.T@y, p@x) in equilibrated units
+    inv_d = 1.0 / self.d if self.d is not None else 1.0
+    inv_e = 1.0 / self.e if self.e is not None else 1.0
+    inv_sigma_eq = 1.0 / self.sigma_eq
     # --- Main Iteration Loop ---
     # self.it counts IPM steps already taken.
     for self.it in range(max_iter):
@@ -655,8 +666,16 @@ class QTQP:
       # Path-anchored centering: Mehrotra's affine-quality target with the
       # anchor moved onto mu_comp^(1-g) * mu_resid^g. g = 0 is the Mehrotra
       # anchor; larger g follows the central path more closely.
-      r_x = p @ x + a.T @ y + c * tau
-      r_y = b * tau - a @ x - s
+      if carry is None:
+        r_x = p @ x + a.T @ y + c * tau
+        r_y = b * tau - a @ x - s
+      else:
+        # Reuse last iteration's post-step products: _normalize only rescaled
+        # the iterate by a scalar, so the products rescale by the same scalar.
+        ax_c, aty_c, px_c = carry
+        ns = self._norm_scale
+        r_x = ns * (aty_c if px_c is None else px_c + aty_c) + c * tau
+        r_y = b * tau - ns * ax_c - s
       mu_resid = math.sqrt((r_x @ r_x + r_y @ r_y)
                            / (x @ x + y @ y + tau * tau))
       eps_mu = _EPS * max(mu, 1.0)
@@ -702,7 +721,62 @@ class QTQP:
       ) / y[self.z :]
 
       alpha = self._compute_step_size(y, s, d_y, d_s)
-      step = step_size_scale * alpha
+      # --- Gondzio multiple centrality correctors (port of upstream #81) ---
+      # Each corrector costs one back-solve on the existing factorization:
+      # push the aspirational trial point's outlier complementarity products
+      # back into a symmetric neighborhood of the target, accept only when
+      # the step size improves.
+      correction = -cross_p / y[self.z :]
+      for _ in range(max_centrality_correctors):
+        if alpha >= 0.9:
+          break  # step already good; a corrector cannot pay for itself
+        if corrector_lin_sys_stats.get("tau_method") != "quadratic":
+          break  # tau solve degraded; do not stack correctors on it
+        alpha_asp = min(1.0, 1.5 * alpha + 0.3)
+        v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
+            s[self.z :] + alpha_asp * d_s[self.z :]
+        )
+        target = np.clip(v, 0.1 * mu_target, 10.0 * mu_target)
+        if np.array_equal(target, v):
+          break
+        correction_g = correction + (target - v) / y[self.z :]
+        xy[: self.n] = x_p
+        xy[self.n :] = y_p
+        x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+            p=p,
+            mu=mu,
+            mu_target=mu_target,
+            r_anchor=xy,
+            tau_anchor=tau_p,
+            x=x,
+            y=y,
+            s=s,
+            tau=tau,
+            correction=correction_g,
+        )
+        d_s_g = np.zeros_like(d_s)
+        d_s_g[self.z :] = (
+            mu_target / y[self.z :]
+            + correction_g
+            - y_g[self.z :] * s[self.z :] / y[self.z :]
+        )
+        d_y_g = y_g - y
+        alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
+        if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
+          break
+        stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+        d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
+        d_s[self.z :] = d_s_g[self.z :]
+        correction = correction_g
+        alpha = alpha_g
+
+      scale_eff = step_size_scale
+      if adaptive_step_size and mu < 1e-3:
+        # Endgame fraction-to-boundary schedule (port of upstream #82/#108):
+        # approach 1 as mu -> 0 to unlock the superlinear tail;
+        # step_size_scale is the floor and 0.9999 the strict-interiority cap.
+        scale_eff = min(0.9999, max(step_size_scale, 1.0 - 10.0 * mu))
+      step = scale_eff * alpha
       x += step * d_x
       y += step * d_y
       tau += step * d_tau
@@ -713,8 +787,21 @@ class QTQP:
       s[self.z :] = np.maximum(s[self.z :], 1e-30)
       tau = max(tau, 1e-30)
 
+      # Post-step products, computed once in equilibrated units: consumed by
+      # _check_termination in original units (diagonal rescale) and reused by
+      # the next iteration's mu_resid (scalar rescale through _normalize).
+      ax_eq = a @ x
+      aty_eq = a.T @ y
+      px_eq = p @ x if p.nnz else None
+      carry = (ax_eq, aty_eq, px_eq)
+      products = (
+          inv_sigma_eq * (ax_eq * inv_d),
+          inv_sigma_eq * (aty_eq * inv_e),
+          None if px_eq is None else inv_sigma_eq * (px_eq * inv_e),
+      )
       status = self._check_termination(
-          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
+          x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats,
+          products=products,
       )
       self._log_iteration(stats_i)
       if collect_stats:
@@ -1058,6 +1145,7 @@ class QTQP:
     """
     xyt_norm = math.sqrt(x @ x + y @ y + tau * tau)
     scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
+    self._norm_scale = scale
     x *= scale
     y *= scale
     tau *= scale
@@ -1070,22 +1158,35 @@ class QTQP:
     alpha_y = self._max_step_size(y[self.z :], d_y[self.z :])
     return min(alpha_s, alpha_y)
 
-  def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats):
-    """Check termination criteria and compute iteration statistics."""
+  def _check_termination(self, x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats,
+                         products=None):
+    """Check termination criteria and compute iteration statistics.
+
+    products, when given, holds (a@x, a.T@y, p@x) of the unequilibrated
+    iterate, precomputed by the caller from equilibrated-frame products.
+    """
     if self.ruiz_iters > 0:
       x, y, s = self._unequilibrate_iterates(x, y, s)
 
     inv_tau = 1.0 / max(tau, _EPS)
 
-    # Precompute commonly used matrix-vector products
-    ax = self.a @ x
-    aty = self.a.T @ y
-    if self.p.nnz == 0:
-      px = np.zeros(self.n)
-      xpx = 0.0
+    # Commonly used matrix-vector products
+    if products is not None:
+      ax, aty, px = products
+      if px is None:
+        px = np.zeros(self.n)
+        xpx = 0.0
+      else:
+        xpx = x @ px
     else:
-      px = self.p @ x
-      xpx = x @ px
+      ax = self.a @ x
+      aty = self.a.T @ y
+      if self.p.nnz == 0:
+        px = np.zeros(self.n)
+        xpx = 0.0
+      else:
+        px = self.p @ x
+        xpx = x @ px
     ctx = self.c @ x
     bty = self.b @ y
 
@@ -1119,6 +1220,9 @@ class QTQP:
     # pinfeas measures how well y/|b'y| certifies primal infeasibility.
     pinfeas = norm_aty / (descent_p + _EPS)
 
+    norm_x = _norm(x, np.inf)
+    norm_y = _norm(y, np.inf)
+
     # Primal residual tolerance relative scale.
     prelrhs = max(
         _norm(ax, np.inf) * inv_tau,
@@ -1132,9 +1236,6 @@ class QTQP:
         norm_aty * inv_tau,
         self._norm_c,
     )
-
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
 
     # Solved: duality gap and both residuals are within tolerance.
     if (

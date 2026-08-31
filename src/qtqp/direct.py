@@ -239,6 +239,7 @@ class DirectKktSolver:
       self._at_rows = cols[mask] - self.n
       self._at_vals0 = self._kkt.data[self._at_idxs].copy()
       self._d_scale = np.ones(self.m)
+      self._d_identity = True  # scaffold holds the original A values
       self._n_scaled = 0
       self._p_diag_min = float(self._p_diags.min()) if self.n else 0.0
 
@@ -278,8 +279,12 @@ class DirectKktSolver:
         d[small] = 1.0 / np.sqrt(t[small])
         t[small] = 1.0
         self._n_scaled = int(np.count_nonzero(small))
-      self._kkt.data[self._at_idxs] = self._at_vals0 * d[self._at_rows]
-      self._solver.sync_values()
+      # Skip the O(nnz) A-block rewrite while d stays at identity (the
+      # scaffold already holds the original values).
+      if self._n_scaled or not self._d_identity:
+        self._kkt.data[self._at_idxs] = self._at_vals0 * d[self._at_rows]
+        self._solver.sync_values()
+      self._d_identity = self._n_scaled == 0
       self._d_scale = d
 
     # "Regularized" diagonals for stable factorization.
