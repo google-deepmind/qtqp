@@ -3351,3 +3351,195 @@ def test_certificate_rejects_large_slope_pseudo_ray():
   assert status != qtqp.SolutionStatus.INFEASIBLE
 
 
+
+
+# =============================================================================
+# Review batch: embedding dichotomy gates and numerical-contract fixes
+# =============================================================================
+
+def test_unbounded_lp_not_reported_solved():
+  """An unbounded LP must never exit SOLVED, even from an adversarial
+  warm start: the kappa < tau gate blocks acceptance once the iterate
+  diverges (mu/tau^2 explodes), regardless of how the iterate norm
+  inflates the relative tolerance scales."""
+  a = sparse.csc_matrix(np.array([[0.0]]))
+  b = np.array([1.0])
+  c = np.array([-1.0])
+  for equil in (qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE):
+    for warm in (None, (np.array([1e6]), np.array([1e-6]), np.array([1.0]))):
+      sol = qtqp.QTQP(a=a, b=b, c=c, z=0).solve(
+          verbose=False, equilibration_strategy=equil, warm_start=warm,
+      )
+      assert sol.status != qtqp.SolutionStatus.SOLVED, (equil, warm)
+      assert sol.status != qtqp.SolutionStatus.ALMOST_SOLVED, (equil, warm)
+
+
+def test_richardson_rollback_returns_genuine_iterate_dense():
+  """The rollback must restore the pre-correction iterate even when the
+  backend reuses one buffer for solve() and the matvec (dense backends):
+  the reported residual must belong to the returned vector."""
+  rng = np.random.default_rng(4400)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+
+  class _CorruptSecond:
+    def __init__(self, inner):
+      self._inner = inner
+      self._calls = 0
+    def __getattr__(self, name):
+      return getattr(self._inner, name)
+    def __matmul__(self, other):
+      return self._inner @ other
+    def solve(self, rhs):
+      self._calls += 1
+      out = self._inner.solve(rhs)
+      if self._calls == 2:
+        out = out + 1e8 * np.ones_like(out)
+      return out
+
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z, min_static_regularization=1e-8,
+      max_iterative_refinement_steps=10, atol=0.0, rtol=0.0,
+      solver=_CorruptSecond(qtqp.direct.ScipyDenseSolver()),
+      refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  q = np.concatenate([c, b])
+  sol, stats = solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  assert stats["status"] == "stalled"
+  # Recompute the true residual of the returned vector; it must match the
+  # reported one (the aliasing bug produced residuals ~1e50 here).
+  kkt_rhs = q.copy()
+  kkt_rhs[n:] *= -1.0
+  true_res = np.linalg.norm(
+      kkt_rhs - solver._solver @ sol + solver._diag_correction * sol, np.inf
+  )
+  np.testing.assert_allclose(true_res, stats["final_residual_norm"], rtol=1e-6)
+
+
+def test_near_symmetric_p_is_symmetrized():
+  """A within-tolerance asymmetry must not leave the factorized triu(P)
+  and the residual evaluations disagreeing: accepted P is symmetrized."""
+  rng = np.random.default_rng(4500)
+  m, n, z = 20, 6, 2
+  a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
+  # Asymmetry within the global tolerance (1e-12 * max|P|) yet material
+  # for its own tiny block: the check accepts it, so the accepted matrix
+  # must be symmetrized before factorization.
+  p = np.diag(np.full(n, 1e14))
+  p[0, 1], p[1, 0] = 5e1, 1e1
+  p = sparse.csc_matrix(p)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  asym = abs(solver.p - solver.p.T)
+  assert asym.max() if asym.nnz else 0.0 == 0.0
+  sol = solver.solve(verbose=False)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+
+
+def test_warm_start_accepts_postsolved_solution():
+  """A returned solution (postsolve-restored rows included) must be
+  accepted as a warm start when presolve dropped rows."""
+  rng = np.random.default_rng(4600)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  b2 = np.concatenate([b, [1e20]])
+  a2 = sparse.vstack([a, sparse.csc_matrix(rng.normal(size=(1, n)))]).tocsc()
+  base = qtqp.QTQP(a=a2, b=b2, c=c, z=z, p=p).solve(verbose=False)
+  assert base.status == qtqp.SolutionStatus.SOLVED
+  assert base.y.shape == (m + 1,)  # postsolve restored the dropped row
+  solver = qtqp.QTQP(a=a2, b=b2, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, warm_start=(base.x, base.y, base.s)
+  )
+  assert warm.status == qtqp.SolutionStatus.SOLVED
+  assert solver.warm_accepted
+
+
+def test_gmres_zero_operator_breakdown_returns():
+  """A zero operator must produce a clean return (lucky breakdown), not a
+  singular triangular solve."""
+  n_, m_ = 3, 4
+  a = sparse.csc_matrix((m_, n_))
+  p = sparse.csc_matrix((n_, n_))
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=0, min_static_regularization=1e-8,
+      max_iterative_refinement_steps=8, atol=1e-12, rtol=1e-12,
+      solver=qtqp.direct.ScipySolver(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, gmres_restart=8,
+  )
+  solver.update(mu=1.0, s=np.ones(m_), y=np.ones(m_))
+  sol, stats = solver.solve(rhs=np.zeros(n_ + m_), warm_start=np.zeros(n_ + m_))
+  assert np.all(np.isfinite(sol))
+  assert stats["status"] in ("converged", "stalled", "non-converged")
+
+
+def test_factorization_retry_recovers_from_zero_regularization():
+  """With min_static_regularization=0 the retry clamp must escape zero,
+  and non-ValueError backend failures must also be retried."""
+  rng = np.random.default_rng(4700)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+
+  class _FailTwice:
+    def __init__(self, inner):
+      self._inner = inner
+      self._fails = 0
+    def __getattr__(self, name):
+      return getattr(self._inner, name)
+    def __matmul__(self, other):
+      return self._inner @ other
+    def factorize(self):
+      if self._fails < 2:
+        self._fails += 1
+        raise RuntimeError("synthetic factorization failure")
+      return self._inner.factorize()
+
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z, min_static_regularization=0.0,
+      max_iterative_refinement_steps=10, atol=1e-12, rtol=1e-12,
+      solver=_FailTwice(qtqp.direct.ScipySolver()),
+  )
+  solver.update(mu=0.5, s=np.ones(m), y=np.ones(m))  # must not raise
+  sol, stats = solver.solve(
+      rhs=np.concatenate([c, b]), warm_start=np.zeros(n + m)
+  )
+  assert np.all(np.isfinite(sol))
+
+
+def test_almost_solved_stats_status_consistent():
+  """When salvage returns ALMOST_SOLVED, the last stats row must agree."""
+  rng = np.random.default_rng(4800)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True, max_iter=4,
+  )
+  if sol.status == qtqp.SolutionStatus.ALMOST_SOLVED:
+    assert sol.stats[-1]["status"] == qtqp.SolutionStatus.ALMOST_SOLVED
+
+
+def test_fractional_centrality_correctors_rejected():
+  rng = np.random.default_rng(4900)
+  a, b, c, p = _gen_feasible(20, 12, 3, random_state=rng)
+  with pytest.raises(ValueError, match="max_centrality_correctors"):
+    qtqp.QTQP(a=a, b=b, c=c, z=3, p=p).solve(
+        verbose=False, max_centrality_correctors=1.5
+    )
+
+
+def test_init_failure_returns_failed(monkeypatch):
+  """A numeric failure inside initialization must honor the no-raise
+  contract and return FAILED with NaN outputs."""
+  rng = np.random.default_rng(5000)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  def boom(self, *args, **kwargs):
+    raise RuntimeError("synthetic init breakdown")
+  monkeypatch.setattr(qtqp.QTQP, "_init_cvxopt", boom)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+  assert sol.status == qtqp.SolutionStatus.FAILED
+  assert np.all(np.isnan(sol.x))

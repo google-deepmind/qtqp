@@ -313,7 +313,12 @@ class QTQP:
           and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12 * p_scale
       ):
         raise ValueError("QP matrix 'p' must be symmetric.")
-      self.p = p
+      # Symmetrize the accepted matrix so the factorized triu(P) and the
+      # residual evaluations see the same operator: a within-tolerance
+      # asymmetry concentrated in one block otherwise makes the KKT system
+      # and the termination test disagree. Exactly symmetric inputs are
+      # unchanged (0.5*(a + a) == a in IEEE arithmetic).
+      self.p = ((p + p.T) * 0.5).tocsc()
 
     # Defaults so _check_termination works in tests that call it directly
     # before solve() has initialized the tracking state.
@@ -323,6 +328,10 @@ class QTQP:
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
+
+    Contract: inequality RHS entries at or above 1e20 are treated as
+    +infinity, per the common dataset convention. Encoding a real finite
+    constraint with b[i] >= 1e20 (e.g. a 1e20-scaled row) is a user error.
     """
     self._presolve_state = None
     if not np.all(np.isfinite(self.b[: self.z])):
@@ -691,8 +700,12 @@ class QTQP:
     assert linear_solver_atol >= 0
     assert linear_solver_rtol >= 0
     self._adaptive_step_size = bool(adaptive_step_size)
-    if max_centrality_correctors < 0:
-      raise ValueError("max_centrality_correctors must be >= 0.")
+    if (max_centrality_correctors < 0
+        or max_centrality_correctors != int(max_centrality_correctors)):
+      raise ValueError(
+          "max_centrality_correctors must be a nonnegative integer, got"
+          f" {max_centrality_correctors!r}."
+      )
     self._max_centrality_correctors = int(max_centrality_correctors)
 
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
@@ -756,7 +769,19 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, _ = self._init_variables(a, p, b, c)
+    try:
+      x, y, s, tau, _ = self._init_variables(a, p, b, c)
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError, RuntimeError):
+      # Initialization KKT failures are numeric breakdowns, not user
+      # errors: honor the documented no-raise contract with a FAILED
+      # solution (no iterates exist yet to salvage).
+      logging.exception("Initialization failed; returning FAILED.")
+      nan_y, nan_s = self._postsolve(
+          np.full(self.m, np.nan), np.full(self.m, np.nan), s_dropped=np.nan
+      )
+      return Solution(
+          np.full(self.n, np.nan), nan_y, nan_s, [], SolutionStatus.FAILED
+      )
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
@@ -776,12 +801,25 @@ class QTQP:
             f" {warm_start_threshold}"
         )
       wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
+      ps = self._presolve_state
+      full_m = self.m + (len(ps.b_dropped) if ps is not None else 0)
+      if (ps is not None and wx.shape == (self.n,)
+          and wy.shape == (full_m,) and ws.shape == (full_m,)):
+        # Full-size vectors (e.g. a previous Solution after postsolve
+        # restored the presolve-dropped rows): slice back to the reduced
+        # internal problem.
+        wy, ws = wy[ps.keep], ws[ps.keep]
       if wx.shape != (self.n,) or wy.shape != (self.m,) or ws.shape != (self.m,):
         raise ValueError(
             "warm_start must be (x, y, s) with shapes"
-            f" ({self.n},), ({self.m},), ({self.m},); got"
-            f" {wx.shape}, {wy.shape}, {ws.shape}"
+            f" ({self.n},), ({self.m},), ({self.m},)"
+            + (f" or ({self.n},), ({full_m},), ({full_m},)"
+               if full_m != self.m else "")
+            + f"; got {wx.shape}, {wy.shape}, {ws.shape}"
         )
+      if not (np.all(np.isfinite(wx)) and np.all(np.isfinite(wy))
+              and np.all(np.isfinite(ws))):
+        raise ValueError("warm_start arrays must be finite.")
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
         wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
       best = (math.inf, None)
@@ -932,10 +970,11 @@ class QTQP:
         # point's outlier complementarity products back into a symmetric
         # neighborhood of the target, accept only if the step size improves.
         mu_c = sigma * mu
+        latest_tau_method = corrector_lin_sys_stats.get("tau_method")
         for _ in range(self._max_centrality_correctors):
           if alpha >= 0.9:
             break  # step already good; a corrector cannot pay for itself
-          if corrector_lin_sys_stats.get("tau_method") != "quadratic":
+          if latest_tau_method != "quadratic":
             break  # tau solve degraded; do not stack correctors on it
           alpha_asp = min(1.0, 1.5 * alpha + 0.3)
           v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
@@ -960,16 +999,19 @@ class QTQP:
               correction=correction_g,
           )
           d_s_g = np.zeros_like(d_s)
+          # Combined-numerator form, matching the primary corrector: the
+          # three-division expression reintroduces exactly the cancellation
+          # the fused corrector exists to avoid, on the difficult steps
+          # where Gondzio correctors fire.
           d_s_g[self.z :] = (
-              mu_c / y[self.z :]
-              + correction_g
-              - y_g[self.z :] * s[self.z :] / y[self.z :]
-          )
+              mu_c - cross_p + (target - v) - y_g[self.z :] * s[self.z :]
+          ) / y[self.z :]
           d_y_g = y_g - y
           alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
           if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
             break
           stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+          latest_tau_method = gondzio_lin_sys_stats.get("tau_method")
           d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
           d_s = d_s_g
           correction = correction_g
@@ -1012,7 +1054,8 @@ class QTQP:
         if collect_stats:
           stats[-1]["status"] = status
 
-    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError,
+            RuntimeError) as exc:
       logging.warning("Numeric failure at iteration %d: %s", self.it, exc)
       status = SolutionStatus.UNFINISHED
       if collect_stats and stats:
@@ -1055,6 +1098,8 @@ class QTQP:
           self._log_footer("Almost solved (best iterate salvage)")
           bx, by, bs = bx / btau, by / btau, bs / btau
           by, bs = self._postsolve(by, bs, s_dropped=self._dropped_slack(bx))
+          if stats:
+            stats[-1]["status"] = SolutionStatus.ALMOST_SOLVED
           return Solution(bx, by, bs, stats, SolutionStatus.ALMOST_SOLVED)
         if status is SolutionStatus.HIT_MAX_ITER:
           self._log_footer("Hit maximum iterations")
@@ -1553,10 +1598,13 @@ class QTQP:
     norm_aty = _norm(aty, np.inf)
     norm_px = _norm(px, np.inf)
     norm_ax_plus_s = _norm(ax_plus_s, np.inf)
-    dinfeas_a = norm_ax_plus_s / (self._norm_a_inf * norm_x + _EPS)
-    dinfeas_p = norm_px / (self._norm_p_inf * norm_x + _EPS)
+    # A zero operator norm means the corresponding homogeneous condition
+    # is judged per unit ray (any violation is absolute): fall back to a
+    # unit scale instead of letting the epsilon denominator veto exact rays.
+    dinfeas_a = norm_ax_plus_s / ((self._norm_a_inf or 1.0) * norm_x + _EPS)
+    dinfeas_p = norm_px / ((self._norm_p_inf or 1.0) * norm_x + _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
-    pinfeas = norm_aty / (self._norm_a_one * norm_y + _EPS)
+    pinfeas = norm_aty / ((self._norm_a_one or 1.0) * norm_y + _EPS)
 
     # Residual tolerance relative scales. Each is the max of two families:
     # the summand norms (the floor below which the residual cannot even be
@@ -1588,9 +1636,21 @@ class QTQP:
         (norm_x + norm_y) * inv_tau,
     )
 
+    # Embedding dichotomy gate: at the limit, tau > 0, kappa = 0 is a
+    # solution and tau = 0, kappa > 0 is a certificate; kappa = mu/tau, so
+    # kappa < tau (mu < tau^2) demands the iterate be on the solution side
+    # before residual arithmetic gets a say, and kappa > tau the certificate
+    # side. This closes the acceptance laundering where a diverging
+    # iterate's own norm inflates the relative tolerance scales until an
+    # unbounded or infeasible problem exits SOLVED (and, symmetrically,
+    # gives false certificates a second structural guard).
+    on_solution_side = mu_hat < tau * tau
+    on_certificate_side = mu_hat > tau * tau
+
     # Solved: duality gap and both residuals are within tolerance.
     if (
-        gap < self.atol + self.rtol * gaprelrhs
+        on_solution_side
+        and gap < self.atol + self.rtol * gaprelrhs
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
@@ -1610,14 +1670,16 @@ class QTQP:
     # data-scaled denominator vanishes while the numerator retains the
     # O(1) slack s, so dinfeas diverges and nothing is certified.
     elif (
-        ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
+        on_certificate_side
+        and ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
         and dinfeas < self.atol_infeas
         and max(norm_ax_plus_s, norm_px)
         < self.atol_infeas * abs(ctx) + self.rtol_infeas * norm_x
     ):
       status = SolutionStatus.UNBOUNDED
     elif (
-        bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
+        on_certificate_side
+        and bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
         and pinfeas < self.atol_infeas
         and norm_aty < self.atol_infeas * abs(bty) + self.rtol_infeas * norm_y
     ):
@@ -1636,7 +1698,7 @@ class QTQP:
         pres / (almost_atol + almost_rtol * prelrhs),
         dres / (almost_atol + almost_rtol * drelrhs),
     )
-    if almost_score < self._best_almost_score:
+    if on_solution_side and almost_score < self._best_almost_score:
       self._best_almost_score = almost_score
       self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 

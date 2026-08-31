@@ -276,10 +276,12 @@ class DirectKktSolver:
       try:
         self._solver.factorize()
         break
-      except ValueError:
+      except (ValueError, RuntimeError, np.linalg.LinAlgError):
         if attempt == 2:
           raise
-        clamp *= 1e4
+        # A permitted zero regularization would stay zero under pure
+        # scaling; jump to a sane floor so the retry is effective.
+        clamp = clamp * 1e4 if clamp > 0.0 else 1e-8
         logging.debug(
             "Factorization breakdown; retrying with clamp %.1e", clamp
         )
@@ -373,15 +375,21 @@ class DirectKktSolver:
     status, solves = "non-converged", 0
     # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
-      # Perform correction step using the linear system solver.
+      # Perform correction step using the linear system solver. The update
+      # rebinds rather than mutates so sol_prev snapshots the pre-step
+      # iterate: backends are allowed to return (and reuse) an internal
+      # buffer for both solve() and the @ matvec, so the correction array
+      # itself is NOT stable across the residual evaluation below and must
+      # never be used for rollback.
       old_residual_norm = residual_norm
-      correction = self._solver.solve(residual)
-      sol += correction
+      sol_prev = sol
+      sol = sol + self._solver.solve(residual)
       residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
-      # Check for convergence.
-      if residual_norm < tolerance:
+      # Check for convergence (<= so an exact zero residual converges even
+      # under zero tolerances instead of being labeled stalled).
+      if residual_norm <= tolerance:
         status = "converged"
         break
 
@@ -405,7 +413,7 @@ class DirectKktSolver:
         # that regime and are calibrated to the legacy behavior, and the
         # two iterates are numerically equivalent there anyway.
         if residual_norm > _STALL_ROLLBACK_FACTOR * old_residual_norm:
-          sol -= correction
+          sol = sol_prev
           residual_norm = old_residual_norm
         status = "stalled"
         break
@@ -587,12 +595,14 @@ class DirectKktSolver:
       # New Givens rotation to zero out h[j+1, j].
       rho = float(np.hypot(h[j, j], h[j + 1, j]))
       if rho == 0.0:
-        # Breakdown with a zero pivot: both entries vanish, so the
-        # rotation is arbitrary; the identity keeps everything finite.
-        cs[j], sn[j] = 1.0, 0.0
-      else:
-        cs[j] = h[j, j] / rho
-        sn[j] = h[j + 1, j] / rho
+        # Zero pivot: the new column contributes nothing the least-squares
+        # solve can use, and keeping it would make the triangular solve
+        # singular. Exit the cycle with the columns accumulated so far
+        # (possibly none) - a lucky/structural breakdown, not an error.
+        j_done = j
+        break
+      cs[j] = h[j, j] / rho
+      sn[j] = h[j + 1, j] / rho
       h[j, j] = rho
       h[j + 1, j] = 0.0
 
@@ -609,8 +619,9 @@ class DirectKktSolver:
     # sol += M^{-1}(V.T @ y), but consumes no additional factor-solve at
     # cycle exit -- which keeps each cycle's apply count equal to the
     # number of Arnoldi steps performed.
-    y = solve_triangular(h[:j_done, :j_done], g[:j_done])
-    sol += z[:j_done].T @ y
+    if j_done:
+      y = solve_triangular(h[:j_done, :j_done], g[:j_done])
+      sol += z[:j_done].T @ y
     return j_done
 
   def free(self):

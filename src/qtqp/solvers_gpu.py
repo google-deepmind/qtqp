@@ -62,7 +62,6 @@ class CuDssSolver(LinearSolver):
     self._cp.copyto(self._kkt_diag_gpu, diag_gpu)
 
   def factorize(self):
-    cp = self._cp
     if self._solver is None:
       sparse_system_type = (
           self.nvmath.sparse.advanced.DirectSolverMatrixType.SYMMETRIC
@@ -79,8 +78,8 @@ class CuDssSolver(LinearSolver):
           logger=logger,
       )
       n = self._kkt_gpu.shape[1]
-      self._x_gpu = cp.empty(n, dtype=cp.float64)
-      self._rhs_gpu = cp.empty(n, order="F", dtype=cp.float64)
+      self._x_gpu = self._cp.empty(n, dtype=self._cp.float64)
+      self._rhs_gpu = self._cp.empty(n, order="F", dtype=self._cp.float64)
       self._solver = self.nvmath.sparse.advanced.DirectSolver(
           self._kkt_gpu, self._rhs_gpu, options=options
       )
@@ -133,86 +132,80 @@ class CupyDenseSolver(LinearSolver):
     self._m = 0
 
   def set_dims(self, n: int, m: int, z: int) -> None:
-    cp = self._cp
     self._n = n
     self._m = m
     self._A_gpu = None
     self._P_offdiag_gpu = None
-    self._R_x_gpu = cp.empty(n, dtype=cp.float64)
-    self._R_y_gpu = cp.empty(m, dtype=cp.float64)
-    self._inv_R_y_gpu = cp.empty(m, dtype=cp.float64)
-    self._inv_sqrt_R_y_gpu = cp.empty(m, dtype=cp.float64)
-    self._G_gpu = cp.empty((n, n), dtype=cp.float64)
-    self._diag_idx = cp.arange(n)
-    self._result_gpu = cp.empty(n + m, dtype=cp.float64)
-    self._x_gpu = cp.empty(n + m, dtype=cp.float64)
-    self._rhs_gpu = cp.empty(n + m, dtype=cp.float64)
-    self._g_gpu = cp.empty(n, dtype=cp.float64)
+    self._R_x_gpu = self._cp.empty(n, dtype=self._cp.float64)
+    self._R_y_gpu = self._cp.empty(m, dtype=self._cp.float64)
+    self._inv_R_y_gpu = self._cp.empty(m, dtype=self._cp.float64)
+    self._inv_sqrt_R_y_gpu = self._cp.empty(m, dtype=self._cp.float64)
+    self._G_gpu = self._cp.empty((n, n), dtype=self._cp.float64)
+    self._diag_idx = self._cp.arange(n)
+    self._result_gpu = self._cp.empty(n + m, dtype=self._cp.float64)
+    self._x_gpu = self._cp.empty(n + m, dtype=self._cp.float64)
+    self._rhs_gpu = self._cp.empty(n + m, dtype=self._cp.float64)
+    self._g_gpu = self._cp.empty(n, dtype=self._cp.float64)
     self._L = None  # Lower-triangular Cholesky factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
-    cp = self._cp
     n = self._n
     kkt_dense = kkt.toarray()
-    self._A_gpu = cp.asarray(kkt_dense[:n, n:].T, dtype=cp.float64)
+    self._A_gpu = self._cp.asarray(kkt_dense[:n, n:].T, dtype=self._cp.float64)
     P_block = kkt_dense[:n, :n]
     P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
-    self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
+    self._P_offdiag_gpu = self._cp.asarray(P_block, dtype=self._cp.float64)
 
   def update_diag(self, diag: np.ndarray) -> None:
-    cp = self._cp
     self._R_x_gpu.set(diag[:self._n])
     self._R_y_gpu.set(-diag[self._n:])
-    cp.divide(1.0, self._R_y_gpu, out=self._inv_R_y_gpu)
-    cp.sqrt(self._inv_R_y_gpu, out=self._inv_sqrt_R_y_gpu)
+    self._cp.divide(1.0, self._R_y_gpu, out=self._inv_R_y_gpu)
+    self._cp.sqrt(self._inv_R_y_gpu, out=self._inv_sqrt_R_y_gpu)
 
   def factorize(self) -> None:
-    cp = self._cp
     idx = self._diag_idx
-    cp.copyto(self._G_gpu, self._P_offdiag_gpu)
+    self._cp.copyto(self._G_gpu, self._P_offdiag_gpu)
     self._G_gpu[idx, idx] += self._R_x_gpu
     A_scaled = self._A_gpu * self._inv_sqrt_R_y_gpu[:, None]
     self._G_gpu += A_scaled.T @ A_scaled
     # Same numerical perturbation as ScipyDenseSolver.factorize.
-    self._G_gpu[idx, idx] += 1e-14 * cp.max(self._G_gpu[idx, idx])
-    self._L = cp.linalg.cholesky(self._G_gpu)
+    self._G_gpu[idx, idx] += 1e-14 * self._cp.max(self._G_gpu[idx, idx])
+    self._L = self._cp.linalg.cholesky(self._G_gpu)
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     """Note: `x` must not alias the returned buffer."""
-    cp = self._cp
     n = self._n
     self._x_gpu.set(x)
     x_x, x_y = self._x_gpu[:n], self._x_gpu[n:]
     result = self._result_gpu
-    cp.dot(self._P_offdiag_gpu, x_x, out=result[:n])
-    cp.multiply(self._R_x_gpu, x_x, out=self._g_gpu)
+    self._cp.dot(self._P_offdiag_gpu, x_x, out=result[:n])
+    self._cp.multiply(self._R_x_gpu, x_x, out=self._g_gpu)
     result[:n] += self._g_gpu
-    cp.dot(self._A_gpu.T, x_y, out=self._g_gpu)
+    self._cp.dot(self._A_gpu.T, x_y, out=self._g_gpu)
     result[:n] += self._g_gpu
-    cp.dot(self._A_gpu, x_x, out=result[n:])
+    self._cp.dot(self._A_gpu, x_x, out=result[n:])
     result[n:] -= self._R_y_gpu * x_y
-    return cp.asnumpy(result)
+    return self._cp.asnumpy(result)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
     """Note: `rhs` must not alias the returned buffer."""
-    cp = self._cp
     n = self._n
     self._rhs_gpu.set(rhs)
     inv_R_y = self._inv_R_y_gpu
-    cp.multiply(inv_R_y, self._rhs_gpu[n:], out=self._result_gpu[n:])
-    cp.dot(self._A_gpu.T, self._result_gpu[n:], out=self._g_gpu)
+    self._cp.multiply(inv_R_y, self._rhs_gpu[n:], out=self._result_gpu[n:])
+    self._cp.dot(self._A_gpu.T, self._result_gpu[n:], out=self._g_gpu)
     self._g_gpu += self._rhs_gpu[:n]
     # Solve L L' x = g via triangular solves.
     x = self._cupyx_linalg.solve_triangular(self._L, self._g_gpu, lower=True)
     x = self._cupyx_linalg.solve_triangular(self._L, x, lower=True, trans='C')
     result = self._result_gpu
     result[:n] = x
-    cp.dot(self._A_gpu, x, out=result[n:])
+    self._cp.dot(self._A_gpu, x, out=result[n:])
     result[n:] -= self._rhs_gpu[n:]
     result[n:] *= inv_R_y
-    return cp.asnumpy(result)
+    return self._cp.asnumpy(result)
 
   def format(self) -> Literal["csr"]:
     return "csr"
