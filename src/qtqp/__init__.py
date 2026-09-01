@@ -424,6 +424,7 @@ class QTQP:
       internal_scaling: str = "all",
       max_centrality_correctors: int = 0,
       adaptive_step_size: bool = False,
+      mcc_freeze_aspiration: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -451,6 +452,7 @@ class QTQP:
           internal_scaling=internal_scaling,
           max_centrality_correctors=max_centrality_correctors,
           adaptive_step_size=adaptive_step_size,
+          mcc_freeze_aspiration=mcc_freeze_aspiration,
       )
     finally:
       if self._linear_solver is not None:
@@ -479,6 +481,7 @@ class QTQP:
       internal_scaling: str = "all",
       max_centrality_correctors: int = 0,
       adaptive_step_size: bool = False,
+      mcc_freeze_aspiration: bool = False,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
@@ -615,14 +618,20 @@ class QTQP:
 
       mu = (y @ s) / (self.m - self.z)
       # --- Take an IPM step ---
+      _t0 = timeit.default_timer()
       self._linear_solver.update(mu=mu, s=s, y=y)
+      t_factor = timeit.default_timer() - _t0
 
       # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
       # This is reused for both predictor and corrector parts of the step.
+      _t0 = timeit.default_timer()
       self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
           rhs=self.q, warm_start=self.kinv_q
       )
+      t_backsolve = timeit.default_timer() - _t0
       stats_i["q_lin_sys_stats"] = q_lin_sys_stats
+      stats_i["t_factor"] = t_factor
+      stats_i["t_backsolve"] = t_backsolve
       if q_lin_sys_stats["status"] == "breakdown":
         break
 
@@ -727,12 +736,22 @@ class QTQP:
       # back into a symmetric neighborhood of the target, accept only when
       # the step size improves.
       correction = -cross_p / y[self.z :]
+      stats_i["num_centrality_correctors"] = 0
+      # Rule B: anchor the aspiration once per iteration so stacked
+      # correctors chase a fixed target rather than an escalating one.
+      alpha_asp_frozen = min(1.0, 1.5 * alpha + 0.3)
       for _ in range(max_centrality_correctors):
         if alpha >= 0.9:
           break  # step already good; a corrector cannot pay for itself
+        if mcc_freeze_aspiration and alpha >= alpha_asp_frozen:
+          break  # the per-iteration aspiration has been achieved
         if corrector_lin_sys_stats.get("tau_method") != "quadratic":
           break  # tau solve degraded; do not stack correctors on it
-        alpha_asp = min(1.0, 1.5 * alpha + 0.3)
+        alpha_asp = (
+            alpha_asp_frozen
+            if mcc_freeze_aspiration
+            else min(1.0, 1.5 * alpha + 0.3)
+        )
         v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
             s[self.z :] + alpha_asp * d_s[self.z :]
         )
@@ -765,6 +784,7 @@ class QTQP:
         if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
           break
         stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+        stats_i["num_centrality_correctors"] += 1
         d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
         d_s[self.z :] = d_s_g[self.z :]
         correction = correction_g
