@@ -422,9 +422,9 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       internal_scaling: str = "all",
-      max_centrality_correctors: int = 0,
-      adaptive_step_size: bool = False,
-      mcc_freeze_aspiration: bool = False,
+      max_centrality_correctors: int = 4,
+      adaptive_step_size: bool = True,
+      mcc_freeze_aspiration: bool = True,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
@@ -479,9 +479,9 @@ class QTQP:
       collect_stats: bool = False,
       init_strategy: InitStrategy = InitStrategy.BALANCED,
       internal_scaling: str = "all",
-      max_centrality_correctors: int = 0,
-      adaptive_step_size: bool = False,
-      mcc_freeze_aspiration: bool = False,
+      max_centrality_correctors: int = 4,
+      adaptive_step_size: bool = True,
+      mcc_freeze_aspiration: bool = True,
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method.
 
