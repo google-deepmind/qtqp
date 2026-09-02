@@ -263,26 +263,14 @@ class DirectKktSolver:
     self._true_diags[self.n :] = -np.abs(self._true_diags[self.n :])
     self._true_diags[: self.n] = np.abs(self._true_diags[: self.n])
 
-    # Inject regularized diagonals and factorize; on a factorization
-    # breakdown at extreme conditioning, retry with a boosted clamp.
-    # Iterative refinement applies diag_correction against the TRUE
-    # diagonals, so a larger clamp costs refinement steps, never
+    # Inject regularized diagonals (clamped to min_static_regularization)
+    # and factorize. Iterative refinement applies diag_correction against
+    # the TRUE diagonals, so the clamp costs refinement steps, never
     # accuracy - the refined solution still solves the true system.
-    clamp = self.min_static_regularization
-    for attempt in range(3):
-      np.maximum(abs_true, clamp, out=self._reg_diags)
-      self._reg_diags[self.n :] *= -1.0
-      self._solver.update_diag(self._reg_diags)
-      try:
-        self._solver.factorize()
-        break
-      except ValueError:
-        if attempt == 2:
-          raise
-        clamp *= 1e4
-        logging.debug(
-            "Factorization breakdown; retrying with clamp %.1e", clamp
-        )
+    np.maximum(abs_true, self.min_static_regularization, out=self._reg_diags)
+    self._reg_diags[self.n :] *= -1.0
+    self._solver.update_diag(self._reg_diags)
+    self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
   def update_unit_dual(self, primal_shift: float) -> None:
