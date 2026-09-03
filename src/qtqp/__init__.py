@@ -465,9 +465,10 @@ class QTQP:
 
     With no inequality rows there are no complementarity pairs, so the
     interior-point iteration reduces to this single saddle-point system.
-    The result is graded with the main loop's summand-anchored residual
-    scales (tau = 1, s = 0) and returns SOLVED, ALMOST_SOLVED, or FAILED;
-    a singular system (inconsistent or unbounded) is reported as FAILED.
+    The result is graded with the main loop's termination tests (Clarabel's
+    residual and gap criteria, at tau = 1, s = 0) and returns SOLVED,
+    ALMOST_SOLVED, or FAILED; a singular system (inconsistent or unbounded)
+    is reported as FAILED.
     """
     self.warm_lambda = None
     self.warm_accepted = False
@@ -515,14 +516,16 @@ class QTQP:
     drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
     res_primal = pres / prelrhs
     res_dual = dres / drelrhs
+    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
 
-    def _meets(tol):
-      return res_primal < tol and res_dual < tol
+    def _meets(tol_feas, tol_gap_abs, tol_gap_rel):
+      return (res_primal < tol_feas and res_dual < tol_feas
+              and (gap < tol_gap_abs or gap_rel < tol_gap_rel))
 
-    if _meets(self.tol_feas):
+    if _meets(self.tol_feas, self.tol_gap_abs, self.tol_gap_rel):
       status = SolutionStatus.SOLVED
       self._log_footer("Solved (equality-only direct solve)")
-    elif _meets(_REDUCED_TOL_FEAS):
+    elif _meets(_REDUCED_TOL_FEAS, _REDUCED_TOL_GAP_ABS, _REDUCED_TOL_GAP_REL):
       status = SolutionStatus.ALMOST_SOLVED
       self._log_footer("Almost solved (equality-only direct solve)")
     else:
@@ -536,7 +539,7 @@ class QTQP:
       stats.append({
           "iter": 0, "pres": pres, "dres": dres, "gap": gap,
           "res_primal": res_primal, "res_dual": res_dual,
-          "gap_rel": gap / max(1.0, min(abs(pcost), abs(dcost))),
+          "gap_rel": gap_rel,
           "ktratio": 0.0,
           "pcost": pcost, "dcost": dcost, "status": status,
           "mu": 0.0, "complementarity": 0.0, "tau": 1.0,

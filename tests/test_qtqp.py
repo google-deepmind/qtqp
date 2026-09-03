@@ -3745,6 +3745,23 @@ def test_equality_only_stats_schema_matches_main_loop():
   assert not missing, f"equality stats row missing {missing}"
 
 
+def test_equality_only_direct_path_tests_the_gap():
+  """The direct path applies the same gap predicate as the iterative path:
+  with zero gap tolerances a direct solve whose residuals pass must not be
+  SOLVED (its floating-point gap is nonzero), only ALMOST_SOLVED under the
+  reduced tolerances; at the defaults it is SOLVED."""
+  rng = np.random.default_rng(6300)
+  m, n = 6, 12
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(verbose=False, collect_stats=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  assert sol.stats[0]["gap"] > 0.0  # a nonzero gap, so zero tolerances bite
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(
+      verbose=False, collect_stats=True, tol_gap_abs=0.0, tol_gap_rel=0.0,
+  )
+  assert sol.stats[0]["res_primal"] < 1e-8 and sol.stats[0]["res_dual"] < 1e-8
+  assert sol.status == qtqp.SolutionStatus.ALMOST_SOLVED
+
 def test_semidefinite_p_direct_path_solves_on_every_backend():
   """The z == m direct path solves at mu = 0, so the factorized primal block
   is exactly P. P = [[1, 1], [1, 1]] is singular along the constraint's

@@ -144,9 +144,8 @@ Arguments:
 -   `c`: (n) Cost vector.
 -   `z`: Number of equality constraints (size of the zero cone). Must satisfy
     `0 ≤ z ≤ m`; `z == m` (all-equality) is solved by a single direct KKT
-    solve, where `SOLVED` certifies the primal and dual residuals (the gap
-    is reported in stats but not tested) and a singular system is reported
-    as `FAILED`. Problems with no variables, or with no constraints left
+    solve, graded with the same residual and gap tests as the iterative
+    path; a singular system is reported as `FAILED`. Problems with no variables, or with no constraints left
     after presolve, are rejected.
 -   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
 
