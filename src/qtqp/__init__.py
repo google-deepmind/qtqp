@@ -765,7 +765,6 @@ class QTQP:
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    x, y, s, tau, _ = self._init_variables(a, p, b, c)
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
@@ -822,12 +821,20 @@ class QTQP:
       self.warm_lambda = best[0]
       if best[0] <= warm_start_threshold:
         cx, cy, cs, ctau = best[1]
-        x, y, s, tau = cx, cy, cs, ctau
         self.warm_accepted = True
       logging.debug(
           "warm start: lambda = %e, accepted = %s",
           self.warm_lambda, self.warm_accepted,
       )
+
+    if self.warm_accepted:
+      x, y, s, tau = cx, cy, cs, ctau
+    else:
+      # Cold start: the initialization factorization and solves run only
+      # when no warm start was given or the certificate vetoed it - an
+      # accepted warm start skips them entirely (certification costs three
+      # matvecs per centering shift, no factorization).
+      x, y, s, tau, _ = self._init_variables(a, p, b, c)
 
     # Initial-point diagnostic: the local-norm distance-to-path measure at
     # the starting iterate (warm or configured init), before the first

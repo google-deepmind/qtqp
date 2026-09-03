@@ -3728,3 +3728,29 @@ def test_weak_separation_ray_not_certified():
   assert status != qtqp.SolutionStatus.INFEASIBLE, status
 
 
+def test_accepted_warm_start_skips_cold_init(monkeypatch):
+  """An accepted warm start must not pay for the cold initialization: the
+  init factorization and solves run only on cold or vetoed-warm solves."""
+  rng = np.random.default_rng(5100)
+  m, n, z = 40, 25, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  base = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=False)
+
+  calls = {"n": 0}
+  original = qtqp.QTQP._init_cvxopt
+  def counting(self, *args, **kwargs):
+    calls["n"] += 1
+    return original(self, *args, **kwargs)
+  monkeypatch.setattr(qtqp.QTQP, "_init_cvxopt", counting)
+
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  warm = solver.solve(verbose=False, warm_start=(base.x, base.y, base.s))
+  assert solver.warm_accepted
+  assert warm.status == qtqp.SolutionStatus.SOLVED
+  assert calls["n"] == 0, "accepted warm start ran the cold init"
+
+  solver2 = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  junk = (1e12 * np.ones(n), 1e12 * np.ones(m), np.ones(m))
+  solver2.solve(verbose=False, warm_start=junk, warm_start_threshold=1.0)
+  assert not solver2.warm_accepted
+  assert calls["n"] == 1, "vetoed warm start must fall back to the cold init"
