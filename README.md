@@ -136,7 +136,11 @@ QTQP(
 Arguments:
 
 -   `a`: (m×n) Constraint matrix.
--   `b`: (m) RHS vector.
+-   `b`: (m) RHS vector. For inequality rows, values at or above
+    `1e20 * (1 - 1e-9)` are reserved: they are treated as `+inf` (the row is
+    unbounded and removed by presolve, with its dual fixed to 0). Finite data
+    in that range is therefore discarded by design — rescale any genuine
+    constraint whose RHS approaches `1e20` before calling the solver.
 -   `c`: (n) Cost vector.
 -   `z`: Number of equality constraints (size of the zero cone). Must satisfy
     `0 ≤ z < m`.
@@ -167,6 +171,10 @@ solve(
         qtqp.RefinementStrategy.GMRES
     ),
     gmres_restart: int = 20,
+    max_centrality_correctors: int = 1,
+    adaptive_step_size: bool = True,
+    warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    warm_start_threshold: float = 100.0,
 ) -> qtqp.Solution
 ```
 
@@ -227,7 +235,7 @@ Key parameters:
     operating scale, embedded interior at a few centering shifts, and the
     best embedding is accepted only when the distance-to-path certificate
     measures `lambda <= warm_start_threshold`; a vetoed point falls back to
-    the configured `init_strategy`, so warm starting is never worse than a
+    the standard initialization, so warm starting is never worse than a
     cold solve by more than the certificate evaluation (three matvecs per
     shift). After `solve`, the measured `warm_lambda` and the `warm_accepted`
     decision are attributes on the solver.
@@ -248,21 +256,15 @@ Choose one with the `equilibration_strategy` argument:
     ill-scaled instances.
 -   `qtqp.EquilibrationStrategy.NONE`: Disable equilibration.
 
-#### Initialization strategies
+#### Initialization
 
-Choose one with the `init_strategy` argument:
-
--   `qtqp.InitStrategy.TRIVIAL`: Starts from `x = 0`, `tau = 1`, and
-    unit inequality components for `y` and `s`.
--   `qtqp.InitStrategy.ORTHANT`: Closed-form non-negative orthant centering. It
-    uses `init_mu_scale * ||b[z:]||_2` as the initial barrier parameter and is
-    cheap to compute.
--   `qtqp.InitStrategy.CVXOPT`: Default. Least-squares initialization in
-    the CVXOPT / Clarabel style: one saddle-point solve for QPs (two, with a
-    shared factorization, for LPs - primal from feasibility, dual from
-    optimality), run through the same linear-solver backend, ordering, static
-    regularization, and iterative refinement as the main loop, then shifted
-    into the strict interior.
+The initial iterate is a least-squares initialization in the CVXOPT /
+Clarabel style: one saddle-point solve for QPs (two, with a shared
+factorization, for LPs - primal from feasibility, dual from optimality),
+run through the same linear-solver backend, ordering, static
+regularization, and iterative refinement as the main loop, then shifted
+into the strict interior. If the initialization solve produces
+non-finite values, the solver falls back to a trivial unit start.
 
 #### Refinement strategies
 

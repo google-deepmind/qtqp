@@ -324,6 +324,12 @@ class QTQP:
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
     or +inf). Equality RHS must be finite; inequality RHS may not be NaN or -inf.
+
+    Contract: inequality RHS entries at or above 1e20 (within 1e-9
+    relative, absorbing decimal-round-trip representation noise like
+    9.999999999999998e19) are treated as +infinity, per the common
+    dataset convention. Encoding a real finite constraint with b[i] in
+    that range (e.g. a 1e20-scaled row) is a user error.
     """
     self._presolve_state = None
     if not np.all(np.isfinite(self.b[: self.z])):
@@ -339,7 +345,7 @@ class QTQP:
     # 9.999999999999998e19), which a strict >= comparison classifies as a
     # genuine finite bound -- materializing a 1e20-magnitude row that
     # silently poisons equilibration and residual scales.
-    drop[self.z :] = ineq_b >= inf_bound * (1.0 - 1e-6)
+    drop[self.z :] = ineq_b >= inf_bound * (1.0 - 1e-9)
     if not np.any(drop):
       return
     keep = ~drop
@@ -650,7 +656,7 @@ class QTQP:
         centering shifts, and the best embedding is accepted only when the
         distance-to-path certificate measures lambda <=
         warm_start_threshold; otherwise the solve falls back to the
-        configured init_strategy. After solve, `warm_lambda` (the measured
+        standard initialization. After solve, `warm_lambda` (the measured
         lambda, or None when no warm start was given) and `warm_accepted`
         are available as attributes on the solver.
       warm_start_threshold (float): Acceptance threshold for the certified
@@ -1034,7 +1040,8 @@ class QTQP:
         if collect_stats:
           stats[-1]["status"] = status
 
-    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError,
+            RuntimeError) as exc:
       logging.warning("Numeric failure at iteration %d: %s", self.it, exc)
       status = SolutionStatus.UNFINISHED
       if collect_stats and stats:
@@ -1077,6 +1084,8 @@ class QTQP:
           self._log_footer("Almost solved (best iterate salvage)")
           bx, by, bs = bx / btau, by / btau, bs / btau
           by, bs = self._postsolve(by, bs, s_dropped=self._dropped_slack(bx))
+          if stats:
+            stats[-1]["status"] = SolutionStatus.ALMOST_SOLVED
           return Solution(bx, by, bs, stats, SolutionStatus.ALMOST_SOLVED)
         if status is SolutionStatus.HIT_MAX_ITER:
           self._log_footer("Hit maximum iterations")
@@ -1295,7 +1304,7 @@ class QTQP:
     tau+ is then pinned by substituting this back into the tau equation of the
     homogeneous embedding (see _solve_for_tau).
 
-    The central-path equation r + mu^p * u = 0 contributes the
+    The central-path equation r + mu * u = 0 contributes the
     (mu - mu_target) coefficient on the linear-residual side; cone-product
     corrections (s_i * y_i = mu_target, tau * kappa = mu_target) keep the
     unmodified mu_target.
@@ -1675,7 +1684,7 @@ class QTQP:
         "dinfeas": dinfeas,
         "dinfeas_a": dinfeas_a,
         "dinfeas_p": dinfeas_p,
-        "mu": mu,
+        "mu": float(y @ s) / (self.m - self.z),
         "sigma": sigma,
         "alpha": alpha,
         "tau": tau,

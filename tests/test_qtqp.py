@@ -3597,3 +3597,51 @@ def test_noncanonical_int64_duplicates_wrap_is_caught_for_p():
     qtqp.QTQP(a=a, b=np.ones(2), c=np.zeros(2), z=0, p=p)
 
 
+def test_almost_solved_stats_status_consistent():
+  """When salvage returns ALMOST_SOLVED, the last stats row must agree."""
+  rng = np.random.default_rng(4800)
+  m, n, z = 60, 40, 8
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True, max_iter=4,
+  )
+  if sol.status == qtqp.SolutionStatus.ALMOST_SOLVED:
+    assert sol.stats[-1]["status"] == qtqp.SolutionStatus.ALMOST_SOLVED
+
+
+def test_sentinel_threshold_matches_contract():
+  '''Only representation-noise-level deviations from 1e20 are sentinels:
+  a finite RHS meaningfully below 1e20 is a real constraint.'''
+  a = sparse.csc_matrix(np.array([[1e20], [1.0]]))
+  b = np.array([9.999995e19, 2.0])
+  c = np.array([-1.0])
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=0).solve(verbose=False)
+  # The first row (a real bound, x <= 0.9999995) must be respected: the
+  # pre-fix sentinel dropped it and returned x = 2 with slack -1e20.
+  if sol.status == qtqp.SolutionStatus.SOLVED:
+    assert sol.x[0] <= 0.9999995 + 1e-6
+  # An actual round-trip-noise sentinel is still dropped.
+  b2 = np.array([9.999999999999998e19, 2.0])
+  sol2 = qtqp.QTQP(a=a, b=b2, c=c, z=0).solve(verbose=False)
+  assert sol2.status == qtqp.SolutionStatus.SOLVED
+  assert sol2.x[0] == pytest.approx(2.0, abs=1e-6)
+
+
+def test_stats_mu_is_current_complementarity():
+  '''stats["mu"] must equal the CURRENT iterate's mean complementarity
+  (the defining equation), not the pre-step value.'''
+  rng = np.random.default_rng(5800)
+  m, n, z = 40, 25, 5
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=False, collect_stats=True,
+      linear_solver=qtqp.LinearSolver.SCIPY,
+  )
+  for st in sol.stats:
+    # The complementarity stat is the RETURNED point's total s'y (divided
+    # by tau^2); mu is the embedded iterate's mean s'y. The defining
+    # relation ties them through tau exactly.
+    np.testing.assert_allclose(
+        st["mu"] * (m - z) / max(st["tau"], 1e-15) ** 2,
+        st["complementarity"], rtol=1e-9, atol=1e-30,
+    )
