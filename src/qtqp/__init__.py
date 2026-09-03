@@ -660,7 +660,7 @@ class QTQP:
       tol_gap_rel: float = 1e-8,
       tol_infeas_abs: float = 1e-8,
       tol_infeas_rel: float = 1e-8,
-      certificate_ktratio: float = 1.0,
+      certificate_ktratio: float = 1e9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
@@ -718,7 +718,7 @@ class QTQP:
       tol_gap_rel: float = 1e-8,
       tol_infeas_abs: float = 1e-8,
       tol_infeas_rel: float = 1e-8,
-      certificate_ktratio: float = 1.0,
+      certificate_ktratio: float = 1e9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
@@ -755,8 +755,9 @@ class QTQP:
         to max(1, ||ray||), to be below tol_infeas_rel * |slope|.
       certificate_ktratio (float): Certificates are considered only when the
         embedding ratio kappa / tau exceeds this (SOLVED requires it below
-        1). Clarabel, which carries kappa explicitly, uses 1e9; here kappa
-        is eliminated through tau * kappa = mu, so the ratio is mu / tau^2.
+        1). The default 1e9 is Clarabel's; here kappa is eliminated through
+        tau * kappa = mu, so the ratio is mu / tau^2, which grows like
+        1 / tau on the certificate side and so crosses any threshold.
       max_iter (int): Maximum number of iterations before stopping.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
@@ -1735,8 +1736,9 @@ class QTQP:
     # Embedding dichotomy gate on kappa / tau. With kappa eliminated through
     # tau * kappa = mu the ratio is mu / tau^2 (y's / (nu * tau^2) here):
     # below 1 the iterate is on the solution side; certificates require it
-    # above certificate_ktratio. A pure number, so a divergence cannot
-    # launder it: y's grows with the iterate while nu * tau^2 does not.
+    # above certificate_ktratio (1e9, as in Clarabel), which a weakly
+    # separating near-solution never reaches while a genuine certificate
+    # does, since the ratio grows like 1 / tau as tau -> 0.
     yts_ret = float(y @ s)
     nu_tau_sq = float(self.m - self.z) * tau * tau
     on_solution_side = yts_ret < nu_tau_sq

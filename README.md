@@ -159,7 +159,7 @@ solve(
     tol_gap_rel: float = 1e-8,
     tol_infeas_abs: float = 1e-8,
     tol_infeas_rel: float = 1e-8,
-    certificate_ktratio: float = 1.0,
+    certificate_ktratio: float = 1e9,
     max_iter: int = 100,
     step_size_scale: float = 0.99,
     min_static_regularization: float = 1e-8,
@@ -190,7 +190,7 @@ Key parameters:
 -   `tol_infeas_abs`, `tol_infeas_rel`: Thresholds for (primal/dual)
     infeasibility detection.
 -   `certificate_ktratio`: Embedding ratio `kappa / tau` above which
-    certificates are considered (Clarabel uses `1e9`).
+    certificates are considered (default `1e9`, as in Clarabel).
 -   `max_iter`: Iteration cap.
 -   `step_size_scale` (0,1): Scale for line search step size to stay strictly
     interior.

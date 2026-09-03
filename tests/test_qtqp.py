@@ -2851,7 +2851,7 @@ def test_default_tolerances_match_clarabel():
   for name in ("tol_feas", "tol_gap_abs", "tol_gap_rel", "tol_infeas_abs",
                "tol_infeas_rel"):
     assert sig.parameters[name].default == 1e-8, name
-  assert sig.parameters["certificate_ktratio"].default == 1.0
+  assert sig.parameters["certificate_ktratio"].default == 1e9
 
 
 def test_almost_solved_near_cap():
