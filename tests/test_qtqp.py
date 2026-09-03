@@ -291,24 +291,20 @@ def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
   pres = np.linalg.norm(a @ x + s - b, np.inf)
   dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
   gap = np.abs(c @ x + b @ y + x @ p @ x)
-  # Relative scales mirror the solver's termination criteria: the summand
-  # norms (evaluation floor) plus the iterate norms (the backward-error
-  # allowance of the regularized path).
-  norm_x = np.linalg.norm(x, np.inf)
-  norm_y = np.linalg.norm(y, np.inf)
+  # Relative scales mirror the solver's termination criteria exactly:
+  # the summand norms of each residual and nothing else (no iterate
+  # norms anywhere - those were the round-5/7 laundering channels).
   prelrhs = max(
       np.linalg.norm(a @ x, np.inf),
       np.linalg.norm(s, np.inf),
       np.linalg.norm(b, np.inf),
-      norm_y,
   )
   drelrhs = max(
       np.linalg.norm(p @ x, np.inf),
       np.linalg.norm(a.T @ y, np.inf),
       np.linalg.norm(c, np.inf),
-      norm_x,
   )
-  gaprelrhs = max(min(abs(pcost), abs(dcost)), norm_x + norm_y)
+  gaprelrhs = min(abs(pcost), abs(dcost))
   assert solution.status == qtqp.SolutionStatus.SOLVED
   np.testing.assert_array_less(gap, atol + rtol * gaprelrhs)
   np.testing.assert_array_less(pres, atol + rtol * prelrhs)
@@ -326,16 +322,18 @@ def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
   # Certificate quality is judged as relative backward error, mirroring the
   # solver's detection contract: violations over ||A||_1 * ||y||.
   norm_a_one = float(abs(a).sum(axis=0).max())
-  pinfeas = np.linalg.norm(a.T @ y, np.inf) / (
-      norm_a_one * np.linalg.norm(y, np.inf) + 1e-300
-  )
+  norm_aty = np.linalg.norm(a.T @ y, np.inf)
+  pinfeas = norm_aty / (norm_a_one * np.linalg.norm(y, np.inf) + 1e-300)
 
   assert solution.status == qtqp.SolutionStatus.INFEASIBLE
   np.testing.assert_array_equal(np.isnan(x), True)
   np.testing.assert_array_equal(np.isnan(s), True)
   np.testing.assert_allclose(b @ y, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
+  # BOTH public gates: data-scaled quality AND the pure-slope sense
+  # (violations at most atol * |b'y|).
   np.testing.assert_array_less(pinfeas, atol)
+  assert norm_aty <= atol * abs(float(b @ y)) + 1e-300
 
 
 def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
@@ -350,15 +348,19 @@ def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
   norm_x = np.linalg.norm(x, np.inf)
   norm_a_inf = float(abs(a).sum(axis=1).max())
   norm_p_inf = float(abs(p).sum(axis=1).max()) if p.nnz else 0.0
-  dinfeas_a = np.linalg.norm(a @ x + s, np.inf) / (norm_a_inf * norm_x + 1e-300)
-  dinfeas_p = np.linalg.norm(p @ x, np.inf) / (norm_p_inf * norm_x + 1e-300)
+  norm_axs = np.linalg.norm(a @ x + s, np.inf)
+  norm_pxc = np.linalg.norm(p @ x, np.inf)
+  dinfeas_a = norm_axs / (norm_a_inf * norm_x + 1e-300)
+  dinfeas_p = norm_pxc / (norm_p_inf * norm_x + 1e-300)
 
   assert solution.status == qtqp.SolutionStatus.UNBOUNDED
   np.testing.assert_array_equal(np.isnan(y), True)
   np.testing.assert_allclose(c @ x, -1.0, atol=atol, rtol=rtol)
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
+  # BOTH public gates: data-scaled quality AND the pure-slope sense.
   np.testing.assert_array_less(dinfeas_a, atol)
   np.testing.assert_array_less(dinfeas_p, atol)
+  assert max(norm_axs, norm_pxc) <= atol * abs(float(c @ x)) + 1e-300
 
 
 @pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
@@ -515,20 +517,29 @@ def _append_dropped_inequalities(a, b, n_extra, random_state, rhs_value):
 @pytest.mark.parametrize('seed', 1542 + np.arange(10))
 @pytest.mark.parametrize('mn', ((5, 10), (30, 50), (80, 100)))
 def test_equality_only_solve(equilibration, seed, mn):
-  """Equality-only QP (z == m) is currently rejected."""
+  """Equality-only QP (z == m): solved by the direct KKT path, with
+  primal/dual residuals meeting the reported status."""
   rng = np.random.default_rng(seed)
   m, n = mn
   z = m
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        verbose=True, equilibration_strategy=equilibration,
-    )
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=True, equilibration_strategy=equilibration,
+  )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_array_less(
+      np.linalg.norm(a @ sol.x - b, np.inf),
+      1e-7 * max(1.0, np.linalg.norm(b, np.inf)),
+  )
+  np.testing.assert_array_less(
+      np.linalg.norm(p @ sol.x + a.T @ sol.y + c, np.inf),
+      1e-7 * max(1.0, np.linalg.norm(c, np.inf), np.linalg.norm(sol.x, np.inf)),
+  )
 
 
 @pytest.mark.parametrize('seed', 2042 + np.arange(5))
 def test_equality_only_lp(seed):
-  """Equality-only LP (P=0, z=m) is currently rejected.
+  """Equality-only LP (P=0, z=m): solved by the direct KKT path.
 
   Uses n == m (square A) so the KKT system is non-singular with P=0.
   """
@@ -540,12 +551,16 @@ def test_equality_only_lp(seed):
   y_star = rng.normal(size=m)
   b = a @ x_star
   c = -(a.T @ y_star)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_array_less(np.linalg.norm(a @ sol.x - b, np.inf), 1e-7)
+  np.testing.assert_array_less(
+      np.linalg.norm(a.T @ sol.y + c, np.inf), 1e-7
+  )
 
 
 def test_equality_only_inconsistent():
-  """Inconsistent equality-only problems are rejected before solve."""
+  """Inconsistent equality-only problems must not be reported SOLVED."""
   n, m, z = 5, 3, 3
   # All rows of A are identical -> Ax = b can only be satisfied if all b_i
   # are equal. Since they are not, the problem is primal infeasible.
@@ -553,12 +568,13 @@ def test_equality_only_inconsistent():
   b = np.array([1.0, 2.0, 3.0])
   c = np.ones(n)
   p = sparse.csc_matrix((n, n))
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  assert sol.status != qtqp.SolutionStatus.SOLVED
 
 
 def test_presolve_drops_all_inequalities():
-  """Dropping all inequalities in presolve yields an unsupported equality-only problem."""
+  """Presolve reducing to equality-only routes to the direct KKT path,
+  and postsolve restores the dropped rows."""
   rng = np.random.default_rng(842)
   m_eq, n = 5, 20
   m_ineq = 5
@@ -567,8 +583,10 @@ def test_presolve_drops_all_inequalities():
   a, b = _append_dropped_inequalities(
       a, b, n_extra=m_ineq, random_state=rng, rhs_value=1e21,
   )
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  assert sol.y.shape == (m_eq + m_ineq,)
+  np.testing.assert_array_equal(sol.y[m_eq:], 0.0)
 
 
 def test_presolve_restores_infeasible_certificate():
@@ -609,17 +627,19 @@ def test_presolve_restores_unbounded_certificate():
 
 
 def test_presolve_accepts_posinf_inequalities():
-  """Literal +inf inequality RHS may reduce the problem to unsupported equality-only."""
+  """Literal +inf inequality RHS reduces to equality-only, which now
+  solves via the direct KKT path either way."""
   rng = np.random.default_rng(2042)
   m_eq, n, z = 5, 20, 5
   a, b, c, p = _gen_equality_only(m_eq, n, random_state=rng)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
   a_full, b_full = _append_dropped_inequalities(
       a, b, n_extra=3, random_state=rng, rhs_value=np.inf,
   )
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=True)
+  sol = qtqp.QTQP(a=a_full, b=b_full, c=c, z=z, p=p).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  assert sol.y.shape == (m_eq + 3,)
 
 
 def test_raise_error_nonfinite_equality_rhs():
@@ -634,18 +654,18 @@ def test_raise_error_nonfinite_equality_rhs():
 @pytest.mark.parametrize('linear_solver', _SOLVERS)
 @pytest.mark.parametrize('seed', 3042 + np.arange(5))
 def test_equality_only_all_backends(linear_solver, seed):
-  """Equality-only QP is rejected before choosing a backend-specific path."""
+  """Equality-only QP solves through every backend's direct KKT path."""
   rng = np.random.default_rng(seed)
   m, n, z = 20, 40, 20
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        verbose=True, linear_solver=linear_solver,
-    )
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=True, linear_solver=linear_solver,
+  )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
 
 
 def test_equality_only_recovers_known_solution():
-  """Equality-only QP with known solution is currently rejected."""
+  """Equality-only strictly convex QP recovers the planted KKT point."""
   rng = np.random.default_rng(7742)
   m, n, z = 10, 20, 10
   x_star = rng.normal(size=n)
@@ -656,21 +676,26 @@ def test_equality_only_recovers_known_solution():
   p = sparse.csc_matrix(q.T @ q * 0.01)
   b = a @ x_star
   c = -(p @ x_star + a.T @ y_star)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_array_less(
+      np.linalg.norm(a @ sol.x - b, np.inf),
+      1e-7 * max(1.0, np.linalg.norm(b, np.inf)),
+  )
 
 
 def test_equality_only_verbose(capsys):
-  """Equality-only QP is rejected before any iteration logging."""
+  """The equality-only direct path reports a footer and one stats row."""
   rng = np.random.default_rng(8842)
   m, n, z = 5, 10, 5
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-        verbose=True, collect_stats=True
-    )
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
+      verbose=True, collect_stats=True
+  )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  assert len(sol.stats) == 1
   captured = capsys.readouterr().out
-  assert captured == ''
+  assert "equality-only" in captured
 
 
 def test_equality_only_sparse_p():
@@ -690,10 +715,10 @@ def test_equality_only_sparse_p():
   p = (p.T @ p) * 0.01  # Make PSD.
   b = a @ x_star
   c = -(p @ x_star + a.T @ y_star)
-  with pytest.raises(ValueError, match='effective z == m'):
-    _ = qtqp.QTQP(
-        a=sparse.csc_matrix(a), b=b, c=c, z=z, p=sparse.csc_matrix(p),
-    ).solve(verbose=True)
+  sol = qtqp.QTQP(
+      a=sparse.csc_matrix(a), b=b, c=c, z=z, p=sparse.csc_matrix(p),
+  ).solve(verbose=True)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
 
 
 def test_raise_error_negative_invalid_shapes():
@@ -3754,3 +3779,109 @@ def test_accepted_warm_start_skips_cold_init(monkeypatch):
   solver2.solve(verbose=False, warm_start=junk, warm_start_threshold=1.0)
   assert not solver2.warm_accepted
   assert calls["n"] == 1, "vetoed warm start must fall back to the cold init"
+
+
+def test_equality_only_qp_unique_solution():
+  """Equality-constrained strictly convex QP: the direct path recovers
+  the unique KKT solution."""
+  rng = np.random.default_rng(5200)
+  m, n = 6, 12
+  a = sparse.csc_matrix(rng.normal(size=(m, n)))
+  L = rng.normal(size=(n, n))
+  p = sparse.csc_matrix(L @ L.T + 0.5 * np.eye(n))
+  x_star = rng.normal(size=n)
+  y_star = rng.normal(size=m)
+  b = a @ x_star
+  c = -(p @ x_star + a.T @ y_star)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(verbose=False)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(sol.x, x_star, atol=1e-6, rtol=1e-6)
+
+
+def test_equality_only_impossible_zero_row_not_solved():
+  """Reviewer repro: 0 = 1 with a tiny cost must not be SOLVED — the
+  regularized singular solve returns enormous iterates which must not
+  inflate the acceptance thresholds (data/summand scales only)."""
+  a = sparse.csc_matrix(np.array([[0.0]]))
+  sol = qtqp.QTQP(a=a, b=np.array([1.0]), c=np.array([1e-12]), z=1).solve(
+      verbose=False
+  )
+  assert sol.status != qtqp.SolutionStatus.SOLVED
+  assert sol.status != qtqp.SolutionStatus.ALMOST_SOLVED
+
+
+def test_equality_only_large_scale_refines_true_system():
+  """Reviewer repro: A=[1], b=1e10, c=0 must return x=1e10, y=0 — a mu
+  floor baked into the 'true' diagonals is never refined away and
+  visibly perturbs large-scale duals; the direct path uses mu = 0."""
+  a = sparse.csc_matrix(np.array([[1.0]]))
+  sol = qtqp.QTQP(a=a, b=np.array([1e10]), c=np.array([0.0]), z=1).solve(
+      verbose=False
+  )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  np.testing.assert_allclose(sol.x, [1e10], rtol=1e-9)
+  np.testing.assert_allclose(sol.y, [0.0], atol=1e-6)
+
+
+def test_empty_problems_rejected():
+  """No variables, or no constraints left after presolve, is rejected."""
+  with pytest.raises(ValueError, match="no variables"):
+    qtqp.QTQP(a=sparse.csc_matrix((1, 0)), b=np.zeros(1), c=np.zeros(0), z=1)
+  with pytest.raises(ValueError, match="No constraints"):
+    qtqp.QTQP(
+        a=sparse.csc_matrix(np.array([[1.0]])), b=np.array([np.inf]),
+        c=np.array([-2.0]), z=0, p=sparse.csc_matrix(np.array([[1.0]])),
+    )
+
+def test_equality_only_update_failure_returns_failed(monkeypatch):
+  """A backend whose factorization fails through every retry must return
+  FAILED (with an all-NaN full-size payload), not raise."""
+  rng = np.random.default_rng(5900)
+  m, n = 5, 10
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  def boom(self, *args, **kwargs):
+    raise RuntimeError("forced persistent factorization failure")
+  monkeypatch.setattr(qtqp.direct.DirectKktSolver, "update", boom)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(verbose=False)
+  assert sol.status == qtqp.SolutionStatus.FAILED
+  assert np.all(np.isnan(sol.x)) and np.all(np.isnan(sol.y))
+
+
+def test_equality_only_stats_schema_matches_main_loop():
+  """Round-5: the equality-only stats row must satisfy the same schema as
+  main-loop rows so generic stats consumers do not fail only on equality
+  problems."""
+  rng = np.random.default_rng(6100)
+  m, n = 6, 12
+  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
+  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(
+      verbose=False, collect_stats=True
+  )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  base_keys = {
+      "iter", "pcost", "dcost", "pres", "dres", "gap", "mu", "sigma",
+      "alpha", "tau", "norm_x", "norm_y", "status", "time",
+      "prelrhs", "drelrhs", "pinfeas", "dinfeas",
+      "dinfeas_a", "dinfeas_p", "ctx", "bty",
+      "complementarity", "norm_s",
+  }
+  missing = base_keys - sol.stats[0].keys()
+  assert not missing, f"equality stats row missing {missing}"
+
+
+def test_semidefinite_p_direct_path_solves_on_every_backend():
+  """The z == m direct path solves at mu = 0, so the factorized primal block
+  is exactly P. P = [[1, 1], [1, 1]] is singular along the constraint's
+  null space, so a magnitude floor leaves the KKT matrix singular and the
+  outcome depended on the backend; the additive shift makes every backend
+  solve it."""
+  p = sparse.csc_matrix(np.array([[1.0, 1.0], [1.0, 1.0]]))
+  a = sparse.csc_matrix(np.array([[1.0, 1.0]]))
+  c = np.array([-1.0, -1.0])
+  for linear_solver in _SOLVERS:
+    sol = qtqp.QTQP(a=a, b=np.array([1.0]), c=c, z=1, p=p).solve(
+        verbose=False, linear_solver=linear_solver
+    )
+    assert sol.status == qtqp.SolutionStatus.SOLVED, (linear_solver, sol.status)
+    assert float(sol.x.sum()) == pytest.approx(1.0, rel=1e-7)
+    assert np.linalg.norm(p @ sol.x + a.T @ sol.y + c, np.inf) < 1e-6

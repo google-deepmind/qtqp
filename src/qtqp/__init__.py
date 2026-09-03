@@ -286,11 +286,11 @@ class QTQP:
           f"0 <= z <= m={self.m}"
       )
 
+    if self.n == 0:
+      raise ValueError("The problem has no variables (n == 0).")
     self._presolve()
-    if self.z == self.m:
-      raise ValueError(
-          "effective z == m after presolve; some rows may have been dropped"
-      )
+    if self.m == 0:
+      raise ValueError("No constraints remain after presolve (m == 0).")
 
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
@@ -357,6 +357,37 @@ class QTQP:
     self.b = self.b[keep]
     self.m = int(keep.sum())
 
+  def _validate_warm_start(self, warm_start, warm_start_threshold):
+    """Validate a warm start; returns reduced-size float copies or None."""
+    if warm_start is None:
+      return None
+    if not (np.isfinite(warm_start_threshold) and warm_start_threshold > 0):
+      raise ValueError(
+          "warm_start_threshold must be a positive finite float, got"
+          f" {warm_start_threshold}"
+      )
+    wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
+    ps = self._presolve_state
+    full_m = self.m + (len(ps.b_dropped) if ps is not None else 0)
+    if (ps is not None and wx.shape == (self.n,)
+        and wy.shape == (full_m,) and ws.shape == (full_m,)):
+      # Full-size vectors (e.g. a previous Solution after postsolve
+      # restored the presolve-dropped rows): slice back to the reduced
+      # internal problem.
+      wy, ws = wy[ps.keep], ws[ps.keep]
+    if wx.shape != (self.n,) or wy.shape != (self.m,) or ws.shape != (self.m,):
+      raise ValueError(
+          "warm_start must be (x, y, s) with shapes"
+          f" ({self.n},), ({self.m},), ({self.m},)"
+          + (f" or ({self.n},), ({full_m},), ({full_m},)"
+             if full_m != self.m else "")
+          + f"; got {wx.shape}, {wy.shape}, {ws.shape}"
+      )
+    if not (np.all(np.isfinite(wx)) and np.all(np.isfinite(wy))
+            and np.all(np.isfinite(ws))):
+      raise ValueError("warm_start arrays must be finite.")
+    return wx, wy, ws
+
   def _postsolve(self, y, s, y_dropped=0.0, s_dropped=np.nan):
     """Restore full-sized (y, s) after presolve dropped rows.
 
@@ -378,11 +409,17 @@ class QTQP:
     return y_full, s_full
 
   def _dropped_slack(self, x):
-    """Slack b - A @ x for dropped rows; 0.0 (harmless scalar) if none."""
-    ps = self._presolve_state
-    if ps is None:
-      return 0.0
-    return ps.b_dropped - ps.a_dropped @ x
+    """Slack restored for presolve-dropped rows: +inf BY CONTRACT.
+
+    Presolve declared these rows non-binding for every x (RHS at or above
+    the infinity sentinel), so their slack is +infinity by definition.
+    Computing b_dropped - A_dropped @ x instead produced inf - inf = NaN
+    for literal-inf RHS and could overflow to -inf for finite-sentinel
+    rows at extreme x; a constant +inf is the documented, maskable value
+    in both cases.
+    """
+    del x
+    return np.inf
 
   def _lambda_local(self, x, y, s, tau, a, p, b, c):
     """Local-norm distance-to-path measure at a working-scale point.
@@ -422,6 +459,95 @@ class QTQP:
         + float((t_y * t_y) @ (1.0 / h_y))
         + t_tau * t_tau / max(_EPS, h_tau)
     )
+
+  def _solve_equality_only(self, b, c, collect_stats):
+    """Direct solve for z == m: one refined solve of [P, A'; A, 0][x; y] = [-c; b].
+
+    With no inequality rows there are no complementarity pairs, so the
+    interior-point iteration reduces to this single saddle-point system.
+    The result is graded with the main loop's summand-anchored residual
+    scales (tau = 1, s = 0) and returns SOLVED, ALMOST_SOLVED, or FAILED;
+    a singular system (inconsistent or unbounded) is reported as FAILED.
+    """
+    self.warm_lambda = None
+    self.warm_accepted = False
+    self.lambda_init = None
+    try:
+      # mu = 0 so refinement targets the true equality system; the
+      # additive shift keeps a rank-deficient P factorizable.
+      self._linear_solver.update(
+          mu=0.0, s=np.zeros(self.m), y=np.ones(self.m),
+          additive_regularization=True,
+      )
+      sol, lin_stats = self._linear_solver.solve(
+          rhs=np.concatenate([-c, -b]), warm_start=np.zeros(self.n + self.m)
+      )
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError, RuntimeError):
+      logging.exception("Equality-only KKT solve failed; returning FAILED.")
+      full_m = self.m + (
+          len(self._presolve_state.b_dropped)
+          if self._presolve_state is not None else 0
+      )
+      return Solution(
+          np.full(self.n, np.nan), np.full(full_m, np.nan),
+          np.full(full_m, np.nan), [], SolutionStatus.FAILED
+      )
+    x, y = sol[: self.n], sol[self.n :]
+    svec = np.zeros(self.m)
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+      x, y, svec = self._unequilibrate_iterates(x, y, svec)
+
+    ax = self.a @ x
+    aty = self.a.T @ y
+    px = self.p @ x if self.p.nnz else np.zeros(self.n)
+    ctx = float(self.c @ x)
+    bty = float(self.b @ y)
+    xpx = float(x @ px)
+    pres = _norm(ax - self.b, np.inf)
+    dres = _norm(px + aty + self.c, np.inf)
+    gap = abs(ctx + bty + xpx)
+    pcost = ctx + 0.5 * xpx
+    dcost = -bty - 0.5 * xpx
+    # Summand scales, as in the main loop: no iterate norms.
+    prelrhs = max(_norm(ax, np.inf), self._norm_b)
+    drelrhs = max(_norm(px, np.inf), _norm(aty, np.inf), self._norm_c)
+
+    def _meets(f):
+      return (pres < f * self.atol + f * self.rtol * prelrhs
+              and dres < f * self.atol + f * self.rtol * drelrhs)
+
+    if _meets(1.0):
+      status = SolutionStatus.SOLVED
+      self._log_footer("Solved (equality-only direct solve)")
+    elif _meets(_ALMOST_FACTOR):
+      status = SolutionStatus.ALMOST_SOLVED
+      self._log_footer("Almost solved (equality-only direct solve)")
+    else:
+      status = SolutionStatus.FAILED
+      self._log_footer("Failed (equality-only direct solve)")
+
+    stats = []
+    if collect_stats:
+      norm_x = _norm(x, np.inf)
+      norm_y = _norm(y, np.inf)
+      dinfeas_a = _norm(ax, np.inf) / (self._norm_a_inf * norm_x + _EPS)
+      dinfeas_p = _norm(px, np.inf) / (self._norm_p_inf * norm_x + _EPS)
+      stats.append({
+          "iter": 0, "pres": pres, "dres": dres, "gap": gap,
+          "pcost": pcost, "dcost": dcost, "status": status,
+          "mu": 0.0, "complementarity": 0.0, "tau": 1.0,
+          "sigma": 0.0, "alpha": 1.0,
+          "norm_x": norm_x, "norm_y": norm_y, "norm_s": 0.0,
+          "prelrhs": prelrhs, "drelrhs": drelrhs,
+          "pinfeas": _norm(aty, np.inf) / (self._norm_a_one * norm_y + _EPS),
+          "dinfeas": max(dinfeas_a, dinfeas_p),
+          "dinfeas_a": dinfeas_a, "dinfeas_p": dinfeas_p,
+          "ctx": ctx, "bty": bty,
+          "time": timeit.default_timer() - self.start_time,
+          "q_lin_sys_stats": lin_stats,
+      })
+    y, svec = self._postsolve(y, svec, s_dropped=self._dropped_slack(x))
+    return Solution(x, y, svec, stats, status)
 
   def _init_variables(self, a, p, b, c):
     """Produce the initial IPM iterates (CVXOPT-style residual embedding).
@@ -704,14 +830,15 @@ class QTQP:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
 
-    resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
-        linear_solver
-    )
     self.start_time = timeit.default_timer()
     self.atol, self.rtol = atol, rtol
     self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
     self.verbose = verbose
     self.equilibration_strategy = equilibration_strategy
+
+    resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
+        linear_solver
+    )
     if verbose:
       print(
           f"| QTQP v{__version__}:"
@@ -719,7 +846,6 @@ class QTQP:
           f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
           f" equilibration={equilibration_strategy.name}"
       )
-
     if equilibration_strategy is EquilibrationStrategy.NONE:
       a, p, b, c = self.a, self.p, self.b, self.c
       self.d, self.e, self.sigma_eq = None, None, 1.0
@@ -763,6 +889,11 @@ class QTQP:
         gmres_restart=gmres_restart,
     )
 
+    if self.z == self.m:
+      # All-equality problem: no complementarity pairs, so the IPM
+      # reduces to one saddle-point solve. A warm start is ignored.
+      return self._solve_equality_only(b, c, collect_stats)
+
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     self._best_almost_score = math.inf
@@ -777,32 +908,9 @@ class QTQP:
     # warm starting safe, which heuristic IPM warm starts are not.
     self.warm_lambda = None
     self.warm_accepted = False
-    if warm_start is not None:
-      if not (np.isfinite(warm_start_threshold) and warm_start_threshold > 0):
-        raise ValueError(
-            "warm_start_threshold must be a positive finite float, got"
-            f" {warm_start_threshold}"
-        )
-      wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
-      ps = self._presolve_state
-      full_m = self.m + (len(ps.b_dropped) if ps is not None else 0)
-      if (ps is not None and wx.shape == (self.n,)
-          and wy.shape == (full_m,) and ws.shape == (full_m,)):
-        # Full-size vectors (e.g. a previous Solution after postsolve
-        # restored the presolve-dropped rows): slice back to the reduced
-        # internal problem.
-        wy, ws = wy[ps.keep], ws[ps.keep]
-      if wx.shape != (self.n,) or wy.shape != (self.m,) or ws.shape != (self.m,):
-        raise ValueError(
-            "warm_start must be (x, y, s) with shapes"
-            f" ({self.n},), ({self.m},), ({self.m},)"
-            + (f" or ({self.n},), ({full_m},), ({full_m},)"
-               if full_m != self.m else "")
-            + f"; got {wx.shape}, {wy.shape}, {ws.shape}"
-        )
-      if not (np.all(np.isfinite(wx)) and np.all(np.isfinite(wy))
-              and np.all(np.isfinite(ws))):
-        raise ValueError("warm_start arrays must be finite.")
+    validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
+    if validated_warm is not None:
+      wx, wy, ws = validated_warm
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
         wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
       best = (math.inf, None)
