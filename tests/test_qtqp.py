@@ -3477,3 +3477,123 @@ def test_nonfinite_backend_solution_raises(monkeypatch):
     solver.solve(rhs=np.ones(n + m), warm_start=np.zeros(n + m))
 
 
+def test_near_symmetric_p_is_symmetrized():
+  """A within-tolerance asymmetry must not leave the factorized triu(P)
+  and the residual evaluations disagreeing: accepted P is symmetrized."""
+  rng = np.random.default_rng(4500)
+  m, n, z = 20, 6, 2
+  a, b, c, _ = _gen_feasible(m, n, z, random_state=rng)
+  # Asymmetry within the global tolerance (1e-12 * max|P|) yet material
+  # for its own tiny block: the check accepts it, so the accepted matrix
+  # must be symmetrized before factorization.
+  p = np.diag(np.full(n, 1e14))
+  p[0, 1], p[1, 0] = 5e1, 1e1
+  p = sparse.csc_matrix(p)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
+  asym = abs(solver.p - solver.p.T)
+  assert (asym.max() if asym.nnz else 0.0) == 0.0
+  sol = solver.solve(verbose=False)
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+
+
+def test_warm_start_accepts_postsolved_solution():
+  """A returned solution (postsolve-restored rows included) must be
+  accepted as a warm start when presolve dropped rows."""
+  rng = np.random.default_rng(4600)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  b2 = np.concatenate([b, [1e20]])
+  a2 = sparse.vstack([a, sparse.csc_matrix(rng.normal(size=(1, n)))]).tocsc()
+  base = qtqp.QTQP(a=a2, b=b2, c=c, z=z, p=p).solve(verbose=False)
+  assert base.status == qtqp.SolutionStatus.SOLVED
+  assert base.y.shape == (m + 1,)  # postsolve restored the dropped row
+  solver = qtqp.QTQP(a=a2, b=b2, c=c, z=z, p=p)
+  warm = solver.solve(
+      verbose=False, warm_start=(base.x, base.y, base.s)
+  )
+  assert warm.status == qtqp.SolutionStatus.SOLVED
+  assert solver.warm_accepted
+
+
+def test_integer_extreme_asymmetry_rejected():
+  '''Integer wrap-around must not hide gross asymmetry from validation.'''
+  imax = np.iinfo(np.int64).max
+  p = sparse.csc_matrix(
+      np.array([[1, imax], [-imax, 1]], dtype=np.int64)
+  )
+  a = sparse.csc_matrix(np.ones((2, 2)))
+  with pytest.raises(ValueError, match="symmetric"):
+    qtqp.QTQP(a=a, b=np.ones(2), c=np.zeros(2), z=0, p=p)
+
+
+def test_gondzio_stacking_gates_on_fresh_tau_method(monkeypatch):
+  """Round-7 P3: corrector stacking must stop when the FRESHEST accepted
+  solve's tau method degrades - removing the per-trial tau_method update
+  fails this test. Forces every Gondzio trial to report a linearized tau
+  solve and asserts no iteration issues a second trial, while the natural
+  run does stack multiple trials at these seeds."""
+  def run(force_linearized):
+    counts = []
+    orig = qtqp.QTQP._newton_step
+    def spy(self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau,
+            correction):
+      out = orig(self, p=p, mu=mu, mu_target=mu_target, r_anchor=r_anchor,
+                 tau_anchor=tau_anchor, x=x, y=y, s=s, tau=tau,
+                 correction=correction)
+      if correction is None:
+        counts.append(0)  # predictor: new iteration
+      elif len(counts) > 0 and counts[-1] >= 0:
+        counts[-1] += 1  # corrector + gondzio trials
+      if force_linearized and correction is not None and counts[-1] > 1:
+        out[3]["tau_method"] = "linearized"  # degrade every gondzio solve
+      return out
+    with pytest.MonkeyPatch.context() as mp:
+      mp.setattr(qtqp.QTQP, "_newton_step", spy)
+      for seed in (5400, 5401, 5402):
+        rng = np.random.default_rng(seed)
+        a, b, c, p = _gen_feasible(40, 25, 6, random_state=rng)
+        qtqp.QTQP(a=a, b=b, c=c, z=6, p=p).solve(
+            verbose=False, max_centrality_correctors=3
+        )
+    # counts[i] = 1 (corrector only) + number of gondzio trials issued
+    return counts
+
+  natural = run(force_linearized=False)
+  assert max(natural) >= 3, natural  # >= 2 gondzio trials somewhere
+  forced = run(force_linearized=True)
+  # First gondzio trial is allowed (gated on the CORRECTOR's method); a
+  # second must never be issued once the first reports linearized.
+  assert max(forced) <= 2, forced
+
+
+def test_noncanonical_int64_duplicates_wrap_is_caught():
+  """Round-8 P3: the wrap test must use NONCANONICAL INT64 duplicates -
+  a float-duplicate or canonical-integer fixture stays green if the cast
+  moves back after sum_duplicates(). Two INT64_MAX duplicates in int64
+  wrap to -2; cast-first canonicalization exposes ~1.8e19 instead."""
+  imax = np.iinfo(np.int64).max
+  data = np.array([imax, imax], dtype=np.int64)
+  indices = np.array([1, 1])
+  indptr = np.array([0, 2, 2])
+  a = sparse.csc_matrix((data, indices, indptr), shape=(2, 2))
+  assert not a.has_canonical_format
+  solver = qtqp.QTQP(a=a, b=np.ones(2), c=np.zeros(2), z=0)
+  assert solver.a[1, 0] > 1.8e19  # not -2
+
+
+def test_noncanonical_int64_duplicates_wrap_is_caught_for_p():
+  """Round-9 P3: the mutation-effective int64-duplicate coverage must
+  include P - moving only P's cast after sum_duplicates() previously
+  stayed green. Two INT64_MAX duplicates wrap to -2 in int64; cast-first
+  exposes ~1.8e19 and the asymmetry check rejects."""
+  imax = np.iinfo(np.int64).max
+  data = np.array([imax, imax], dtype=np.int64)
+  indices = np.array([1, 1])
+  indptr = np.array([0, 2, 2])
+  p = sparse.csc_matrix((data, indices, indptr), shape=(2, 2))
+  assert not p.has_canonical_format
+  a = sparse.csc_matrix(np.ones((2, 2)))
+  with pytest.raises(ValueError, match="symmetric"):
+    qtqp.QTQP(a=a, b=np.ones(2), c=np.zeros(2), z=0, p=p)
+
+

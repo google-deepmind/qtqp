@@ -258,17 +258,16 @@ class QTQP:
     # Input validation
     if not sp.isspmatrix_csc(a):
       raise TypeError("Constraint matrix 'a' must be in CSC format.")
-    if not np.all(np.isfinite(a.data)):
-      raise ValueError("Constraint matrix 'a' must contain only finite values.")
-    if a.has_canonical_format:
-      self.a = a
-    else:
-      # Non-canonical CSC (duplicate entries) is summed correctly by the
-      # KKT assembly (sp.bmat goes through COO, which sums duplicates)
-      # but not by the equilibration norms, which would see max(|d1|,
-      # |d2|) where the true entry is |d1 + d2|. Canonicalize a copy.
-      self.a = a.copy()
+    # Cast to float64 before canonicalizing (sum_duplicates() on an
+    # integer matrix wraps); astype copies, so the caller's matrix is
+    # never mutated.
+    self.a = a.astype(np.float64)
+    if not self.a.has_canonical_format:
+      # Duplicate entries are summed by the KKT assembly but not by the
+      # equilibration norms: canonicalize.
       self.a.sum_duplicates()
+    if not np.all(np.isfinite(self.a.data)):
+      raise ValueError("Constraint matrix 'a' must contain only finite values.")
 
     self.b = np.array(b, dtype=np.float64)
     if self.b.shape != (self.m,):
@@ -297,13 +296,11 @@ class QTQP:
     else:
       if not sp.isspmatrix_csc(p):
         raise TypeError("QP matrix 'p' must be in CSC format.")
+      # Cast to float64 before canonicalizing and before the symmetry
+      # check: integer arithmetic wraps in both.
+      p = p.astype(np.float64)
       if not p.has_canonical_format:
-        p = p.copy()
         p.sum_duplicates()
-      if p.shape != (self.n, self.n):
-        raise ValueError(
-            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
-        )
       if not np.all(np.isfinite(p.data)):
         raise ValueError("QP matrix 'p' must contain only finite values.")
       asymmetry = p - p.T
@@ -313,6 +310,10 @@ class QTQP:
           and np.max(np.abs(asymmetry.data), initial=0.0) > 1e-12 * p_scale
       ):
         raise ValueError("QP matrix 'p' must be symmetric.")
+      # Symmetrize within-tolerance asymmetry so the factorized triu(P)
+      # and the residual evaluations see the same operator.
+      if asymmetry.nnz and np.max(np.abs(asymmetry.data), initial=0.0) > 0.0:
+        p = (p * 0.5 + p.T * 0.5).tocsc()
       self.p = p
 
     # Defaults so _check_termination works in tests that call it directly
@@ -776,12 +777,25 @@ class QTQP:
             f" {warm_start_threshold}"
         )
       wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
+      ps = self._presolve_state
+      full_m = self.m + (len(ps.b_dropped) if ps is not None else 0)
+      if (ps is not None and wx.shape == (self.n,)
+          and wy.shape == (full_m,) and ws.shape == (full_m,)):
+        # Full-size vectors (e.g. a previous Solution after postsolve
+        # restored the presolve-dropped rows): slice back to the reduced
+        # internal problem.
+        wy, ws = wy[ps.keep], ws[ps.keep]
       if wx.shape != (self.n,) or wy.shape != (self.m,) or ws.shape != (self.m,):
         raise ValueError(
             "warm_start must be (x, y, s) with shapes"
-            f" ({self.n},), ({self.m},), ({self.m},); got"
-            f" {wx.shape}, {wy.shape}, {ws.shape}"
+            f" ({self.n},), ({self.m},), ({self.m},)"
+            + (f" or ({self.n},), ({full_m},), ({full_m},)"
+               if full_m != self.m else "")
+            + f"; got {wx.shape}, {wy.shape}, {ws.shape}"
         )
+      if not (np.all(np.isfinite(wx)) and np.all(np.isfinite(wy))
+              and np.all(np.isfinite(ws))):
+        raise ValueError("warm_start arrays must be finite.")
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
         wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
       best = (math.inf, None)
@@ -932,10 +946,16 @@ class QTQP:
         # point's outlier complementarity products back into a symmetric
         # neighborhood of the target, accept only if the step size improves.
         mu_c = sigma * mu
+        # Undivided running correction numerator: starts at the Mehrotra
+        # cross term and accumulates each ACCEPTED corrector's target
+        # shift, so the fused slack update and the Newton RHS stay
+        # consistent when more than one corrector is accepted.
+        corr_num = -cross_p
+        latest_tau_method = corrector_lin_sys_stats.get("tau_method")
         for _ in range(self._max_centrality_correctors):
           if alpha >= 0.9:
             break  # step already good; a corrector cannot pay for itself
-          if corrector_lin_sys_stats.get("tau_method") != "quadratic":
+          if latest_tau_method != "quadratic":
             break  # tau solve degraded; do not stack correctors on it
           alpha_asp = min(1.0, 1.5 * alpha + 0.3)
           v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
@@ -944,7 +964,8 @@ class QTQP:
           target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
           if np.array_equal(target, v):
             break
-          correction_g = correction + (target - v) / y[self.z :]
+          corr_num_g = corr_num + (target - v)
+          correction_g = corr_num_g / y[self.z :]
           xy[: self.n] = x_p
           xy[self.n :] = y_p
           x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
@@ -960,19 +981,20 @@ class QTQP:
               correction=correction_g,
           )
           d_s_g = np.zeros_like(d_s)
+          # Single-division form, matching the primary corrector.
           d_s_g[self.z :] = (
-              mu_c / y[self.z :]
-              + correction_g
-              - y_g[self.z :] * s[self.z :] / y[self.z :]
-          )
+              mu_c + corr_num_g - y_g[self.z :] * s[self.z :]
+          ) / y[self.z :]
           d_y_g = y_g - y
           alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
           if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
             break
           stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+          latest_tau_method = gondzio_lin_sys_stats.get("tau_method")
           d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
           d_s = d_s_g
           correction = correction_g
+          corr_num = corr_num_g
           alpha = alpha_g
 
         scale_eff = step_size_scale
