@@ -145,8 +145,8 @@ class LinearSolver:
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     res = self._kkt @ x
-    res += self._kkt.T @ x
     res -= self._kkt_diag * x
+    res += self._kkt.T @ x
     return res
 
   def format(self) -> str:
@@ -287,7 +287,10 @@ class DirectKktSolver:
     self._true_diags[: self.n] = self._p_diags
     self._true_diags[: self.n] += primal_shift
     self._true_diags[self.n :] = 1.0
-    np.maximum(self._true_diags, self.min_static_regularization, out=self._reg_diags)
+    np.maximum(
+        self._true_diags, self.min_static_regularization,
+        out=self._reg_diags,
+    )
     self._true_diags[self.n :] *= -1.0
     self._reg_diags[self.n :] *= -1.0
     self._solver.update_diag(self._reg_diags)
@@ -316,7 +319,7 @@ class DirectKktSolver:
         - "status": "converged", "stalled", or "non-converged".
 
     Raises:
-      ValueError: If the solution contains NaN values.
+      ValueError: If the solution contains nonfinite values.
     """
     # Adjust RHS to match the quasidefinite KKT form (second block negated).
     # Use pre-allocated buffer to avoid a copy allocation on every call.
@@ -334,8 +337,10 @@ class DirectKktSolver:
           f"Unknown refinement strategy: {self.refinement_strategy}"
       )
 
-    if np.any(np.isnan(sol)):
-      raise ValueError("Linear solver returned NaNs.")
+    if not np.all(np.isfinite(sol)):
+      # Infinities are as fatal as NaNs: an overflowed solve graded
+      # downstream produces inf <= atol + rtol*inf acceptances.
+      raise ValueError("Linear solver returned nonfinite values.")
 
     logging.debug(
         "KKT solve: strategy=%s, status=%s, solves=%d, res=%e",
@@ -361,15 +366,21 @@ class DirectKktSolver:
     status, solves = "non-converged", 0
     # max_iterative_refinement_steps >= 1 so we always do at least one solve.
     for solves in range(1, self.max_iterative_refinement_steps + 1):
-      # Perform correction step using the linear system solver.
+      # Perform correction step using the linear system solver. The update
+      # rebinds rather than mutates so sol_prev snapshots the pre-step
+      # iterate: backends are allowed to return (and reuse) an internal
+      # buffer for both solve() and the @ matvec, so the correction array
+      # itself is NOT stable across the residual evaluation below and must
+      # never be used for rollback.
       old_residual_norm = residual_norm
-      correction = self._solver.solve(residual)
-      sol += correction
+      sol_prev = sol
+      sol = sol + self._solver.solve(residual)
       residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
-      # Check for convergence.
-      if residual_norm < tolerance:
+      # Check for convergence (<= so an exact zero residual converges even
+      # under zero tolerances instead of being labeled stalled).
+      if residual_norm <= tolerance:
         status = "converged"
         break
 
@@ -393,7 +404,7 @@ class DirectKktSolver:
         # that regime and are calibrated to the legacy behavior, and the
         # two iterates are numerically equivalent there anyway.
         if residual_norm > _STALL_ROLLBACK_FACTOR * old_residual_norm:
-          sol -= correction
+          sol = sol_prev
           residual_norm = old_residual_norm
         status = "stalled"
         break
@@ -441,7 +452,7 @@ class DirectKktSolver:
     status = "non-converged"
     solves = 0
 
-    if residual_norm < tolerance:
+    if residual_norm <= tolerance:
       status = "converged"
 
     while (
@@ -452,7 +463,7 @@ class DirectKktSolver:
           self.gmres_restart, self.max_iterative_refinement_steps - solves
       )
       old_residual_norm = residual_norm
-      used = self._gmres_cycle(sol, residual, cycle_budget, tolerance)
+      used, broke = self._gmres_cycle(sol, residual, cycle_budget, tolerance)
       solves += used
 
       # Recompute the exact inf-norm residual; the per-cycle running check
@@ -466,13 +477,16 @@ class DirectKktSolver:
         best_residual_norm = residual_norm
         np.copyto(best_sol, sol)
 
-      if residual_norm < tolerance:
+      if residual_norm <= tolerance:
         status = "converged"
         break
 
-      # Lucky breakdown (cycle exited early via Arnoldi breakdown) means
-      # GMRES exhausted the Krylov subspace; further restarts cannot help.
-      if used < cycle_budget:
+      # Explicit breakdown signal (Arnoldi breakdown or a zero Givens
+      # pivot) means GMRES exhausted the Krylov subspace; further restarts
+      # cannot help. The under-budget inference alone deadlocks at
+      # gmres_restart == 1, where a zero-pivot apply consumes the whole
+      # cycle budget.
+      if broke or used < cycle_budget:
         status = "stalled"
         break
 
@@ -513,11 +527,13 @@ class DirectKktSolver:
       residual: np.ndarray,
       max_inner: int,
       tolerance: float,
-  ) -> int:
+  ) -> tuple[int, bool]:
     """One restart cycle of right-preconditioned GMRES.
 
     Updates ``sol`` in place. Returns the number of inner Arnoldi steps
-    taken (= preconditioner solves consumed). Stores the preconditioned
+    taken (= preconditioner solves consumed) and whether the cycle ended
+    in a zero-pivot breakdown (the caller must report the refinement
+    stalled rather than let a full-budget breakdown pass as progress). Stores the preconditioned
     basis Z so the final correction is a pure linear combination with no
     extra factor-solve at cycle exit. Early-exits when the running 2-norm
     residual estimate falls below ``tolerance``; the inf-norm is at most
@@ -532,9 +548,10 @@ class DirectKktSolver:
     sn = np.zeros(max_inner)
     g = np.zeros(max_inner + 1)
 
+    applies = 0
     beta = float(np.linalg.norm(residual))
     if beta == 0.0:
-      return 0
+      return 0, True
 
     v[0] = residual / beta
     g[0] = beta
@@ -543,6 +560,7 @@ class DirectKktSolver:
     breakdown = False
     for j in range(max_inner):
       # Right preconditioning: build the Krylov subspace of A M^{-1}.
+      applies = j + 1
       z[j] = self._solver.solve(v[j])
       w = self._solver @ z[j] - self._diag_correction * z[j]
 
@@ -575,12 +593,17 @@ class DirectKktSolver:
       # New Givens rotation to zero out h[j+1, j].
       rho = float(np.hypot(h[j, j], h[j + 1, j]))
       if rho == 0.0:
-        # Breakdown with a zero pivot: both entries vanish, so the
-        # rotation is arbitrary; the identity keeps everything finite.
-        cs[j], sn[j] = 1.0, 0.0
-      else:
-        cs[j] = h[j, j] / rho
-        sn[j] = h[j + 1, j] / rho
+        # Zero pivot: the new column contributes nothing the least-squares
+        # solve can use, and keeping it would make the triangular solve
+        # singular. Exit the cycle with the columns accumulated so far
+        # (possibly none) - a lucky/structural breakdown, not an error.
+        # The preconditioner apply for this column was already consumed;
+        # report it even though the column is unusable.
+        j_done = j
+        breakdown = True
+        break
+      cs[j] = h[j, j] / rho
+      sn[j] = h[j + 1, j] / rho
       h[j, j] = rho
       h[j + 1, j] = 0.0
 
@@ -589,7 +612,7 @@ class DirectKktSolver:
       g[j] = cs[j] * g[j]
 
       j_done = j + 1
-      if abs(g[j + 1]) < tolerance or breakdown:
+      if abs(g[j + 1]) <= tolerance or breakdown:
         break
 
     # Solve in Krylov space and apply the correction directly via the
@@ -597,9 +620,10 @@ class DirectKktSolver:
     # sol += M^{-1}(V.T @ y), but consumes no additional factor-solve at
     # cycle exit -- which keeps each cycle's apply count equal to the
     # number of Arnoldi steps performed.
-    y = solve_triangular(h[:j_done, :j_done], g[:j_done])
-    sol += z[:j_done].T @ y
-    return j_done
+    if j_done:
+      y = solve_triangular(h[:j_done, :j_done], g[:j_done])
+      sol += z[:j_done].T @ y
+    return applies, breakdown
 
   def free(self):
     """Frees the solver resources."""
