@@ -460,106 +460,6 @@ class QTQP:
         + t_tau * t_tau / max(_EPS, h_tau)
     )
 
-  def _solve_equality_only(self, b, c, collect_stats):
-    """Direct solve for z == m: one refined solve of [P, A'; A, 0][x; y] = [-c; b].
-
-    With no inequality rows there are no complementarity pairs, so the
-    interior-point iteration reduces to this single saddle-point system.
-    The result is graded on Clarabel's primal and dual residual tests at
-    tau = 1, s = 0, and returns SOLVED, ALMOST_SOLVED, or FAILED; a singular
-    system (inconsistent or unbounded) is reported as FAILED. The duality
-    gap is reported but not tested: with s = 0 the identity
-    gap = x'(Px + A'y + c) - y'(Ax - b) bounds it by the residuals times
-    the iterate norms, and Clarabel's gap scale max(1, min(|pcost|,
-    |dcost|)) carries no iterate norm, so on a large-norm solution with a
-    near-zero objective it rejects a machine-precision direct solve
-    (A = [1], b = 1e10, c = 0: x = 1e10 exactly, y ~ 1e-14, gap ~ 1e-4).
-    """
-    self.warm_lambda = None
-    self.warm_accepted = False
-    self.lambda_init = None
-    try:
-      # mu = 0 so refinement targets the true equality system; the
-      # additive shift keeps a rank-deficient P factorizable.
-      self._linear_solver.update(
-          mu=0.0, s=np.zeros(self.m), y=np.ones(self.m),
-          additive_regularization=True,
-      )
-      sol, lin_stats = self._linear_solver.solve(
-          rhs=np.concatenate([-c, -b]), warm_start=np.zeros(self.n + self.m)
-      )
-    except (ValueError, ArithmeticError, np.linalg.LinAlgError, RuntimeError):
-      logging.exception("Equality-only KKT solve failed; returning FAILED.")
-      full_m = self.m + (
-          len(self._presolve_state.b_dropped)
-          if self._presolve_state is not None else 0
-      )
-      return Solution(
-          np.full(self.n, np.nan), np.full(full_m, np.nan),
-          np.full(full_m, np.nan), [], SolutionStatus.FAILED
-      )
-    x, y = sol[: self.n], sol[self.n :]
-    svec = np.zeros(self.m)
-    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
-      x, y, svec = self._unequilibrate_iterates(x, y, svec)
-
-    ax = self.a @ x
-    aty = self.a.T @ y
-    px = self.p @ x if self.p.nnz else np.zeros(self.n)
-    ctx = float(self.c @ x)
-    bty = float(self.b @ y)
-    xpx = float(x @ px)
-    pres = _norm(ax - self.b)
-    dres = _norm(px + aty + self.c)
-    gap = abs(ctx + bty + xpx)
-    pcost = ctx + 0.5 * xpx
-    dcost = -bty - 0.5 * xpx
-    # Clarabel's residual scales with tau = 1 and s = 0.
-    norm_x = _norm(x)
-    norm_y = _norm(y)
-    prelrhs = max(1.0, self._norm_b + norm_x)
-    drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
-    res_primal = pres / prelrhs
-    res_dual = dres / drelrhs
-    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
-
-    def _meets(tol):
-      return res_primal < tol and res_dual < tol
-
-    if _meets(self.tol_feas):
-      status = SolutionStatus.SOLVED
-      self._log_footer("Solved (equality-only direct solve)")
-    elif _meets(_REDUCED_TOL_FEAS):
-      status = SolutionStatus.ALMOST_SOLVED
-      self._log_footer("Almost solved (equality-only direct solve)")
-    else:
-      status = SolutionStatus.FAILED
-      self._log_footer("Failed (equality-only direct solve)")
-
-    stats = []
-    if collect_stats:
-      dinfeas_a = _norm(ax) / max(1.0, norm_x)
-      dinfeas_p = _norm(px) / max(1.0, norm_x)
-      stats.append({
-          "iter": 0, "pres": pres, "dres": dres, "gap": gap,
-          "res_primal": res_primal, "res_dual": res_dual,
-          "gap_rel": gap_rel,
-          "ktratio": 0.0,
-          "pcost": pcost, "dcost": dcost, "status": status,
-          "mu": 0.0, "complementarity": 0.0, "tau": 1.0,
-          "sigma": 0.0, "alpha": 1.0,
-          "norm_x": norm_x, "norm_y": norm_y, "norm_s": 0.0,
-          "prelrhs": prelrhs, "drelrhs": drelrhs,
-          "pinfeas": _norm(aty) / max(1.0, norm_y),
-          "dinfeas": max(dinfeas_a, dinfeas_p),
-          "dinfeas_a": dinfeas_a, "dinfeas_p": dinfeas_p,
-          "ctx": ctx, "bty": bty,
-          "time": timeit.default_timer() - self.start_time,
-          "q_lin_sys_stats": lin_stats,
-      })
-    y, svec = self._postsolve(y, svec, s_dropped=self._dropped_slack(x))
-    return Solution(x, y, svec, stats, status)
-
   def _init_variables(self, a, p, b, c):
     """Produce the initial IPM iterates (CVXOPT-style residual embedding).
 
@@ -581,14 +481,19 @@ class QTQP:
       x, y, s = self._equilibrate_iterates(x, y, s)
     return x, y, s, 1.0, {}
 
-  def _init_cvxopt(self, a, p, b, c, reg=1e-8, interior_margin=1.0):
-    """CVXOPT-style init: solve regularized saddle-point KKT, then shift."""
+  def _init_cvxopt(self, a, p, b, c, interior_margin=1.0):
+    """Clarabel-style init: solve the initial-point KKT system, then shift."""
     m, n, z = self.m, self.n, self.z
     a_csc = a.tocsc() if not sp.isspmatrix_csc(a) else a
-    # The (2,2) block is -I, not -reg*I: this is the standard
-    # least-squares initialization (CVXOPT/Clarabel), giving y ~ Ax - b.
-    # With -reg*I the block is near-singular and y is amplified by 1/reg
-    # (measured: ||y|| ~ 3e10, mu_0 ~ 2e12 on netlib/25fv47).
+    self._init_lin_stats = {}
+    # The system is [P, A'; A, -H] with H the identity on inequality rows
+    # and ZERO on equality rows, exactly as Clarabel forms its initial
+    # point (the zero cone contributes no scaling block). Equality rows
+    # are therefore satisfied exactly by the initial point, and an
+    # all-equality problem is solved by the initialization alone; on
+    # inequality rows the block gives the bounded least-squares point
+    # y ~ Ax - b (with -reg*I there instead, y is amplified by 1/reg:
+    # measured ||y|| ~ 3e10, mu_0 ~ 2e12 on netlib/25fv47).
     #
     # The solve runs through the session's DirectKktSolver - same backend,
     # symbolic ordering, static regularization, and iterative refinement
@@ -596,21 +501,33 @@ class QTQP:
     # wall-clock on the kennington instances). The main loop's first
     # update() refactorizes afterwards as usual.
     if getattr(self, "_linear_solver", None) is not None:
-      self._linear_solver.update_unit_dual(reg)
+      self._linear_solver.update_init()
 
       def _saddle_solve(rx, ry):
-        # DirectKktSolver.solve applies [P+reg*I, A'; A, -I] with the
-        # second RHS block negated internally; pass (rx, -ry) so the
-        # solved system is [P+reg*I, A'; A, -I] @ sol = (rx, ry).
+        # DirectKktSolver.solve applies [P, A'; A, -H] with the second
+        # RHS block negated internally; pass (rx, -ry) so the solved
+        # system is [P, A'; A, -H] @ sol = (rx, ry).
         rhs = np.concatenate([rx, -ry])
-        sol, _ = self._linear_solver.solve(rhs=rhs, warm_start=np.zeros_like(rhs))
+        sol, lin_stats = self._linear_solver.solve(
+            rhs=rhs, warm_start=np.zeros_like(rhs)
+        )
+        # Accumulate over the (one or two) initialization solves so the
+        # iteration-0 stats row reports the initialization's refinement.
+        prev = self._init_lin_stats
+        lin_stats["solves"] = lin_stats.get("solves", 0) + (
+            prev.get("solves", 0) if prev else 0
+        )
+        self._init_lin_stats = lin_stats
         return sol
 
     else:
-      # Standalone use (tests): assemble and solve directly.
-      p_reg = (p + reg * sp.eye(n, format="csc")).tocsc()
+      # Standalone use (tests): assemble and solve directly, with a small
+      # shift on both blocks in place of the backend's static regularization.
+      shift = 1e-8
+      p_reg = (p + shift * sp.eye(n, format="csc")).tocsc()
+      h = np.concatenate([np.zeros(z), np.ones(m - z)]) + shift
       kkt = sp.bmat(
-          [[p_reg, a_csc.T], [a_csc, -sp.eye(m, format="csc")]],
+          [[p_reg, a_csc.T], [a_csc, -sp.diags(h, format="csc")]],
           format="csc",
       )
 
@@ -914,11 +831,6 @@ class QTQP:
         gmres_restart=gmres_restart,
     )
 
-    if self.z == self.m:
-      # All-equality problem: no complementarity pairs, so the IPM
-      # reduces to one saddle-point solve. A warm start is ignored.
-      return self._solve_equality_only(b, c, collect_stats)
-
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
     self._best_almost_score = math.inf
@@ -934,7 +846,9 @@ class QTQP:
     self.warm_lambda = None
     self.warm_accepted = False
     validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
-    if validated_warm is not None:
+    if validated_warm is not None and self.z < self.m:
+      # (An all-equality problem is solved by the initialization; a warm
+      # start has nothing to improve there.)
       wx, wy, ws = validated_warm
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
         wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
@@ -975,9 +889,34 @@ class QTQP:
     # Maros-Meszaros); pathologically scaled data announces itself here
     # by tens of orders of magnitude — this diagnostic is how corrupted
     # infinity-sentinel bounds in the benchmark datasets were found.
-    self.lambda_init = self._lambda_local(x, y, s, tau, a, p, b, c)
+    self.lambda_init = (
+        self._lambda_local(x, y, s, tau, a, p, b, c) if self.z < self.m else None
+    )
 
     self._log_header()
+
+    # Grade the initial point before the first step, as Clarabel does: an
+    # exact initialization - every all-equality problem, since the
+    # initialization solves that KKT system - or an accepted warm start can
+    # already meet the criteria. With no complementarity pairs (z == m)
+    # there is nothing to iterate on, so that point is the answer either
+    # way; otherwise the loop below takes over from it.
+    self.it = 0
+    stats_i = {
+        "lambda_init": self.lambda_init,
+        "q_lin_sys_stats": getattr(self, "_init_lin_stats", None) or {},
+        "predictor_lin_sys_stats": {},
+        "corrector_lin_sys_stats": {},
+    }
+    x, y, tau, s = self._normalize(x, y, tau, s)
+    status = self._check_termination(
+        x, y, tau, s, 0.0, 0.0, 0.0, stats_i, collect_stats
+    )
+    run_loop = status is SolutionStatus.UNFINISHED and self.z < self.m
+    if not run_loop:
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
 
     # Pre-allocate [x; y] and d_s to avoid repeated allocation each iteration.
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
@@ -993,7 +932,7 @@ class QTQP:
     # (TypeError, NameError, ...) still propagate.
     try:
       # self.it counts IPM steps already taken.
-      for self.it in range(max_iter):
+      for self.it in range(max_iter if run_loop else 0):
         stats_i = {}
         if self.it == 0:
           stats_i["lambda_init"] = self.lambda_init
@@ -1178,9 +1117,10 @@ class QTQP:
         if status != SolutionStatus.UNFINISHED:
           break
       else:
-        status = SolutionStatus.HIT_MAX_ITER
-        if collect_stats:
-          stats[-1]["status"] = status
+        if run_loop:
+          status = SolutionStatus.HIT_MAX_ITER
+          if collect_stats:
+            stats[-1]["status"] = status
 
     except (ValueError, ArithmeticError, np.linalg.LinAlgError,
             RuntimeError) as exc:
@@ -1638,7 +1578,7 @@ class QTQP:
     # kept for the distance-to-path certificate below; mu_hat is the
     # complementarity of THIS iterate in the operating scale.
     x_w, y_w, s_w = x, y, s
-    mu_hat = float(y_w @ s_w) / (self.m - self.z)
+    mu_hat = float(y_w @ s_w) / max(self.m - self.z, 1)
 
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
@@ -1744,10 +1684,13 @@ class QTQP:
     # separating near-solution never reaches while a genuine certificate
     # does, since the ratio grows like 1 / tau as tau -> 0.
     yts_ret = float(y @ s)
-    nu_tau_sq = float(self.m - self.z) * tau * tau
-    on_solution_side = yts_ret < nu_tau_sq
-    on_certificate_side = yts_ret > self.certificate_ktratio * nu_tau_sq
-    ktratio = yts_ret / nu_tau_sq if nu_tau_sq > 0.0 else math.inf
+    nu = self.m - self.z
+    nu_tau_sq = float(nu) * tau * tau
+    # With no complementarity pairs (z == m) there is no certificate side.
+    on_solution_side = nu == 0 or yts_ret < nu_tau_sq
+    on_certificate_side = nu > 0 and yts_ret > self.certificate_ktratio * nu_tau_sq
+    ktratio = (yts_ret / nu_tau_sq if nu_tau_sq > 0.0
+               else (0.0 if nu == 0 else math.inf))
 
     if (
         on_solution_side
@@ -1799,7 +1742,7 @@ class QTQP:
         "dinfeas": dinfeas,
         "dinfeas_a": dinfeas_a,
         "dinfeas_p": dinfeas_p,
-        "mu": float(y @ s) / (self.m - self.z),
+        "mu": float(y @ s) / max(self.m - self.z, 1),
         "sigma": sigma,
         "alpha": alpha,
         "tau": tau,

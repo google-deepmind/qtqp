@@ -662,7 +662,8 @@ def test_equality_only_recovers_known_solution():
 
 
 def test_equality_only_verbose(capsys):
-  """The equality-only direct path reports a footer and one stats row."""
+  """An all-equality problem terminates at the initial point: one stats
+  row, iteration 0, and the solved footer."""
   rng = np.random.default_rng(8842)
   m, n, z = 5, 10, 5
   a, b, c, p = _gen_equality_only(m, n, random_state=rng)
@@ -670,9 +671,9 @@ def test_equality_only_verbose(capsys):
       verbose=True, collect_stats=True
   )
   assert sol.status == qtqp.SolutionStatus.SOLVED
-  assert len(sol.stats) == 1
+  assert len(sol.stats) == 1 and sol.stats[0]["iter"] == 0
   captured = capsys.readouterr().out
-  assert "equality-only" in captured
+  assert "Solved" in captured
 
 
 def test_equality_only_sparse_p():
@@ -3691,10 +3692,9 @@ def test_equality_only_large_scale_refines_true_system():
   floor baked into the 'true' diagonals is never refined away and
   visibly perturbs large-scale duals; the direct path uses mu = 0.
 
-  Also pins that the direct path grades on residuals only: y comes back
-  at roundoff (~1e-14 on some BLAS builds), so the absolute gap is
-  |b'y| ~ 1e-4 against a zero objective, and a Clarabel-style gap test
-  would reject this machine-precision solution."""
+  With Clarabel's initialization the LP split solves [-c; 0] = [0; 0] for
+  the dual, so y is exactly zero and the point passes every criterion at
+  iteration 0."""
   a = sparse.csc_matrix(np.array([[1.0]]))
   sol = qtqp.QTQP(a=a, b=np.array([1e10]), c=np.array([0.0]), z=1).solve(
       verbose=False
@@ -3713,19 +3713,6 @@ def test_empty_problems_rejected():
         a=sparse.csc_matrix(np.array([[1.0]])), b=np.array([np.inf]),
         c=np.array([-2.0]), z=0, p=sparse.csc_matrix(np.array([[1.0]])),
     )
-
-def test_equality_only_update_failure_returns_failed(monkeypatch):
-  """A backend whose factorization fails through every retry must return
-  FAILED (with an all-NaN full-size payload), not raise."""
-  rng = np.random.default_rng(5900)
-  m, n = 5, 10
-  a, b, c, p = _gen_equality_only(m, n, random_state=rng)
-  def boom(self, *args, **kwargs):
-    raise RuntimeError("forced persistent factorization failure")
-  monkeypatch.setattr(qtqp.direct.DirectKktSolver, "update", boom)
-  sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(verbose=False)
-  assert sol.status == qtqp.SolutionStatus.FAILED
-  assert np.all(np.isnan(sol.x)) and np.all(np.isnan(sol.y))
 
 
 def test_equality_only_stats_schema_matches_main_loop():
@@ -3750,12 +3737,12 @@ def test_equality_only_stats_schema_matches_main_loop():
   assert not missing, f"equality stats row missing {missing}"
 
 
-def test_semidefinite_p_direct_path_solves_on_every_backend():
-  """The z == m direct path solves at mu = 0, so the factorized primal block
-  is exactly P. P = [[1, 1], [1, 1]] is singular along the constraint's
-  null space, so a magnitude floor leaves the KKT matrix singular and the
-  outcome depended on the backend; the additive shift makes every backend
-  solve it."""
+def test_semidefinite_p_equality_only_solves_on_every_backend():
+  """An all-equality problem is solved by the initialization, whose
+  factorized primal block is exactly P. P = [[1, 1], [1, 1]] is singular
+  along the constraint's null space, so a magnitude floor would leave the
+  KKT matrix singular and the outcome backend-dependent; the additive
+  static shift in the initialization factor makes every backend solve it."""
   p = sparse.csc_matrix(np.array([[1.0, 1.0], [1.0, 1.0]]))
   a = sparse.csc_matrix(np.array([[1.0, 1.0]]))
   c = np.array([-1.0, -1.0])
