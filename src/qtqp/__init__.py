@@ -465,10 +465,15 @@ class QTQP:
 
     With no inequality rows there are no complementarity pairs, so the
     interior-point iteration reduces to this single saddle-point system.
-    The result is graded with the main loop's termination tests (Clarabel's
-    residual and gap criteria, at tau = 1, s = 0) and returns SOLVED,
-    ALMOST_SOLVED, or FAILED; a singular system (inconsistent or unbounded)
-    is reported as FAILED.
+    The result is graded on Clarabel's primal and dual residual tests at
+    tau = 1, s = 0, and returns SOLVED, ALMOST_SOLVED, or FAILED; a singular
+    system (inconsistent or unbounded) is reported as FAILED. The duality
+    gap is reported but not tested: with s = 0 the identity
+    gap = x'(Px + A'y + c) - y'(Ax - b) bounds it by the residuals times
+    the iterate norms, and Clarabel's gap scale max(1, min(|pcost|,
+    |dcost|)) carries no iterate norm, so on a large-norm solution with a
+    near-zero objective it rejects a machine-precision direct solve
+    (A = [1], b = 1e10, c = 0: x = 1e10 exactly, y ~ 1e-14, gap ~ 1e-4).
     """
     self.warm_lambda = None
     self.warm_accepted = False
@@ -518,14 +523,13 @@ class QTQP:
     res_dual = dres / drelrhs
     gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
 
-    def _meets(tol_feas, tol_gap_abs, tol_gap_rel):
-      return (res_primal < tol_feas and res_dual < tol_feas
-              and (gap < tol_gap_abs or gap_rel < tol_gap_rel))
+    def _meets(tol):
+      return res_primal < tol and res_dual < tol
 
-    if _meets(self.tol_feas, self.tol_gap_abs, self.tol_gap_rel):
+    if _meets(self.tol_feas):
       status = SolutionStatus.SOLVED
       self._log_footer("Solved (equality-only direct solve)")
-    elif _meets(_REDUCED_TOL_FEAS, _REDUCED_TOL_GAP_ABS, _REDUCED_TOL_GAP_REL):
+    elif _meets(_REDUCED_TOL_FEAS):
       status = SolutionStatus.ALMOST_SOLVED
       self._log_footer("Almost solved (equality-only direct solve)")
     else:
