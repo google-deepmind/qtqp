@@ -53,13 +53,14 @@ _EPS = 1e-15  # Standard epsilon for numerical safety
 # ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown, the
 # best iterate seen is returned as ALMOST_SOLVED when it meets the same
 # criteria form at tolerances this factor looser than the user-requested
-# atol/rtol (at the 1e-9 defaults: 1e-6-grade, still a usable solution).
+# atol/rtol (at the current defaults: 1e-4 absolute / 1e-5 relative,
+# still a usable near-solution).
 _ALMOST_FACTOR = 1000.0
 # Floor on the complementarity parameter mu wherever it enters the
 # algorithm (KKT shift, corrector targets, barrier terms). Below this
 # scale mu carries no information in double precision relative to O(1)
 # equilibrated data, and letting it underflow leaves the Newton system
-# effectively unregularized: at the 1e-9 default tolerances the endgame
+# effectively unregularized: at the default tolerance scale the endgame
 # reaches depths where an underflowed mu makes the KKT factorization
 # effectively singular (observed: CHOLMOD NotPositiveDefinite on
 # Windows). Healthy solves terminate at mu ~ 1e-9..1e-11 and never
@@ -521,8 +522,8 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-9,
-      rtol: float = 1e-9,
+      atol: float = 1e-7,
+      rtol: float = 1e-8,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -575,8 +576,8 @@ class QTQP:
   def _solve_impl(
       self,
       *,
-      atol: float = 1e-9,
-      rtol: float = 1e-9,
+      atol: float = 1e-7,
+      rtol: float = 1e-8,
       atol_infeas: float = 1e-8,
       rtol_infeas: float = 1e-9,
       max_iter: int = 100,
@@ -605,14 +606,15 @@ class QTQP:
       atol_infeas (float): Certificate-quality tolerance for infeasibility
         and unboundedness detection. A candidate ray u must be good in two
         complementary senses: its relative backward error (violations over
-        ||operator|| * ||u||) must be below atol_infeas, AND its violations
-        must be below atol_infeas * |objective slope| + rtol_infeas * ||u||.
-        The first rejects large-slope pseudo-rays, the second rejects
-        huge-norm near-solutions; each guards the other's blind spot.
-      rtol_infeas (float): Ray-relative slack in the slope-scaled
-        certificate test, and the margin by which the certificate's
-        objective slope (c'x or b'y) must be negative relative to the data
-        and ray norms.
+        ||operator|| * ||u||) must be at most atol_infeas, AND its
+        violations must be at most atol_infeas * |objective slope| (the
+        pure-slope sense: quality judged absolutely on the slope-normalized
+        ray, with no ray-norm slack). The first rejects large-slope
+        pseudo-rays, the second rejects huge-norm weakly separating
+        near-solutions; each guards the other's blind spot.
+      rtol_infeas (float): The margin by which the certificate's objective
+        slope (c'x or b'y) must be negative relative to the data and ray
+        norms.
       max_iter (int): Maximum number of iterations before stopping.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
@@ -1589,39 +1591,29 @@ class QTQP:
     dinfeas = max(dinfeas_a, dinfeas_p)
     pinfeas = norm_aty / (self._norm_a_one * norm_y + _EPS)
 
-    # Residual tolerance relative scales. Each is the max of two families:
-    # the summand norms (the floor below which the residual cannot even be
-    # evaluated in floating point) and the iterate norm (the backward-error
-    # allowance: dres <= rtol * ||x||/tau accepts a point that is exactly
-    # dual-feasible for P + dP with ||dP|| <= rtol, which is precisely the
-    # mu*I perturbation the regularized path itself commits; likewise
-    # pres <= rtol * ||y||/tau on the primal side).
+    # Residual tolerance relative scales: the summand norms of each
+    # residual and nothing else. No iterate norm enters, so a bad warm
+    # start or a divergence cannot inflate its own tolerance.
     prelrhs = max(
-        _norm(ax, np.inf) * inv_tau,
-        _norm(s, np.inf) * inv_tau,
-        self._norm_b,
-        norm_y * inv_tau,
+        _norm(ax, np.inf) * inv_tau, _norm(s, np.inf) * inv_tau, self._norm_b
     )
+    drelrhs = max(norm_px * inv_tau, norm_aty * inv_tau, self._norm_c)
+    # Gap tolerance relative scale: the cost magnitudes.
+    gaprelrhs = min(abs(pcost), abs(dcost))
 
-    drelrhs = max(
-        norm_px * inv_tau,
-        norm_aty * inv_tau,
-        self._norm_c,
-        norm_x * inv_tau,
-    )
-
-    # Gap tolerance relative scale: the cost magnitudes (measurement floor)
-    # or the first-power iterate norm (the empirically calibrated allowance
-    # for the regularized path's O(mu*||u||^2) objective bias; see the
-    # criteria validation on NETLIB + Maros-Meszaros).
-    gaprelrhs = max(
-        min(abs(pcost), abs(dcost)),
-        (norm_x + norm_y) * inv_tau,
-    )
+    # Embedding dichotomy gate: kappa < tau (equivalently y's < nu * tau^2
+    # with nu = m - z) puts the iterate on the solution side, kappa > tau
+    # on the certificate side. A pure number, so a divergence cannot
+    # launder it: y's grows with the iterate while nu * tau^2 does not.
+    yts_ret = float(y @ s)
+    nu_tau_sq = float(self.m - self.z) * tau * tau
+    on_solution_side = yts_ret < nu_tau_sq
+    on_certificate_side = yts_ret > nu_tau_sq
 
     # Solved: duality gap and both residuals are within tolerance.
     if (
-        gap < self.atol + self.rtol * gaprelrhs
+        on_solution_side
+        and gap < self.atol + self.rtol * gaprelrhs
         and pres < self.atol + self.rtol * prelrhs
         and dres < self.atol + self.rtol * drelrhs
     ):
@@ -1632,25 +1624,27 @@ class QTQP:
     #     rejects large-slope pseudo-rays whose |c'x| buys unbounded slack
     #     in the slope-scaled test (e.g. NETLIB dfl001, where a direction
     #     violating the constraints at 5-9% of ||A|| ||x|| was certified);
-    #   - slope-scaled (violations < atol_infeas * |slope| + rtol_infeas *
-    #     ||ray||): rejects huge-norm near-solutions, whose data-scaled
+    #   - pure-slope (violations < atol_infeas * |slope|): rejects
+    #     huge-norm weakly separating near-solutions, whose data-scaled
     #     quality becomes small automatically (A'y ~ -c*tau with enormous
     #     ||y|| makes ||A'y|| / (||A||_1 ||y||) tiny while y is nothing
-    #     like a ray; e.g. NETLIB fit1p, tuff, vtp.base, fffff800).
+    #     like a ray; e.g. NETLIB fit1p, tuff, vtp.base, fffff800, and
+    #     the miplib physiciansched6-2 false-infeasibility class).
     # The quality measures need no zero-ray guard: as ||x|| -> 0 the
     # data-scaled denominator vanishes while the numerator retains the
     # O(1) slack s, so dinfeas diverges and nothing is certified.
     elif (
-        ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
+        on_certificate_side
+        and ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
         and dinfeas < self.atol_infeas
-        and max(norm_ax_plus_s, norm_px)
-        < self.atol_infeas * abs(ctx) + self.rtol_infeas * norm_x
+        and max(norm_ax_plus_s, norm_px) < self.atol_infeas * abs(ctx)
     ):
       status = SolutionStatus.UNBOUNDED
     elif (
-        bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
+        on_certificate_side
+        and bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
         and pinfeas < self.atol_infeas
-        and norm_aty < self.atol_infeas * abs(bty) + self.rtol_infeas * norm_y
+        and norm_aty < self.atol_infeas * abs(bty)
     ):
       status = SolutionStatus.INFEASIBLE
     else:
@@ -1667,7 +1661,10 @@ class QTQP:
         pres / (almost_atol + almost_rtol * prelrhs),
         dres / (almost_atol + almost_rtol * drelrhs),
     )
-    if almost_score < self._best_almost_score:
+    new_best_almost = (
+        on_solution_side and almost_score < self._best_almost_score
+    )
+    if new_best_almost:
       self._best_almost_score = almost_score
       self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
