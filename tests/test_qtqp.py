@@ -2836,7 +2836,6 @@ def test_fused_corrector_handles_tiny_y():
     assert stats_i['alpha'] > 0.0, stats_i
 
 
-
 def test_default_tolerances_are_1e9():
   import inspect
   sig = inspect.signature(qtqp.QTQP.solve)
@@ -3279,8 +3278,6 @@ def test_centrality_correctors_infeasible_unbounded():
   _assert_unbounded(sol, a, c, p, 5)
 
 
-
-
 # =============================================================================
 # Certificate quality: pseudo-rays must not be certified
 # =============================================================================
@@ -3349,5 +3346,134 @@ def test_certificate_rejects_large_slope_pseudo_ray():
   )
   assert status != qtqp.SolutionStatus.UNBOUNDED
   assert status != qtqp.SolutionStatus.INFEASIBLE
+
+
+# =============================================================================
+# Refinement and factorization robustness
+# =============================================================================
+
+def test_richardson_rollback_returns_genuine_iterate_dense():
+  """The rollback must restore the pre-correction iterate even when the
+  backend reuses one buffer for solve() and the matvec (dense backends):
+  the reported residual must belong to the returned vector."""
+  rng = np.random.default_rng(4400)
+  m, n, z = 20, 12, 3
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 0.5
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+
+  class _CorruptSecond:
+    def __init__(self, inner):
+      self._inner = inner
+      self._calls = 0
+    def __getattr__(self, name):
+      return getattr(self._inner, name)
+    def __matmul__(self, other):
+      return self._inner @ other
+    def solve(self, rhs):
+      self._calls += 1
+      out = self._inner.solve(rhs)
+      if self._calls == 2:
+        out = out + 1e8 * np.ones_like(out)
+      return out
+
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z, min_static_regularization=1e-8,
+      max_iterative_refinement_steps=10, atol=0.0, rtol=0.0,
+      solver=_CorruptSecond(qtqp.direct.ScipyDenseSolver()),
+      refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  q = np.concatenate([c, b])
+  sol, stats = solver.solve(rhs=q, warm_start=np.zeros(n + m))
+  assert stats["status"] == "stalled"
+  # Recompute the true residual of the returned vector; it must match the
+  # reported one (the aliasing bug produced residuals ~1e50 here).
+  kkt_rhs = q.copy()
+  kkt_rhs[n:] *= -1.0
+  true_res = np.linalg.norm(
+      kkt_rhs - solver._solver @ sol + solver._diag_correction * sol, np.inf
+  )
+  np.testing.assert_allclose(true_res, stats["final_residual_norm"], rtol=1e-6)
+
+
+def test_gmres_zero_operator_breakdown_returns():
+  """An exactly zero TRUE operator (A = 0, P = 0, mu = 0, all-equality
+  rows) hits the zero Givens pivot on the first Arnoldi column: the cycle
+  must exit cleanly with the consumed preconditioner apply reported, not
+  hand a singular pivot to the triangular solve."""
+  n_, m_ = 3, 4
+  a = sparse.csc_matrix((m_, n_))
+  p = sparse.csc_matrix((n_, n_))
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=m_, min_static_regularization=1e-8,
+      max_iterative_refinement_steps=8, atol=1e-12, rtol=1e-12,
+      solver=qtqp.direct.ScipySolver(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, gmres_restart=8,
+  )
+  # mu = 0 with all-equality rows makes every TRUE diagonal exactly zero,
+  # so kkt_true is the zero operator while the regularized factor stays
+  # invertible: w = A_true @ z = 0 exactly and rho = 0 on column one.
+  solver.update(mu=0.0, s=np.zeros(m_), y=np.ones(m_))
+  rhs = np.ones(n_ + m_)
+  sol, stats = solver.solve(rhs=rhs, warm_start=np.zeros(n_ + m_))
+  assert np.all(np.isfinite(sol))
+  assert stats["status"] in ("converged", "stalled", "non-converged")
+  assert stats["solves"] >= 1
+
+
+def test_gmres_actually_restarts_across_cycles():
+  """Round-7 P3: a gmres_restart smaller than the applies needed forces at
+  least two Arnoldi cycles; the refinement must still converge, and the
+  reported applies must exceed one restart length (proving a restart
+  happened rather than a single lucky cycle)."""
+  rng = np.random.default_rng(9100)
+  m, n, z = 120, 80, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = 1e-9
+  s = rng.uniform(0.5, 1.5, size=m)
+  y = rng.uniform(0.5, 1.5, size=m)
+  s[:z] = 0.0
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z, solver=qtqp.direct.ScipySolver(),
+      refinement_strategy=qtqp.RefinementStrategy.GMRES, gmres_restart=2,
+      min_static_regularization=1e-2,  # large clamp => hard refinement
+      max_iterative_refinement_steps=40, atol=1e-12, rtol=0.0,
+  )
+  solver.update(mu=mu, s=s, y=y)
+  rhs = rng.standard_normal(n + m)
+  sol, stats = solver.solve(rhs=rhs, warm_start=np.zeros(n + m))
+  assert stats["converged"], stats
+  assert stats["solves"] > 2, (
+      f"only {stats['solves']} applies: never exceeded one restart cycle"
+  )
+  assert stats["final_residual_norm"] < 1e-8, stats
+
+
+def test_nonfinite_backend_solution_raises(monkeypatch):
+  """Round-8 P1: direct.py must reject infinities from the backend, not
+  just NaNs - an overflowed solve graded downstream produces
+  inf <= atol + rtol*inf acceptances."""
+  rng = np.random.default_rng(9300)
+  m, n, z = 8, 5, 2
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  s = rng.uniform(0.5, 1.5, size=m)
+  y = rng.uniform(0.5, 1.5, size=m)
+  s[:z] = 0.0
+  backend = qtqp.direct.ScipySolver()
+  solver = qtqp.direct.DirectKktSolver(
+      a=a, p=p, z=z, solver=backend,
+      refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,
+      min_static_regularization=1e-8,
+      max_iterative_refinement_steps=1, atol=1e-12, rtol=1e-12,
+  )
+  solver.update(mu=1e-2, s=s, y=y)
+  monkeypatch.setattr(
+      backend, "solve", lambda rhs: np.full(n + m, np.inf)
+  )
+  with pytest.raises(ValueError, match="nonfinite"):
+    solver.solve(rhs=np.ones(n + m), warm_start=np.zeros(n + m))
 
 
