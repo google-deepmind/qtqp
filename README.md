@@ -143,12 +143,11 @@ Arguments:
     constraint whose RHS approaches `1e20` before calling the solver.
 -   `c`: (n) Cost vector.
 -   `z`: Number of equality constraints (size of the zero cone). Must satisfy
-    `0 ≤ z ≤ m`; `z == m` (all-equality) is solved by a single direct KKT
-    solve, graded on the same primal and dual residual tests as the
-    iterative path (the gap is reported but not tested: it is bounded by
-    the residuals, and the gap scale has no iterate norm, so it would
-    reject exact large-norm solutions); a singular system is reported as
-    `FAILED`. Problems with no variables, or with no constraints left
+    `0 ≤ z ≤ m`; an all-equality problem (`z == m`) is solved by the
+    initialization itself, which solves that KKT system exactly, and is
+    graded by the standard criteria at iteration 0 (a singular system is
+    reported as `FAILED`, or `ALMOST_SOLVED` if the reduced tolerances
+    hold). Problems with no variables, or with no constraints left
     after presolve, are rejected.
 -   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
 
@@ -249,8 +248,8 @@ Key parameters:
     the standard initialization, so warm starting is never worse than a
     cold solve by more than the certificate evaluation (three matvecs per
     shift). After `solve`, the measured `warm_lambda` and the `warm_accepted`
-    decision are attributes on the solver. The `z == m` direct solve
-    ignores a warm start.
+    decision are attributes on the solver. A warm start is ignored on an
+    all-equality problem, which the initialization solves outright.
 -   `warm_start_threshold`: Acceptance threshold for the certified warm
     start (default `100.0`). Poisoned or mis-scaled points measure orders of
     magnitude above it; same-problem re-entries orders of magnitude below.
@@ -270,12 +269,16 @@ Choose one with the `equilibration_strategy` argument:
 
 #### Initialization
 
-The initial iterate is a least-squares initialization in the CVXOPT /
-Clarabel style: one saddle-point solve for QPs (two, with a shared
+The initial iterate is Clarabel's initialization: one solve of
+`[P, A'; A, -H][x; y] = [-c; b]` for QPs (two, with a shared
 factorization, for LPs - primal from feasibility, dual from optimality),
-run through the same linear-solver backend, ordering, static
-regularization, and iterative refinement as the main loop, then shifted
-into the strict interior. If the initialization solve produces
+with `H` the identity on inequality rows and zero on equality rows, so
+equality rows are satisfied exactly by the initial point. It runs through
+the same linear-solver backend, ordering, static regularization, and
+iterative refinement as the main loop, then the inequality components are
+shifted into the strict interior. The initial point is graded before the
+first step, so an exact initialization or an accepted warm start can
+terminate at iteration 0. If the initialization solve produces
 non-finite values, the solver falls back to a trivial unit start.
 
 #### Refinement strategies

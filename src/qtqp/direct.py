@@ -238,10 +238,7 @@ class DirectKktSolver:
     self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
     self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
 
-  def update(
-      self, mu: float, s: np.ndarray, y: np.ndarray,
-      additive_regularization: bool = False,
-  ):
+  def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
 
     Computes regularized diagonals (clamped to min_static_regularization) for
@@ -253,8 +250,6 @@ class DirectKktSolver:
       mu: The barrier parameter.
       s: The slack variables.
       y: The dual variables for the conic constraints.
-      additive_regularization: Add the clamp to the factorized diagonals
-        instead of flooring with it (for mu = 0 callers).
     """
     # Fill true diagonals: [p_diags + mu, h + mu] where h = [[0]*z; s/y].
     # KKT form: [P+mu*I, A'; A, -(D+mu*I)]
@@ -268,42 +263,34 @@ class DirectKktSolver:
     self._true_diags[self.n :] = -np.abs(self._true_diags[self.n :])
     self._true_diags[: self.n] = np.abs(self._true_diags[: self.n])
 
-    # Inject regularized diagonals and factorize. Iterative refinement
-    # applies diag_correction against the TRUE diagonals, so the shift
-    # costs refinement steps, never accuracy.
-    if additive_regularization:
-      # Add the clamp instead of flooring with it: a floor cannot
-      # regularize a rank-deficient block with a healthy diagonal, which
-      # the mu = 0 direct path needs (the main loop has P + mu*I).
-      np.add(abs_true, self.min_static_regularization, out=self._reg_diags)
-    else:
-      np.maximum(
-          abs_true, self.min_static_regularization, out=self._reg_diags
-      )
+    # Inject regularized diagonals (clamped to min_static_regularization)
+    # and factorize. Iterative refinement applies diag_correction against
+    # the TRUE diagonals, so the clamp costs refinement steps, never
+    # accuracy - the refined solution still solves the true system.
+    np.maximum(abs_true, self.min_static_regularization, out=self._reg_diags)
     self._reg_diags[self.n :] *= -1.0
     self._solver.update_diag(self._reg_diags)
     self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
-  def update_unit_dual(self, primal_shift: float) -> None:
-    """Forms and factorizes [P + primal_shift*I, A'; A, -I].
+  def update_init(self) -> None:
+    """Forms and factorizes the initialization system [P, A'; A, -H].
 
-    The saddle system of the CVXOPT-style initialization, routed through
-    exactly the same backend, symbolic ordering, static-regularization
-    clamp, and iterative-refinement bookkeeping as the main-loop update().
-    The subsequent main-loop update() refactorizes as usual.
-
-    Args:
-      primal_shift: The (1, 1)-block Tikhonov shift (the init's reg).
+    H is the identity on inequality rows and zero on equality rows: this
+    is Clarabel's initial-point system (the zero cone contributes no
+    scaling block), so on equality rows the initial point satisfies
+    Ax = b exactly rather than a least-squares penalty. The static
+    regularization is ADDED to the factorized diagonals only - a
+    magnitude floor cannot regularize the zero block, nor a rank-deficient
+    P - and iterative refinement targets the true system, so the shift
+    costs refinement steps, never accuracy. The subsequent main-loop
+    update() refactorizes as usual.
     """
     self._true_diags[: self.n] = self._p_diags
-    self._true_diags[: self.n] += primal_shift
-    self._true_diags[self.n :] = 1.0
-    np.maximum(
-        self._true_diags, self.min_static_regularization,
-        out=self._reg_diags,
-    )
-    self._true_diags[self.n :] *= -1.0
+    self._true_diags[self.n : self.n + self.z] = 0.0
+    self._true_diags[self.n + self.z :] = -1.0
+    np.abs(self._true_diags, out=self._reg_diags)
+    self._reg_diags += self.min_static_regularization
     self._reg_diags[self.n :] *= -1.0
     self._solver.update_diag(self._reg_diags)
     self._solver.factorize()
