@@ -1456,8 +1456,8 @@ class QTQP:
     unmodified mu_target.
 
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
-    linearized fallback (avoids squaring solver noise) when it's noisy or the
-    quadratic residual check fails.
+    fallback with P linearized at the current x (avoids squaring solver
+    noise) when the quadratic is degenerate or has no admissible root.
     """
     # Prepare RHS for the linear system.
     r = (mu - mu_target) * r_anchor
@@ -1566,12 +1566,15 @@ class QTQP:
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
   ) -> float:
-    """Linearized fallback for tau via first-order Taylor expansion of G(z,tau).
+    """Fallback for tau: the exact tau quadratic with P linearized at x.
 
-    Replaces the exact quadratic with a linearization around z_curr = [x; y]
-    and tau_curr. P only multiplies the safe current iterate x, so KKT noise
-    enters linearly rather than quadratically. A [0.1x, 10x] trust region
-    prevents manifold drift from the first-order approximation.
+    The same equation as _solve_for_tau, except that x'Px is replaced by its
+    first-order expansion around the current x, so P only multiplies the
+    safe current iterate and KKT noise enters the coefficients linearly
+    rather than squared. The mu tau^2 term stays exact, which matters when
+    tau is not small relative to the rest of the iterate. If the quadratic
+    has no admissible root, take the first-order step in tau of the same
+    model instead. A [0.1x, 10x] trust region prevents manifold drift.
 
     Linear-residual coefficients on tau use mu and mu_target; the
     cone-product constant -mu_target keeps the unmodified mu_target.
@@ -1580,31 +1583,44 @@ class QTQP:
     q, kinv_q = self.q, self.kinv_q
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
-
-    # Scalar inner products; avoids allocating z_curr = [x; y] or r_z.
-    q_z = q[:n] @ x + q[n:] @ y
-    x_px = x @ px
     q_kinv_q = q @ kinv_q
+    q_kinv_r = q @ kinv_r
     px_kinv_q = px @ kinv_q[:n]
-    # r_z = kinv_r - tau_curr * kinv_q - z_curr, collapsed into scalar dots.
-    q_rz = q @ kinv_r - tau_curr * q_kinv_q - q_z
-    px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
+    px_kinv_r = px @ kinv_r[:n]
+    x_px = x @ px
+    t_a = mu + q_kinv_q
+    t_b = (mu_target - mu) * tau_anchor - q_kinv_r + 2.0 * px_kinv_q
+    t_c = -mu_target + x_px - 2.0 * px_kinv_r
 
-    # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr * tau_curr
-         + (mu_target - mu) * tau_anchor * tau_curr
-         - tau_curr * q_z - mu_target - x_px)
-
-    # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
-    num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
-           tau_curr * q_kinv_q + 2.0 * px_kinv_q)
-
-    tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
-
-    if not np.isfinite(tau_sol):
-      logging.warning("Linearized tau fallback non-finite; using current tau.")
-      return tau_curr
+    tau_sol = None
+    if abs(t_a) < _EPS:
+      if abs(t_b) >= _EPS:
+        tau_sol = -t_c / t_b
+    else:
+      discriminant = t_b * t_b - 4.0 * t_a * t_c
+      if discriminant >= 0.0:
+        # Stable quadratic formula (Muller), as in _solve_for_tau.
+        if t_b > 0:
+          tau_sol = t_c / (-0.5 * (t_b + math.sqrt(discriminant)))
+        else:
+          tau_sol = (-0.5 * (t_b - math.sqrt(discriminant))) / t_a
+    if tau_sol is None or not np.isfinite(tau_sol):
+      # First-order step: linearize the same model around the current
+      # iterate z_curr = [x; y] and tau_curr, with r_z = kinv_r -
+      # tau_curr * kinv_q - z_curr collapsed into scalar dots.
+      q_z = q[:n] @ x + q[n:] @ y
+      q_rz = q_kinv_r - tau_curr * q_kinv_q - q_z
+      px_rz = px_kinv_r - tau_curr * px_kinv_q - x_px
+      g = (mu * tau_curr * tau_curr
+           + (mu_target - mu) * tau_anchor * tau_curr
+           - tau_curr * q_z - mu_target - x_px)
+      num = g - tau_curr * q_rz - 2.0 * px_rz
+      den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
+             + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
+      tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
+      if not np.isfinite(tau_sol):
+        logging.warning("Tau fallback non-finite; using current tau.")
+        return tau_curr
     return min(max(tau_sol, 0.1 * tau_curr), 10.0 * tau_curr)
 
   def _normalize(self, x, y, tau, s):
