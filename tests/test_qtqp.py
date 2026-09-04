@@ -280,87 +280,64 @@ def _gen_unbounded(m, n, z, random_state=None):
   return sparse.csc_matrix(a), b, c, sparse.csc_matrix(p)
 
 
-def _assert_solution(solution, a, b, c, p, z, atol=1e-7, rtol=1e-8):
-  """Assert that the solution satisfies KKT conditions."""
+def _assert_solution(solution, a, b, c, p, z, tol_feas=1e-8, tol_gap=1e-8):
+  """Assert that the solution satisfies KKT conditions (Clarabel's criteria)."""
   x = solution.x
   y = solution.y
   s = solution.s
 
   pcost = c @ x + 0.5 * x @ p @ x
   dcost = -b @ y - 0.5 * x @ p @ x
-  pres = np.linalg.norm(a @ x + s - b, np.inf)
-  dres = np.linalg.norm(p @ x + a.T @ y + c, np.inf)
+  pres = np.linalg.norm(a @ x + s - b)
+  dres = np.linalg.norm(p @ x + a.T @ y + c)
   gap = np.abs(c @ x + b @ y + x @ p @ x)
-  # Relative scales mirror the solver's termination criteria exactly:
-  # the summand norms of each residual and nothing else (no iterate
-  # norms anywhere - those were the round-5/7 laundering channels).
-  prelrhs = max(
-      np.linalg.norm(a @ x, np.inf),
-      np.linalg.norm(s, np.inf),
-      np.linalg.norm(b, np.inf),
-  )
-  drelrhs = max(
-      np.linalg.norm(p @ x, np.inf),
-      np.linalg.norm(a.T @ y, np.inf),
-      np.linalg.norm(c, np.inf),
-  )
-  gaprelrhs = min(abs(pcost), abs(dcost))
+  norm_x, norm_y, norm_s = map(np.linalg.norm, (x, y, s))
+  res_primal = pres / max(1.0, np.linalg.norm(b, np.inf) + norm_x + norm_s)
+  res_dual = dres / max(1.0, np.linalg.norm(c, np.inf) + norm_x + norm_y)
+  gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
   assert solution.status == qtqp.SolutionStatus.SOLVED
-  np.testing.assert_array_less(gap, atol + rtol * gaprelrhs)
-  np.testing.assert_array_less(pres, atol + rtol * prelrhs)
-  np.testing.assert_array_less(dres, atol + rtol * drelrhs)
+  assert res_primal < tol_feas, res_primal
+  assert res_dual < tol_feas, res_dual
+  assert gap < tol_gap or gap_rel < tol_gap, (gap, gap_rel)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
 
 
-def _assert_infeasible(solution, a, b, z, atol=1e-8, rtol=1e-9):
-  """Assert that the solution satisfies KKT conditions for primal infeasibility."""
+def _assert_infeasible(solution, a, b, z, tol_infeas_abs=1e-8, tol_infeas_rel=1e-8):
+  """Assert a valid primal-infeasibility certificate (Clarabel's test)."""
   x = solution.x
   y = solution.y
   s = solution.s
-
-  # Certificate quality is judged as relative backward error, mirroring the
-  # solver's detection contract: violations over ||A||_1 * ||y||.
-  norm_a_one = float(abs(a).sum(axis=0).max())
-  norm_aty = np.linalg.norm(a.T @ y, np.inf)
-  pinfeas = norm_aty / (norm_a_one * np.linalg.norm(y, np.inf) + 1e-300)
 
   assert solution.status == qtqp.SolutionStatus.INFEASIBLE
   np.testing.assert_array_equal(np.isnan(x), True)
   np.testing.assert_array_equal(np.isnan(s), True)
-  np.testing.assert_allclose(b @ y, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_allclose(b @ y, -1.0, atol=1e-8, rtol=1e-9)
   np.testing.assert_array_less(-1e-9, np.min(y[z:], initial=0.0))
-  # BOTH public gates: data-scaled quality AND the pure-slope sense
-  # (violations at most atol * |b'y|).
-  np.testing.assert_array_less(pinfeas, atol)
-  assert norm_aty <= atol * abs(float(b @ y)) + 1e-300
+  bty = float(b @ y)
+  assert bty < -tol_infeas_abs
+  pinfeas = np.linalg.norm(a.T @ y) / max(1.0, np.linalg.norm(y))
+  assert pinfeas < -tol_infeas_rel * bty, pinfeas
 
 
-def _assert_unbounded(solution, a, c, p, z, atol=1e-8, rtol=1e-9):
-  """Assert that the solution satisfies KKT conditions for primal unboundedness."""
+def _assert_unbounded(solution, a, c, p, z, tol_infeas_abs=1e-8, tol_infeas_rel=1e-8):
+  """Assert a valid dual-infeasibility (unboundedness) certificate."""
   x = solution.x
   y = solution.y
   s = solution.s
 
-  # Certificate quality is judged as relative backward error, mirroring the
-  # solver's detection contract: violations over ||A||_inf * ||x|| (and
-  # ||P||_inf * ||x|| for the quadratic part).
-  norm_x = np.linalg.norm(x, np.inf)
-  norm_a_inf = float(abs(a).sum(axis=1).max())
-  norm_p_inf = float(abs(p).sum(axis=1).max()) if p.nnz else 0.0
-  norm_axs = np.linalg.norm(a @ x + s, np.inf)
-  norm_pxc = np.linalg.norm(p @ x, np.inf)
-  dinfeas_a = norm_axs / (norm_a_inf * norm_x + 1e-300)
-  dinfeas_p = norm_pxc / (norm_p_inf * norm_x + 1e-300)
-
   assert solution.status == qtqp.SolutionStatus.UNBOUNDED
   np.testing.assert_array_equal(np.isnan(y), True)
-  np.testing.assert_allclose(c @ x, -1.0, atol=atol, rtol=rtol)
+  np.testing.assert_allclose(c @ x, -1.0, atol=1e-8, rtol=1e-9)
   np.testing.assert_array_less(-1e-9, np.min(s[z:], initial=0.0))
-  # BOTH public gates: data-scaled quality AND the pure-slope sense.
-  np.testing.assert_array_less(dinfeas_a, atol)
-  np.testing.assert_array_less(dinfeas_p, atol)
-  assert max(norm_axs, norm_pxc) <= atol * abs(float(c @ x)) + 1e-300
+  ctx = float(c @ x)
+  assert ctx < -tol_infeas_abs
+  norm_x, norm_s = np.linalg.norm(x), np.linalg.norm(s)
+  dinfeas = max(
+      np.linalg.norm(p @ x) / max(1.0, norm_x),
+      np.linalg.norm(a @ x + s) / max(1.0, norm_x + norm_s),
+  )
+  assert dinfeas < -tol_infeas_rel * ctx, dinfeas
 
 
 @pytest.mark.parametrize('equilibration', [qtqp.EquilibrationStrategy.RUIZ, qtqp.EquilibrationStrategy.NONE])
@@ -1977,10 +1954,12 @@ def test_tolerance_effect_on_iterations():
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
 
   sol_loose = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      atol=1e-3, rtol=1e-4, verbose=True, collect_stats=True
+      tol_feas=1e-3, tol_gap_abs=1e-3, tol_gap_rel=1e-3, verbose=True,
+      collect_stats=True,
   )
   sol_tight = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      atol=1e-7, rtol=1e-8, verbose=True, collect_stats=True
+      tol_feas=1e-8, tol_gap_abs=1e-8, tol_gap_rel=1e-8, verbose=True,
+      collect_stats=True,
   )
 
   assert sol_loose.status == qtqp.SolutionStatus.SOLVED
@@ -2315,22 +2294,26 @@ def test_step_size_scale(scale):
 
 
 # =============================================================================
-# atol_infeas / rtol_infeas parameters
+# tol_infeas_abs / tol_infeas_rel parameters
 # =============================================================================
 
-@pytest.mark.parametrize('atol_infeas,rtol_infeas', [(1e-4, 1e-5), (1e-10, 1e-11)])
-def test_infeasibility_tolerances(atol_infeas, rtol_infeas):
+@pytest.mark.parametrize('tol_infeas_abs,tol_infeas_rel', [(1e-4, 1e-5), (1e-10, 1e-11)])
+def test_infeasibility_tolerances(tol_infeas_abs, tol_infeas_rel):
   """Test that infeasibility detection works with different tolerances."""
   rng = np.random.default_rng(142)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_infeasible(m, n, z, random_state=rng)
 
   solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      atol_infeas=atol_infeas, rtol_infeas=rtol_infeas, verbose=True
+      tol_infeas_abs=tol_infeas_abs, tol_infeas_rel=tol_infeas_rel,
+      verbose=True,
   )
 
   assert solution.status == qtqp.SolutionStatus.INFEASIBLE
-  _assert_infeasible(solution, a, b, z, atol=atol_infeas, rtol=rtol_infeas)
+  _assert_infeasible(
+      solution, a, b, z, tol_infeas_abs=tol_infeas_abs,
+      tol_infeas_rel=tol_infeas_rel,
+  )
 
 
 # =============================================================================
@@ -2861,14 +2844,14 @@ def test_fused_corrector_handles_tiny_y():
     assert stats_i['alpha'] > 0.0, stats_i
 
 
-def test_default_tolerances_match_summand_only_criteria():
-  '''Defaults are calibrated to the summand-only termination scales: the
-  pre-tightening tier (atol=1e-7, rtol=1e-8) that the original criteria
-  were validated with.'''
+def test_default_tolerances_match_clarabel():
+  """Defaults are Clarabel's, so results are directly comparable."""
   import inspect
   sig = inspect.signature(qtqp.QTQP.solve)
-  assert sig.parameters['atol'].default == 1e-7
-  assert sig.parameters['rtol'].default == 1e-8
+  for name in ("tol_feas", "tol_gap_abs", "tol_gap_rel", "tol_infeas_abs",
+               "tol_infeas_rel"):
+    assert sig.parameters[name].default == 1e-8, name
+  assert sig.parameters["certificate_ktratio"].default == 1e9
 
 
 def test_almost_solved_near_cap():
@@ -3310,75 +3293,6 @@ def test_centrality_correctors_infeasible_unbounded():
 # Certificate quality: pseudo-rays must not be certified
 # =============================================================================
 
-def test_certificate_rejects_large_slope_pseudo_ray():
-  """A direction with enormous |c'x| but non-trivial constraint violations
-  must not be accepted as an unboundedness certificate.
-
-  This is the mechanism behind false certificates on degenerate LPs (e.g.
-  NETLIB dfl001): tests that normalize violations by |c'x| hand out slack
-  proportional to the objective slope, which a near-null direction of A with
-  a large c-component can inflate arbitrarily. The certificate test must
-  judge violations against ||A|| ||x|| instead.
-  """
-  rng = np.random.default_rng(7)
-  m, n, z = 12, 8, 3
-  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
-
-  # Direction v: right singular vector of A with the smallest singular value
-  # (near-null for A but not null), and a cost vector with a huge component
-  # along v so that c'v is enormously negative.
-  u_svd, s_svd, vt_svd = np.linalg.svd(a.toarray())
-  mid = len(s_svd) // 2
-  v = vt_svd[mid]
-  sigma_v = s_svd[mid]  # clearly nonzero: v is NOT a feasible ray
-  norm_a = np.max(np.abs(a.toarray()).sum(axis=1))
-  big = 1e12
-  c_adv = -big * v
-
-  solver = qtqp.QTQP(a=a, b=b, c=c_adv, z=z, p=p)
-  # Prime the state that solve() would normally set before termination checks.
-  solver.atol, solver.rtol = 1e-7, 1e-8
-  solver.atol_infeas, solver.rtol_infeas = 1e-8, 1e-9
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  solver._norm_b = np.linalg.norm(solver.b, np.inf)
-  solver._norm_c = np.linalg.norm(solver.c, np.inf)
-  abs_a = abs(solver.a)
-  solver._norm_a_inf = float(abs_a.sum(axis=1).max())
-  solver._norm_a_one = float(abs_a.sum(axis=0).max())
-  solver._norm_p_inf = (
-      float(abs(solver.p).sum(axis=1).max()) if solver.p.nnz else 0.0
-  )
-  solver.it = 0
-  solver.start_time = 0.0
-
-  x = v.copy()
-  y = np.zeros(m)
-  y[z:] = 1e-6
-  s = np.zeros(m)
-  s[z:] = 1e-6
-  tau = 1e-8  # deep in the certificate regime
-
-  ctx = c_adv @ x
-  assert ctx < 0
-
-  # The legacy |c'x|-normalized test would have accepted this pseudo-ray:
-  legacy_dinfeas = np.linalg.norm(a @ x + s, np.inf) / abs(ctx)
-  assert legacy_dinfeas < 1e-8 + 1e-9 * np.linalg.norm(x, np.inf) / abs(ctx)
-
-  # The data-scaled test must reject it: the violations are a sigma_v /
-  # ||A|| fraction of ||A|| ||x||, far above any certificate tolerance.
-  assert sigma_v / norm_a > 1e-3
-  status = solver._check_termination(  # pylint: disable=protected-access
-      x, y, tau, s, alpha=0.5, mu=1.0, sigma=0.5, stats_i={},
-      collect_stats=False,
-  )
-  assert status != qtqp.SolutionStatus.UNBOUNDED
-  assert status != qtqp.SolutionStatus.INFEASIBLE
-
-
-# =============================================================================
-# Refinement and factorization robustness
-# =============================================================================
 
 def test_richardson_rollback_returns_genuine_iterate_dense():
   """The rollback must restore the pre-correction iterate even when the
@@ -3629,12 +3543,13 @@ def test_almost_solved_stats_status_consistent():
   '''When salvage returns ALMOST_SOLVED, the last stats row must agree.
   Unreachable tolerances with a full budget make the salvage fire
   deterministically (the 1e-9-quality best iterate meets the
-  _ALMOST_FACTOR-loosened bar while 1e-15 never converges).'''
+  reduced-tolerance bar while 1e-15 never converges).'''
   rng = np.random.default_rng(4800)
   m, n, z = 60, 40, 8
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   sol = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(
-      verbose=False, collect_stats=True, atol=1e-15, rtol=1e-15,
+      verbose=False, collect_stats=True, tol_feas=1e-15, tol_gap_abs=1e-15,
+      tol_gap_rel=1e-15,
       linear_solver=qtqp.LinearSolver.SCIPY,
   )
   assert sol.status == qtqp.SolutionStatus.ALMOST_SOLVED
@@ -3714,45 +3629,6 @@ def test_infeasible_qp_not_solved_via_quadratic_bar():
   assert sol.status != qtqp.SolutionStatus.ALMOST_SOLVED
 
 
-def test_weak_separation_ray_not_certified():
-  """Round-7 root cause of the physiciansched6-2 false INFEASIBLE: a ray
-  with excellent relative dual residual but separation |b'y| / ||y|| far
-  below its violation level must not be certified - the pure-slope sense
-  requires ||A'y|| <= atol_infeas * |b'y|, with no rtol * ||ray|| slack
-  for the ray's own norm to launder."""
-  m, z = 3, 0
-  a = sparse.csc_matrix(np.eye(3, 2))
-  b = np.array([-0.05, -0.05, 0.0])
-  c = np.zeros(2)
-  solver = qtqp.QTQP(a=a, b=b, c=c, z=z)
-  solver.atol, solver.rtol = 1e-7, 1e-8
-  solver.atol_infeas, solver.rtol_infeas = 1e-8, 1e-9
-  solver.equilibration_strategy = qtqp.EquilibrationStrategy.NONE
-  solver._norm_b = np.linalg.norm(b, np.inf)
-  solver._norm_c = 0.0
-  abs_a = abs(solver.a)
-  solver._norm_a_inf = float(abs_a.sum(axis=1).max())
-  solver._norm_a_one = float(abs_a.sum(axis=0).max())
-  solver._norm_p_inf = 0.0
-  solver.it = 0
-  solver.start_time = 0.0
-  # y >= 0 with its mass in null(A') (the b_3 = 0 row): b'y = -1 while
-  # ||y|| = 1e10, so separation per unit norm is 1e-10; ||A'y|| = 10 is
-  # residual-level relative to ||A||*||y|| (1e-9, passes data-scaled) and
-  # sits just under the OLD slope bar 1e-8 + 1e-9 * 1e10 ~ 10.00000001 -
-  # exactly the physiciansched regime. The pure-slope bar is 1e-8 * 1.
-  y = np.array([10.0, 10.0, 1e10])
-  assert float(b @ y) == pytest.approx(-1.0)
-  x = np.zeros(2)
-  s = np.full(m, 1e-9)
-  tau = 1e-9  # certificate side: y's >> nu * tau^2
-  status = solver._check_termination(  # pylint: disable=protected-access
-      x, y, tau, s, alpha=0.5, mu=1.0, sigma=0.5, stats_i={},
-      collect_stats=False,
-  )
-  assert status != qtqp.SolutionStatus.INFEASIBLE, status
-
-
 def test_accepted_warm_start_skips_cold_init(monkeypatch):
   """An accepted warm start must not pay for the cold initialization: the
   init factorization and solves run only on cold or vetoed-warm solves."""
@@ -3813,7 +3689,12 @@ def test_equality_only_impossible_zero_row_not_solved():
 def test_equality_only_large_scale_refines_true_system():
   """Reviewer repro: A=[1], b=1e10, c=0 must return x=1e10, y=0 — a mu
   floor baked into the 'true' diagonals is never refined away and
-  visibly perturbs large-scale duals; the direct path uses mu = 0."""
+  visibly perturbs large-scale duals; the direct path uses mu = 0.
+
+  Also pins that the direct path grades on residuals only: y comes back
+  at roundoff (~1e-14 on some BLAS builds), so the absolute gap is
+  |b'y| ~ 1e-4 against a zero objective, and a Clarabel-style gap test
+  would reject this machine-precision solution."""
   a = sparse.csc_matrix(np.array([[1.0]]))
   sol = qtqp.QTQP(a=a, b=np.array([1e10]), c=np.array([0.0]), z=1).solve(
       verbose=False

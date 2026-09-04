@@ -52,10 +52,10 @@ _norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
 # ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown, the
 # best iterate seen is returned as ALMOST_SOLVED when it meets the same
-# criteria form at tolerances this factor looser than the user-requested
-# atol/rtol (at the current defaults: 1e-4 absolute / 1e-5 relative,
-# still a usable near-solution).
-_ALMOST_FACTOR = 1000.0
+# criteria at these reduced tolerances (Clarabel's reduced_tol_* defaults).
+_REDUCED_TOL_FEAS = 1e-4
+_REDUCED_TOL_GAP_ABS = 5e-5
+_REDUCED_TOL_GAP_REL = 5e-5
 # Floor on the complementarity parameter mu wherever it enters the
 # algorithm (KKT shift, corrector targets, barrier terms). Below this
 # scale mu carries no information in double precision relative to O(1)
@@ -465,9 +465,15 @@ class QTQP:
 
     With no inequality rows there are no complementarity pairs, so the
     interior-point iteration reduces to this single saddle-point system.
-    The result is graded with the main loop's summand-anchored residual
-    scales (tau = 1, s = 0) and returns SOLVED, ALMOST_SOLVED, or FAILED;
-    a singular system (inconsistent or unbounded) is reported as FAILED.
+    The result is graded on Clarabel's primal and dual residual tests at
+    tau = 1, s = 0, and returns SOLVED, ALMOST_SOLVED, or FAILED; a singular
+    system (inconsistent or unbounded) is reported as FAILED. The duality
+    gap is reported but not tested: with s = 0 the identity
+    gap = x'(Px + A'y + c) - y'(Ax - b) bounds it by the residuals times
+    the iterate norms, and Clarabel's gap scale max(1, min(|pcost|,
+    |dcost|)) carries no iterate norm, so on a large-norm solution with a
+    near-zero objective it rejects a machine-precision direct solve
+    (A = [1], b = 1e10, c = 0: x = 1e10 exactly, y ~ 1e-14, gap ~ 1e-4).
     """
     self.warm_lambda = None
     self.warm_accepted = False
@@ -503,23 +509,27 @@ class QTQP:
     ctx = float(self.c @ x)
     bty = float(self.b @ y)
     xpx = float(x @ px)
-    pres = _norm(ax - self.b, np.inf)
-    dres = _norm(px + aty + self.c, np.inf)
+    pres = _norm(ax - self.b)
+    dres = _norm(px + aty + self.c)
     gap = abs(ctx + bty + xpx)
     pcost = ctx + 0.5 * xpx
     dcost = -bty - 0.5 * xpx
-    # Summand scales, as in the main loop: no iterate norms.
-    prelrhs = max(_norm(ax, np.inf), self._norm_b)
-    drelrhs = max(_norm(px, np.inf), _norm(aty, np.inf), self._norm_c)
+    # Clarabel's residual scales with tau = 1 and s = 0.
+    norm_x = _norm(x)
+    norm_y = _norm(y)
+    prelrhs = max(1.0, self._norm_b + norm_x)
+    drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
+    res_primal = pres / prelrhs
+    res_dual = dres / drelrhs
+    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
 
-    def _meets(f):
-      return (pres < f * self.atol + f * self.rtol * prelrhs
-              and dres < f * self.atol + f * self.rtol * drelrhs)
+    def _meets(tol):
+      return res_primal < tol and res_dual < tol
 
-    if _meets(1.0):
+    if _meets(self.tol_feas):
       status = SolutionStatus.SOLVED
       self._log_footer("Solved (equality-only direct solve)")
-    elif _meets(_ALMOST_FACTOR):
+    elif _meets(_REDUCED_TOL_FEAS):
       status = SolutionStatus.ALMOST_SOLVED
       self._log_footer("Almost solved (equality-only direct solve)")
     else:
@@ -528,18 +538,19 @@ class QTQP:
 
     stats = []
     if collect_stats:
-      norm_x = _norm(x, np.inf)
-      norm_y = _norm(y, np.inf)
-      dinfeas_a = _norm(ax, np.inf) / (self._norm_a_inf * norm_x + _EPS)
-      dinfeas_p = _norm(px, np.inf) / (self._norm_p_inf * norm_x + _EPS)
+      dinfeas_a = _norm(ax) / max(1.0, norm_x)
+      dinfeas_p = _norm(px) / max(1.0, norm_x)
       stats.append({
           "iter": 0, "pres": pres, "dres": dres, "gap": gap,
+          "res_primal": res_primal, "res_dual": res_dual,
+          "gap_rel": gap_rel,
+          "ktratio": 0.0,
           "pcost": pcost, "dcost": dcost, "status": status,
           "mu": 0.0, "complementarity": 0.0, "tau": 1.0,
           "sigma": 0.0, "alpha": 1.0,
           "norm_x": norm_x, "norm_y": norm_y, "norm_s": 0.0,
           "prelrhs": prelrhs, "drelrhs": drelrhs,
-          "pinfeas": _norm(aty, np.inf) / (self._norm_a_one * norm_y + _EPS),
+          "pinfeas": _norm(aty) / max(1.0, norm_y),
           "dinfeas": max(dinfeas_a, dinfeas_p),
           "dinfeas_a": dinfeas_a, "dinfeas_p": dinfeas_p,
           "ctx": ctx, "bty": bty,
@@ -648,10 +659,12 @@ class QTQP:
   def solve(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
-      atol_infeas: float = 1e-8,
-      rtol_infeas: float = 1e-9,
+      tol_feas: float = 1e-8,
+      tol_gap_abs: float = 1e-8,
+      tol_gap_rel: float = 1e-8,
+      tol_infeas_abs: float = 1e-8,
+      tol_infeas_rel: float = 1e-8,
+      certificate_ktratio: float = 1e9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
@@ -673,10 +686,12 @@ class QTQP:
     self._linear_solver = None
     try:
       return self._solve_impl(
-          atol=atol,
-          rtol=rtol,
-          atol_infeas=atol_infeas,
-          rtol_infeas=rtol_infeas,
+          tol_feas=tol_feas,
+          tol_gap_abs=tol_gap_abs,
+          tol_gap_rel=tol_gap_rel,
+          tol_infeas_abs=tol_infeas_abs,
+          tol_infeas_rel=tol_infeas_rel,
+          certificate_ktratio=certificate_ktratio,
           max_iter=max_iter,
           step_size_scale=step_size_scale,
           min_static_regularization=min_static_regularization,
@@ -702,10 +717,12 @@ class QTQP:
   def _solve_impl(
       self,
       *,
-      atol: float = 1e-7,
-      rtol: float = 1e-8,
-      atol_infeas: float = 1e-8,
-      rtol_infeas: float = 1e-9,
+      tol_feas: float = 1e-8,
+      tol_gap_abs: float = 1e-8,
+      tol_gap_rel: float = 1e-8,
+      tol_infeas_abs: float = 1e-8,
+      tol_infeas_rel: float = 1e-8,
+      certificate_ktratio: float = 1e9,
       max_iter: int = 100,
       step_size_scale: float = 0.99,
       min_static_regularization: float = 1e-8,
@@ -726,21 +743,25 @@ class QTQP:
     """Solves the QP using a primal-dual interior-point method.
 
     Args:
-      atol (float): Absolute tolerance for convergence criteria.
-      rtol (float): Relative tolerance for convergence criteria, scaled by
-        problem data norms.
-      atol_infeas (float): Certificate-quality tolerance for infeasibility
-        and unboundedness detection. A candidate ray u must be good in two
-        complementary senses: its relative backward error (violations over
-        ||operator|| * ||u||) must be at most atol_infeas, AND its
-        violations must be at most atol_infeas * |objective slope| (the
-        pure-slope sense: quality judged absolutely on the slope-normalized
-        ray, with no ray-norm slack). The first rejects large-slope
-        pseudo-rays, the second rejects huge-norm weakly separating
-        near-solutions; each guards the other's blind spot.
-      rtol_infeas (float): The margin by which the certificate's objective
-        slope (c'x or b'y) must be negative relative to the data and ray
-        norms.
+      tol_feas (float): Feasibility tolerance. SOLVED requires the primal
+        residual ||Ax + s - b|| / max(1, ||b||_inf + ||x|| + ||s||) and the
+        dual residual ||Px + A'y + c|| / max(1, ||c||_inf + ||x|| + ||y||)
+        (2-norms, evaluated on the returned point) to be below it. These
+        are Clarabel's criteria, so results are directly comparable.
+      tol_gap_abs (float): Absolute duality-gap tolerance; SOLVED requires
+        |pcost - dcost| below it OR the relative gap below tol_gap_rel.
+      tol_gap_rel (float): Relative duality-gap tolerance, against
+        max(1, min(|pcost|, |dcost|)).
+      tol_infeas_abs (float): A certificate requires its objective slope
+        (b'y for infeasibility, c'x for unboundedness) below
+        -tol_infeas_abs.
+      tol_infeas_rel (float): A certificate requires its violations, relative
+        to max(1, ||ray||), to be below tol_infeas_rel * |slope|.
+      certificate_ktratio (float): Certificates are considered only when the
+        embedding ratio kappa / tau exceeds this (SOLVED requires it below
+        1). The default 1e9 is Clarabel's; here kappa is eliminated through
+        tau * kappa = mu, so the ratio is mu / tau^2, which grows like
+        1 / tau on the certificate side and so crosses any threshold.
       max_iter (int): Maximum number of iterations before stopping.
       step_size_scale (float): A factor in (0, 1) to scale the step size,
         ensuring iterates remain strictly interior.
@@ -815,10 +836,12 @@ class QTQP:
     Returns:
       A Solution object containing the solution and solve stats.
     """
-    assert atol >= 0
-    assert rtol >= 0
-    assert atol_infeas >= 0
-    assert rtol_infeas >= 0
+    assert tol_feas >= 0
+    assert tol_gap_abs >= 0
+    assert tol_gap_rel >= 0
+    assert tol_infeas_abs >= 0
+    assert tol_infeas_rel >= 0
+    assert certificate_ktratio >= 1.0
     assert max_iter > 0
     assert 0 < step_size_scale < 1
     assert min_static_regularization >= 0
@@ -831,8 +854,10 @@ class QTQP:
     self._max_centrality_correctors = int(max_centrality_correctors)
 
     self.start_time = timeit.default_timer()
-    self.atol, self.rtol = atol, rtol
-    self.atol_infeas, self.rtol_infeas = atol_infeas, rtol_infeas
+    self.tol_feas = tol_feas
+    self.tol_gap_abs, self.tol_gap_rel = tol_gap_abs, tol_gap_rel
+    self.tol_infeas_abs, self.tol_infeas_rel = tol_infeas_abs, tol_infeas_rel
+    self.certificate_ktratio = certificate_ktratio
     self.verbose = verbose
     self.equilibration_strategy = equilibration_strategy
 
@@ -1189,7 +1214,7 @@ class QTQP:
         return Solution(x, y, s, stats, status)
       case SolutionStatus.HIT_MAX_ITER | SolutionStatus.UNFINISHED:
         # Salvage: the best iterate seen, if it meets the criteria at
-        # _ALMOST_FACTOR looser tolerances, is an honestly-labeled
+        # the reduced tolerances, is an honestly-labeled
         # near-solution - more useful than the raw final iterate after a
         # cap-out or a numerical breakdown. The stored iterate is already
         # unequilibrated (captured inside _check_termination).
@@ -1640,8 +1665,8 @@ class QTQP:
     # certificates below, so compute them once.
     ax_plus_s = ax + s
     px_plus_aty = px + aty
-    pres = _norm(ax_plus_s * inv_tau - self.b, np.inf)
-    dres = _norm(px_plus_aty * inv_tau + self.c, np.inf)
+    pres = _norm(ax_plus_s * inv_tau - self.b)
+    dres = _norm(px_plus_aty * inv_tau + self.c)
     gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
     # Distance-to-path diagnostics are pure stats consumers: skip the
@@ -1686,95 +1711,73 @@ class QTQP:
           t_x, t_y, t_tau, y_w, tau, mu_hat
       )
 
-    norm_x = _norm(x, np.inf)
-    norm_y = _norm(y, np.inf)
+    # Clarabel's termination criteria, evaluated on the returned point
+    # (x, y, s) / tau: 2-norm residuals over max(1, data inf-norm + iterate
+    # 2-norms), and a duality gap that may pass absolutely or relatively.
+    norm_x = _norm(x) * inv_tau
+    norm_y = _norm(y) * inv_tau
+    norm_s = _norm(s) * inv_tau
+    prelrhs = max(1.0, self._norm_b + norm_x + norm_s)
+    drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
+    res_primal = pres / prelrhs
+    res_dual = dres / drelrhs
+    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
 
-    # Certificate-quality measures (Farkas-type, from the embedding
-    # structure). A candidate ray is judged by the smallest relative data
-    # perturbation that would make it an exact certificate (Rigal-Gaches
-    # normwise backward error): e.g. dinfeas_a = ||Ax + s|| / (||A|| ||x||)
-    # is the relative perturbation of A under which x is an exact unbounded
-    # ray. Normalizing by the objective slope |c'x| instead (the common
-    # convention) hands out slack proportional to a quantity degenerate
-    # problems can inflate — near-null directions with enormous c-slope pass
-    # such tests while violating the constraints badly (e.g. NETLIB dfl001).
-    norm_aty = _norm(aty, np.inf)
-    norm_px = _norm(px, np.inf)
-    norm_ax_plus_s = _norm(ax_plus_s, np.inf)
-    dinfeas_a = norm_ax_plus_s / (self._norm_a_inf * norm_x + _EPS)
-    dinfeas_p = norm_px / (self._norm_p_inf * norm_x + _EPS)
+    # Certificate quality: Clarabel's infeasibility residuals, violations
+    # over max(1, ||ray||), evaluated on the ray scaled to unit slope
+    # (b'y = -1, c'x = -1), which is the certificate actually returned.
+    # Clarabel's floor at 1 makes the test scale-dependent, so it has to
+    # be evaluated at one definite scale; on the unit-slope ray it reads
+    # violations / max(|slope|, ||ray||) in the homogeneous frame.
+    norm_x_h = _norm(x)
+    norm_y_h = _norm(y)
+    norm_s_h = _norm(s)
+    pinfeas = _norm(aty) / max(abs(bty), norm_y_h, _EPS)
+    dinfeas_a = _norm(ax_plus_s) / max(abs(ctx), norm_x_h + norm_s_h, _EPS)
+    dinfeas_p = _norm(px) / max(abs(ctx), norm_x_h, _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
-    pinfeas = norm_aty / (self._norm_a_one * norm_y + _EPS)
 
-    # Residual tolerance relative scales: the summand norms of each
-    # residual and nothing else. No iterate norm enters, so a bad warm
-    # start or a divergence cannot inflate its own tolerance.
-    prelrhs = max(
-        _norm(ax, np.inf) * inv_tau, _norm(s, np.inf) * inv_tau, self._norm_b
-    )
-    drelrhs = max(norm_px * inv_tau, norm_aty * inv_tau, self._norm_c)
-    # Gap tolerance relative scale: the cost magnitudes.
-    gaprelrhs = min(abs(pcost), abs(dcost))
-
-    # Embedding dichotomy gate: kappa < tau (equivalently y's < nu * tau^2
-    # with nu = m - z) puts the iterate on the solution side, kappa > tau
-    # on the certificate side. A pure number, so a divergence cannot
-    # launder it: y's grows with the iterate while nu * tau^2 does not.
+    # Embedding dichotomy gate on kappa / tau. With kappa eliminated through
+    # tau * kappa = mu the ratio is mu / tau^2 (y's / (nu * tau^2) here):
+    # below 1 the iterate is on the solution side; certificates require it
+    # above certificate_ktratio (1e9, as in Clarabel), which a weakly
+    # separating near-solution never reaches while a genuine certificate
+    # does, since the ratio grows like 1 / tau as tau -> 0.
     yts_ret = float(y @ s)
     nu_tau_sq = float(self.m - self.z) * tau * tau
     on_solution_side = yts_ret < nu_tau_sq
-    on_certificate_side = yts_ret > nu_tau_sq
+    on_certificate_side = yts_ret > self.certificate_ktratio * nu_tau_sq
+    ktratio = yts_ret / nu_tau_sq if nu_tau_sq > 0.0 else math.inf
 
-    # Solved: duality gap and both residuals are within tolerance.
     if (
         on_solution_side
-        and gap < self.atol + self.rtol * gaprelrhs
-        and pres < self.atol + self.rtol * prelrhs
-        and dres < self.atol + self.rtol * drelrhs
+        and res_primal < self.tol_feas
+        and res_dual < self.tol_feas
+        and (gap < self.tol_gap_abs or gap_rel < self.tol_gap_rel)
     ):
       status = SolutionStatus.SOLVED
-    # Certificate acceptance requires BOTH quality senses, because each
-    # guards the other's blind spot:
-    #   - data-scaled (violations / (||operator|| ||ray||) < atol_infeas):
-    #     rejects large-slope pseudo-rays whose |c'x| buys unbounded slack
-    #     in the slope-scaled test (e.g. NETLIB dfl001, where a direction
-    #     violating the constraints at 5-9% of ||A|| ||x|| was certified);
-    #   - pure-slope (violations < atol_infeas * |slope|): rejects
-    #     huge-norm weakly separating near-solutions, whose data-scaled
-    #     quality becomes small automatically (A'y ~ -c*tau with enormous
-    #     ||y|| makes ||A'y|| / (||A||_1 ||y||) tiny while y is nothing
-    #     like a ray; e.g. NETLIB fit1p, tuff, vtp.base, fffff800, and
-    #     the miplib physiciansched6-2 false-infeasibility class).
-    # The quality measures need no zero-ray guard: as ||x|| -> 0 the
-    # data-scaled denominator vanishes while the numerator retains the
-    # O(1) slack s, so dinfeas diverges and nothing is certified.
     elif (
         on_certificate_side
-        and ctx < -(self.rtol_infeas * self._norm_c * norm_x + _EPS)
-        and dinfeas < self.atol_infeas
-        and max(norm_ax_plus_s, norm_px) < self.atol_infeas * abs(ctx)
-    ):
-      status = SolutionStatus.UNBOUNDED
-    elif (
-        on_certificate_side
-        and bty < -(self.rtol_infeas * self._norm_b * norm_y + _EPS)
-        and pinfeas < self.atol_infeas
-        and norm_aty < self.atol_infeas * abs(bty)
+        and bty < -self.tol_infeas_abs
+        and pinfeas < self.tol_infeas_rel
     ):
       status = SolutionStatus.INFEASIBLE
+    elif (
+        on_certificate_side
+        and ctx < -self.tol_infeas_abs
+        and dinfeas < self.tol_infeas_rel
+    ):
+      status = SolutionStatus.UNBOUNDED
     else:
       status = SolutionStatus.UNFINISHED
 
-    # Track the best iterate seen, scored by the max normalized residual
-    # at the ALMOST_SOLVED thresholds (same criteria form, looser
-    # constants). Used to return an honestly-labeled near-solution when
-    # the iteration cap is reached without meeting the SOLVED contract.
-    almost_atol = _ALMOST_FACTOR * self.atol
-    almost_rtol = _ALMOST_FACTOR * self.rtol
+    # Best iterate for the ALMOST_SOLVED salvage: the same criteria at the
+    # reduced tolerances, scored by the largest ratio to its bar (the gap
+    # takes the better of its absolute and relative ratios).
     almost_score = max(
-        gap / (almost_atol + almost_rtol * gaprelrhs),
-        pres / (almost_atol + almost_rtol * prelrhs),
-        dres / (almost_atol + almost_rtol * drelrhs),
+        res_primal / _REDUCED_TOL_FEAS,
+        res_dual / _REDUCED_TOL_FEAS,
+        min(gap / _REDUCED_TOL_GAP_ABS, gap_rel / _REDUCED_TOL_GAP_REL),
     )
     new_best_almost = (
         on_solution_side and almost_score < self._best_almost_score
@@ -1806,6 +1809,10 @@ class QTQP:
         "time": timeit.default_timer() - self.start_time,
         "prelrhs": prelrhs,
         "drelrhs": drelrhs,
+        "res_primal": res_primal,
+        "res_dual": res_dual,
+        "gap_rel": gap_rel,
+        "ktratio": ktratio,
     })
 
     if collect_stats:

@@ -144,9 +144,11 @@ Arguments:
 -   `c`: (n) Cost vector.
 -   `z`: Number of equality constraints (size of the zero cone). Must satisfy
     `0 ≤ z ≤ m`; `z == m` (all-equality) is solved by a single direct KKT
-    solve, where `SOLVED` certifies the primal and dual residuals (the gap
-    is reported in stats but not tested) and a singular system is reported
-    as `FAILED`. Problems with no variables, or with no constraints left
+    solve, graded on the same primal and dual residual tests as the
+    iterative path (the gap is reported but not tested: it is bounded by
+    the residuals, and the gap scale has no iterate norm, so it would
+    reject exact large-norm solutions); a singular system is reported as
+    `FAILED`. Problems with no variables, or with no constraints left
     after presolve, are rejected.
 -   `p`: (n×n) QP matrix. If None, treated as the zero matrix (i.e., LP).
 
@@ -155,10 +157,12 @@ This class has a single API method `solve`:
 ```python
 solve(
     *,
-    atol: float = 1e-7,
-    rtol: float = 1e-8,
-    atol_infeas: float = 1e-8,
-    rtol_infeas: float = 1e-9,
+    tol_feas: float = 1e-8,
+    tol_gap_abs: float = 1e-8,
+    tol_gap_rel: float = 1e-8,
+    tol_infeas_abs: float = 1e-8,
+    tol_infeas_rel: float = 1e-8,
+    certificate_ktratio: float = 1e9,
     max_iter: int = 100,
     step_size_scale: float = 0.99,
     min_static_regularization: float = 1e-8,
@@ -184,9 +188,12 @@ solve(
 
 Key parameters:
 
--   `atol`, `rtol`: Absolute/relative stopping tolerances for optimality.
--   `atol_infeas`, `rtol_infeas`: Thresholds for (primal/dual) infeasibility
-    detection.
+-   `tol_feas`, `tol_gap_abs`, `tol_gap_rel`: Stopping tolerances for
+    optimality (Clarabel's definitions; see below).
+-   `tol_infeas_abs`, `tol_infeas_rel`: Thresholds for (primal/dual)
+    infeasibility detection.
+-   `certificate_ktratio`: Embedding ratio `kappa / tau` above which
+    certificates are considered (default `1e9`, as in Clarabel).
 -   `max_iter`: Iteration cap.
 -   `step_size_scale` (0,1): Scale for line search step size to stay strictly
     interior.
@@ -285,13 +292,16 @@ Choose one with the `refinement_strategy` argument:
 
 #### Advanced numerical options
 
--   Termination scales are the summand norms of each residual and nothing
-    else: `pres` is judged against `max(||Ax||, ||s||, ||b||tau)/tau`,
-    `dres` against `max(||Px||, ||A'y||, ||c||tau)/tau`, and the duality
-    gap against `min(|pcost|, |dcost|)`. No iterate norm enters the
-    acceptance arithmetic (a bare `||x||` or `||y||` term lets a bad
-    warm start or a divergence inflate its own tolerance). The default
-    tolerances (`atol=1e-7`, `rtol=1e-8`) are calibrated to these scales.
+-   Termination criteria are Clarabel's, evaluated on the returned point,
+    so results are directly comparable: `SOLVED` requires
+    `||Ax + s - b|| / max(1, ||b||_inf + ||x|| + ||s||) < tol_feas`,
+    `||Px + A'y + c|| / max(1, ||c||_inf + ||x|| + ||y||) < tol_feas`
+    (2-norms), and a duality gap `|pcost - dcost|` below `tol_gap_abs` or
+    below `tol_gap_rel * max(1, min(|pcost|, |dcost|))`, with the iterate on
+    the solution side of the embedding (`kappa / tau < 1`). A certificate
+    requires `kappa / tau > certificate_ktratio`, an objective slope
+    (`b'y` or `c'x`) below `-tol_infeas_abs`, and violations relative to
+    `max(1, ||ray||)` below `tol_infeas_rel * |slope|`.
 -   `x`: (n) Primal variable or certificate of unboundedness.
 -   `y`: (m) Dual variable or certificate of infeasibility.
 -   `s`: (m) Slack variable or certificate of unboundedness.
@@ -305,9 +315,8 @@ Choose one with the `refinement_strategy` argument:
     `ALMOST_SOLVED` is returned in place of `HIT_MAX_ITER` (or of a
     numerical breakdown of the linear solver, which never raises) when
     the best iterate over the trajectory (by max normalized residual)
-    meets the solved-criteria form at tolerances `1000x` looser than the
-    requested `atol`/`rtol` (so `1e-4` absolute and `1e-5` relative at
-    the defaults): the returned
+    meets the solved criteria at Clarabel's reduced tolerances (`1e-4`
+    feasibility, `5e-5` gap): the returned
     solution is that best iterate, honestly labeled as not meeting the
     full `SOLVED` contract. `SOLVED` semantics are unchanged. A
     breakdown whose best iterate does not qualify returns `FAILED`.
