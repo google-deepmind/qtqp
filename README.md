@@ -96,20 +96,20 @@ print(f'{sol.s=}')
 You should see output similar to
 
 ```
-| QTQP v0.0.5: m=3, n=2, z=1, nnz(A)=4, nnz(P)=4, linear_solver=SCIPY
+| QTQP v0.0.6: m=3, n=2, z=1, nnz(A)=4, nnz(P)=4, linear_solver=ACCELERATE, equilibration=RUIZ
 |------|------------|------------|----------|----------|----------|----------|----------|----------|----------|
 | iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |
 |------|------------|------------|----------|----------|----------|----------|----------|----------|----------|
-|    0 |  1.205e+00 |  1.298e+00 | 2.18e-01 | 6.17e-01 | 9.36e-02 | 1.67e+00 | 1.09e+00 |  1, 1, 1 | 1.61e-02 |
-|    1 |  1.161e+00 |  1.211e+00 | 3.16e-02 | 5.23e-02 | 5.01e-02 | 1.35e+00 | 1.04e-01 |  1, 1, 1 | 1.66e-02 |
-|    2 |  1.234e+00 |  1.235e+00 | 3.77e-04 | 8.61e-04 | 6.64e-04 | 1.30e+00 | 7.67e-03 |  1, 1, 1 | 1.70e-02 |
-|    3 |  1.235e+00 |  1.235e+00 | 3.78e-06 | 8.62e-06 | 6.65e-06 | 1.30e+00 | 1.25e-04 |  1, 1, 1 | 1.74e-02 |
-|    4 |  1.235e+00 |  1.235e+00 | 3.78e-08 | 8.62e-08 | 6.65e-08 | 1.30e+00 | 1.25e-06 |  1, 1, 1 | 1.78e-02 |
+|    0 |  1.340e+00 |  1.131e+00 | 1.28e-01 | 1.67e-01 | 2.09e-01 | 1.05e+00 | 1.78e-01 |  1, 1, 1 | 1.76e-01 |
+|    1 |  1.221e+00 |  1.226e+00 | 1.60e-02 | 7.08e-03 | 4.23e-03 | 8.21e-01 | 3.93e-03 |  1, 1, 1 | 1.76e-01 |
+|    2 |  1.235e+00 |  1.235e+00 | 1.65e-04 | 7.28e-05 | 3.80e-05 | 8.09e-01 | 4.73e-05 |  1, 1, 1 | 1.77e-01 |
+|    3 |  1.235e+00 |  1.235e+00 | 4.14e-08 | 1.83e-08 | 9.53e-09 | 8.09e-01 | 1.26e-08 |  1, 1, 1 | 1.77e-01 |
+|    4 |  1.235e+00 |  1.235e+00 | 5.08e-12 | 2.38e-12 | 8.62e-13 | 8.09e-01 | 1.26e-12 |  1, 2, 2 | 1.77e-01 |
 |------|------------|------------|----------|----------|----------|----------|----------|----------|----------|
 | Solved
-sol.x=array([ 0.29999999, -0.69999997])
-sol.y=array([2.69999964e+00, 2.09999968e+00, 3.86572055e-07])
-sol.s=array([0.00000000e+00, 7.13141634e-09, 1.99999944e-01])
+sol.x=array([ 0.3, -0.7])
+sol.y=array([2.70000000e+00, 2.10000000e+00, 1.47264885e-11])
+sol.s=array([0.00000000e+00, 2.72772187e-13, 2.00000000e-01])
 ```
 
 ## API reference
@@ -266,9 +266,10 @@ Choose one with the `equilibration_strategy` argument:
     and `c` never enter the row/column scalings, so the factorized block
     keeps unit rows and columns.
 -   `qtqp.EquilibrationStrategy.AUGMENTED`: Ruiz equilibration on the symmetric
-    augmented matrix containing `P`, `A`, `b`, and `c`. This lets `b` and `c`
-    participate directly in the scaling and can improve reliability on
-    ill-scaled instances.
+    augmented matrix containing `P`, `A`, `b`, and `c`, so that `b` and `c`
+    also inform the row and column scalings. Kept for experimentation: it
+    splits the magnitude of large entries of `b` and `c` into the factorized
+    block, and RUIZ solved more problems on every benchmark collection.
 -   `qtqp.EquilibrationStrategy.NONE`: Disable equilibration.
 
 #### Initialization
