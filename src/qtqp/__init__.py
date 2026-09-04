@@ -67,6 +67,13 @@ _REDUCED_TOL_GAP_REL = 5e-5
 # touch the floor.
 _MU_FLOOR = 1e-14
 
+# Bounds on the accumulated equilibration scalars sigma and gamma (Clarabel's
+# bounds on its cost scaling). Beyond them the absolute mu floor and static
+# regularization, which live in the operating frame, would take over: a
+# single big-M entry in b can put ||Db||_inf at 1e12.
+_SCALAR_MIN = 1e-4
+_SCALAR_MAX = 1e4
+
 
 class LinearSolver(enum.Enum):
   """Available linear solvers."""
@@ -162,11 +169,21 @@ class EquilibrationStrategy(enum.Enum):
     Do not equilibrate. Pass (A, P, b, c) through unchanged.
 
   RUIZ:
-    Ruiz equilibration on the constraint matrix A and Hessian P. Symmetric
-    diagonal scalings D (rows) and E (columns) are chosen so that, at each
-    iteration, the inf-norm of every row of D A E and every column of
-    [D A E ; E P E] is driven toward 1. The vectors b and c are passively
-    rescaled as b <- D b and c <- E c.
+    Ruiz equilibration on the KKT block [P, A'; A, 0] plus two scalars.
+    Symmetric diagonal scalings D (rows) and E (columns) are chosen so that,
+    at each pass, the inf-norm of every row of D A E and every column of
+    [D A E ; E P E] is driven toward 1. Each pass then applies the two scalar
+    factors a QP admits without changing its solution set:
+
+        sigma: a joint scale on (b, c), i.e. a rescale of the solution,
+               taking ||b||_inf to 1;
+        gamma: a scale on the objective (P, c), i.e. a rescale of the
+               duals, taking max(||c||_inf, max |P_ij|) to 1.
+
+    So A_eq = D A E, P_eq = gamma E P E, b_eq = sigma D b and
+    c_eq = sigma gamma E c. b and c never enter D or E: the factorized block
+    keeps unit rows and columns, and only the scalars absorb their magnitude.
+    Both scalars are kept within [1e-4, 1e4].
 
   AUGMENTED:
     Ruiz equilibration on the symmetric augmented matrix
@@ -176,7 +193,7 @@ class EquilibrationStrategy(enum.Enum):
             [ c^T -b^T   0 ]
 
     so b and c participate in determining the row/column norms rather than
-    being scaled passively. The scaling has three blocks (E for x columns,
+    only moving the scalars. The scaling has three blocks (E for x columns,
     D for y rows, and a scalar sigma for the augmented row/column), giving
 
         A_eq = D A E,    P_eq = E P E,
@@ -184,7 +201,8 @@ class EquilibrationStrategy(enum.Enum):
 
     The sigma factor maps to the homogenization variable (tau_orig =
     sigma * tau_eq), so iterate (un)equilibration must apply 1/sigma to
-    keep the recovered x/tau, y/tau, s/tau in the original scale.
+    keep the recovered x/tau, y/tau, s/tau in the original scale. This
+    strategy has no objective scale (gamma == 1).
   """
 
   NONE = "none"
@@ -790,9 +808,11 @@ class QTQP:
       )
     if equilibration_strategy is EquilibrationStrategy.NONE:
       a, p, b, c = self.a, self.p, self.b, self.c
-      self.d, self.e, self.sigma_eq = None, None, 1.0
+      self.d, self.e, self.sigma_eq, self.gamma_eq = None, None, 1.0, 1.0
     else:
-      a, p, b, c, self.d, self.e, self.sigma_eq = self._equilibrate()
+      a, p, b, c, self.d, self.e, self.sigma_eq, self.gamma_eq = (
+          self._equilibrate()
+      )
     # Operating-scale b, c, kept for the distance-to-path certificate.
     self._b_op, self._c_op = b, c
 
@@ -1184,9 +1204,10 @@ class QTQP:
   def _equilibrate(self, num_iters=10, min_scale=1e-3, max_scale=1e3):
     """Dispatch to the selected equilibration strategy.
 
-    Returns a 7-tuple (a, p, b, c, d, e, sigma) of equilibrated problem data
-    and accumulated scalings. For RUIZ, sigma == 1.0; for AUGMENTED, sigma is
-    the scalar scaling on the augmented row/column (== tau_orig / tau_eq).
+    Returns an 8-tuple (a, p, b, c, d, e, sigma, gamma) of equilibrated
+    problem data and accumulated scalings: sigma is the joint scale on
+    (b, c) (== tau_orig / tau_eq) and gamma the scale on the objective
+    (P, c); AUGMENTED has gamma == 1.0.
     """
     if self.equilibration_strategy is EquilibrationStrategy.RUIZ:
       return self._equilibrate_ruiz(num_iters, min_scale, max_scale)
@@ -1197,14 +1218,24 @@ class QTQP:
     )
 
   def _equilibrate_ruiz(self, num_iters, min_scale, max_scale):
-    """Ruiz equilibration on A and P. b, c rescaled passively by d, e."""
-    # Work on copies so self.a / self.p are not modified in-place; they are
-    # used unequilibrated later (e.g. in _check_termination). The constructor
-    # already enforces CSC, so .copy() preserves format without a re-convert.
+    """Ruiz on the KKT block [P, A'; A, 0] plus the scalars sigma and gamma.
+
+    b and c never enter D or E. Each pass equilibrates the block, then takes
+    ||b||_inf to 1 with the joint (b, c) scale sigma and
+    max(||c||_inf, max |P_ij|) to 1 with the objective (P, c) scale gamma.
+    P sees gamma, so the next pass's column norms rebalance P against A.
+    Clarabel scales its cost the same way but with P's mean column norm;
+    the max is used here because it is attainable together with E's unit
+    columns when P has zero columns, whereas a unit mean is not.
+    """
+    # Work on copies so self.a / self.p / self.b / self.c are not modified
+    # in-place; they are used unequilibrated later (e.g. in
+    # _check_termination). The constructor already enforces CSC, so .copy()
+    # preserves format without a re-convert.
     a, p = self.a.copy(), self.p.copy()
-    b, c = self.b, self.c
-    # Initialize the equilibration matrices.
-    d, e = (np.ones(self.m), np.ones(self.n))
+    b, c = self.b.copy(), self.c.copy()
+    d, e = np.ones(self.m), np.ones(self.n)
+    sigma = gamma = 1.0
 
     # Sparsity patterns are static across iterations; the per-column nnz
     # counts only need to be computed once for the scaling-broadcast step.
@@ -1238,18 +1269,50 @@ class QTQP:
         # E @ P @ E: scale non-zero at row r, col c by e_i[r] * e_i[c].
         col_scale_p = np.repeat(e_i, p_col_counts)
         p.data *= e_i[p.indices] * col_scale_p
+      b *= d_i
+      c *= e_i
+
+      # sigma: joint scale on (b, c), a rescale of the solution, taking
+      # ||b||_inf to 1 within the cumulative bounds.
+      norm_b = _norm(b, np.inf)
+      sigma_i = 1.0
+      if norm_b > 0.0:
+        sigma_i = float(
+            np.clip(1.0 / norm_b, _SCALAR_MIN / sigma, _SCALAR_MAX / sigma)
+        )
+      b *= sigma_i
+      c *= sigma_i
+
+      # gamma: scale on the objective (P, c), a rescale of the duals, taking
+      # max(||c||_inf, max |P_ij|) to 1.
+      scale_cost = _norm(c, np.inf)
+      if p_col_counts is not None:
+        scale_cost = max(scale_cost, float(np.abs(p.data).max()))
+      gamma_i = 1.0
+      if scale_cost > 0.0:
+        gamma_i = float(
+            np.clip(1.0 / scale_cost, _SCALAR_MIN / gamma, _SCALAR_MAX / gamma)
+        )
+      p.data *= gamma_i
+      c *= gamma_i
 
       # Accumulate scaling factors
       d *= d_i
       e *= e_i
+      sigma *= sigma_i
+      gamma *= gamma_i
       logging.debug(
-          "Equilibration: iter %d: d_i err: %s, e_i err: %s",
+          "Equilibration: iter %d: d_i err: %s, e_i err: %s, sigma_i: %s,"
+          " gamma_i: %s",
           i,
           _norm(d_i - 1, np.inf),
           _norm(e_i - 1, np.inf),
+          sigma_i,
+          gamma_i,
       )
 
-    return a, p, b * d, c * e, d, e, 1.0
+    return a, p, b, c, d, e, sigma, gamma
+
 
   def _equilibrate_augmented(self, num_iters, min_scale, max_scale):
     """Ruiz equilibration on the symmetric augmented matrix.
@@ -1315,18 +1378,19 @@ class QTQP:
           abs(sigma_i - 1.0),
       )
 
-    return a, p, b, c, d, e, sigma
+    return a, p, b, c, d, e, sigma, 1.0
 
   def _unequilibrate_iterates(self, x, y, s):
     """Map equilibrated iterates back to original-problem scale.
 
-    Bakes the 1/sigma factor into (x, y, s) so the subsequent division by
-    the (equilibrated-space) tau produces the original-problem solution.
+    Bakes the scalar factors into (x, y, s) so the subsequent division by
+    the (equilibrated-space) tau produces the original-problem solution:
+    1/sigma on all of them, and 1/gamma on the duals only.
     """
     inv_sigma = 1.0 / self.sigma_eq
     return (
         inv_sigma * self.e * x,
-        inv_sigma * self.d * y,
+        inv_sigma / self.gamma_eq * self.d * y,
         inv_sigma * s / self.d,
     )
 
@@ -1334,7 +1398,7 @@ class QTQP:
     """Inverse of _unequilibrate_iterates: original scale -> equilibrated."""
     return (
         self.sigma_eq * x / self.e,
-        self.sigma_eq * y / self.d,
+        self.sigma_eq * self.gamma_eq * y / self.d,
         self.sigma_eq * s * self.d,
     )
 
@@ -1392,8 +1456,8 @@ class QTQP:
     unmodified mu_target.
 
     Uses the exact quadratic tau solve when the KKT solve is accurate, and a
-    linearized fallback (avoids squaring solver noise) when it's noisy or the
-    quadratic residual check fails.
+    fallback with P linearized at the current x (avoids squaring solver
+    noise) when the quadratic is degenerate or has no admissible root.
     """
     # Prepare RHS for the linear system.
     r = (mu - mu_target) * r_anchor
@@ -1502,12 +1566,15 @@ class QTQP:
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
   ) -> float:
-    """Linearized fallback for tau via first-order Taylor expansion of G(z,tau).
+    """Fallback for tau: the exact tau quadratic with P linearized at x.
 
-    Replaces the exact quadratic with a linearization around z_curr = [x; y]
-    and tau_curr. P only multiplies the safe current iterate x, so KKT noise
-    enters linearly rather than quadratically. A [0.1x, 10x] trust region
-    prevents manifold drift from the first-order approximation.
+    The same equation as _solve_for_tau, except that x'Px is replaced by its
+    first-order expansion around the current x, so P only multiplies the
+    safe current iterate and KKT noise enters the coefficients linearly
+    rather than squared. The mu tau^2 term stays exact, which matters when
+    tau is not small relative to the rest of the iterate. If the quadratic
+    has no admissible root, take the first-order step in tau of the same
+    model instead. A [0.1x, 10x] trust region prevents manifold drift.
 
     Linear-residual coefficients on tau use mu and mu_target; the
     cone-product constant -mu_target keeps the unmodified mu_target.
@@ -1516,31 +1583,44 @@ class QTQP:
     q, kinv_q = self.q, self.kinv_q
 
     px = p @ x if p.nnz > 0 else np.zeros(n)
-
-    # Scalar inner products; avoids allocating z_curr = [x; y] or r_z.
-    q_z = q[:n] @ x + q[n:] @ y
-    x_px = x @ px
     q_kinv_q = q @ kinv_q
+    q_kinv_r = q @ kinv_r
     px_kinv_q = px @ kinv_q[:n]
-    # r_z = kinv_r - tau_curr * kinv_q - z_curr, collapsed into scalar dots.
-    q_rz = q @ kinv_r - tau_curr * q_kinv_q - q_z
-    px_rz = px @ kinv_r[:n] - tau_curr * px_kinv_q - x_px
+    px_kinv_r = px @ kinv_r[:n]
+    x_px = x @ px
+    t_a = mu + q_kinv_q
+    t_b = (mu_target - mu) * tau_anchor - q_kinv_r + 2.0 * px_kinv_q
+    t_c = -mu_target + x_px - 2.0 * px_kinv_r
 
-    # Base residual G(z_curr, tau_curr).
-    g = (mu * tau_curr * tau_curr
-         + (mu_target - mu) * tau_anchor * tau_curr
-         - tau_curr * q_z - mu_target - x_px)
-
-    # Numerator: G + (dG/dz) @ r_z.  Denominator: dG/dtau - (dG/dz) @ kinv_q.
-    num = g - tau_curr * q_rz - 2.0 * px_rz
-    den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z +
-           tau_curr * q_kinv_q + 2.0 * px_kinv_q)
-
-    tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
-
-    if not np.isfinite(tau_sol):
-      logging.warning("Linearized tau fallback non-finite; using current tau.")
-      return tau_curr
+    tau_sol = None
+    if abs(t_a) < _EPS:
+      if abs(t_b) >= _EPS:
+        tau_sol = -t_c / t_b
+    else:
+      discriminant = t_b * t_b - 4.0 * t_a * t_c
+      if discriminant >= 0.0:
+        # Stable quadratic formula (Muller), as in _solve_for_tau.
+        if t_b > 0:
+          tau_sol = t_c / (-0.5 * (t_b + math.sqrt(discriminant)))
+        else:
+          tau_sol = (-0.5 * (t_b - math.sqrt(discriminant))) / t_a
+    if tau_sol is None or not np.isfinite(tau_sol):
+      # First-order step: linearize the same model around the current
+      # iterate z_curr = [x; y] and tau_curr, with r_z = kinv_r -
+      # tau_curr * kinv_q - z_curr collapsed into scalar dots.
+      q_z = q[:n] @ x + q[n:] @ y
+      q_rz = q_kinv_r - tau_curr * q_kinv_q - q_z
+      px_rz = px_kinv_r - tau_curr * px_kinv_q - x_px
+      g = (mu * tau_curr * tau_curr
+           + (mu_target - mu) * tau_anchor * tau_curr
+           - tau_curr * q_z - mu_target - x_px)
+      num = g - tau_curr * q_rz - 2.0 * px_rz
+      den = (2.0 * mu * tau_curr + (mu_target - mu) * tau_anchor - q_z
+             + tau_curr * q_kinv_q + 2.0 * px_kinv_q)
+      tau_sol = tau_curr + (0.0 if abs(den) < 1e-16 else -num / den)
+      if not np.isfinite(tau_sol):
+        logging.warning("Tau fallback non-finite; using current tau.")
+        return tau_curr
     return min(max(tau_sol, 0.1 * tau_curr), 10.0 * tau_curr)
 
   def _normalize(self, x, y, tau, s):
@@ -1621,13 +1701,16 @@ class QTQP:
       # roundoff of the summands (late endgame); treat large-mu iterates as
       # the informative regime.
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
-        se = self.sigma_eq * self.e
+        # Operating-scale products from the original-scale ones: A_eq x_eq =
+        # sigma D (A x), A_eq' y_eq = sigma gamma E (A' y), P_eq x_eq =
+        # sigma gamma E (P x), and the scalars pick up sigma^2 gamma.
         sd = self.sigma_eq * self.d
-        sig2 = self.sigma_eq * self.sigma_eq
+        sge = self.sigma_eq * self.gamma_eq * self.e
+        sig2g = self.sigma_eq * self.sigma_eq * self.gamma_eq
         ax_w = sd * ax
-        aty_w = se * aty
-        px_w = se * px
-        ctx_w, bty_w, xpx_w = sig2 * ctx, sig2 * bty, sig2 * xpx
+        aty_w = sge * aty
+        px_w = sge * px
+        ctx_w, bty_w, xpx_w = sig2g * ctx, sig2g * bty, sig2g * xpx
       else:
         ax_w, aty_w, px_w = ax, aty, px
         ctx_w, bty_w, xpx_w = ctx, bty, xpx

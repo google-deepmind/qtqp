@@ -1382,10 +1382,11 @@ def test_linearized_tau_always_converges(seed, problem_type):
     _assert_unbounded(solution, a, c, p, z)
 
 
-def _equilibrate_reference(a, p, num_iters=10, min_scale=1e-3, max_scale=1e3):
-  """Reference Ruiz equilibration using sparse diagonal matrix products."""
-  a, p = a.copy(), p.copy()
+def _equilibrate_reference(a, p, b, c, num_iters=10, min_scale=1e-3, max_scale=1e3):
+  """Reference Ruiz + scalars using sparse diagonal matrix products."""
+  a, p, b, c = a.copy(), p.copy(), b.copy(), c.copy()
   d, e = np.ones(a.shape[0]), np.ones(a.shape[1])
+  sigma = gamma = 1.0
   for _ in range(num_iters):
     d_i = sparse.linalg.norm(a, np.inf, axis=1)
     d_i = np.where(d_i == 0.0, 1.0, d_i)
@@ -1397,29 +1398,72 @@ def _equilibrate_reference(a, p, num_iters=10, min_scale=1e-3, max_scale=1e3):
     d_mat, e_mat = sparse.diags(d_i), sparse.diags(e_i)
     a = d_mat @ a @ e_mat
     p = e_mat @ p @ e_mat
+    b, c = d_mat @ b, e_mat @ c
+    sigma_i = np.clip(1.0 / np.abs(b).max(), 1e-4 / sigma, 1e4 / sigma)
+    b, c = sigma_i * b, sigma_i * c
+    scale_cost = max(np.abs(c).max(), abs(p).max())
+    gamma_i = np.clip(1.0 / scale_cost, 1e-4 / gamma, 1e4 / gamma)
+    p, c = gamma_i * p, gamma_i * c
     d *= d_i
     e *= e_i
-  return a, p, d, e
+    sigma *= sigma_i
+    gamma *= gamma_i
+  return a, p, b, c, d, e, sigma, gamma
 
 
 @pytest.mark.parametrize('seed', 2142 + np.arange(10))
 def test_equivalent_equilibration(seed):
-  """Test that in-place equilibration matches the reference sparse matmul."""
+  """In-place equilibration matches the reference sparse matmul and its targets."""
   rng = np.random.default_rng(seed)
   m, n, z = 150, 100, 10
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  b, c = 1e2 * b, 1e-3 * c  # Badly scaled, so the scalars have work to do.
 
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
   solver.equilibration_strategy = qtqp.EquilibrationStrategy.RUIZ
-  a_eq, p_eq, _, _, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
+  a_eq, p_eq, b_eq, c_eq, d, e, sigma, gamma = solver._equilibrate()  # pylint: disable=protected-access
 
-  a_ref, p_ref, d_ref, e_ref = _equilibrate_reference(a, p)
+  ref = _equilibrate_reference(a, p, b, c)
+  got = (a_eq.toarray(), p_eq.toarray(), b_eq, c_eq, d, e, sigma, gamma)
+  want = (ref[0].toarray(), ref[1].toarray(), *ref[2:])
+  for g, w in zip(got, want):
+    np.testing.assert_allclose(g, w, atol=1e-14, rtol=1e-14)
 
-  np.testing.assert_allclose(a_eq.toarray(), a_ref.toarray(), atol=1e-14, rtol=1e-14)
-  np.testing.assert_allclose(p_eq.toarray(), p_ref.toarray(), atol=1e-14, rtol=1e-14)
-  np.testing.assert_allclose(d, d_ref, atol=1e-14, rtol=1e-14)
-  np.testing.assert_allclose(e, e_ref, atol=1e-14, rtol=1e-14)
-  assert sigma == 1.0  # RUIZ never touches the augmented scalar.
+  # The accumulated factors reproduce the equilibrated data from the original.
+  d_mat, e_mat = sparse.diags(d), sparse.diags(e)
+  np.testing.assert_allclose(a_eq.toarray(), (d_mat @ a @ e_mat).toarray(), rtol=1e-12)
+  np.testing.assert_allclose(p_eq.toarray(), gamma * (e_mat @ p @ e_mat).toarray(), rtol=1e-12)
+  np.testing.assert_allclose(b_eq, sigma * d * b, rtol=1e-12)
+  np.testing.assert_allclose(c_eq, sigma * gamma * e * c, rtol=1e-12)
+
+  # Targets: ||b_eq||_inf = 1, cost scale 1, and the KKT block at unit rows.
+  assert np.abs(b_eq).max() == pytest.approx(1.0)
+  cost = max(np.abs(c_eq).max(), abs(p_eq).max())
+  assert cost == pytest.approx(1.0)
+  rows = sparse.linalg.norm(a_eq, np.inf, axis=1)
+  np.testing.assert_allclose(rows[rows > 0], 1.0, rtol=1e-2)
+
+  # A big-M entry in b saturates sigma at its bound instead of dragging the
+  # whole frame down with it.
+  solver = qtqp.QTQP(a=a, b=1e12 * b, c=c, z=z, p=p)
+  solver.equilibration_strategy = qtqp.EquilibrationStrategy.RUIZ
+  _, _, b_eq, _, _, _, sigma, _ = solver._equilibrate()  # pylint: disable=protected-access
+  assert sigma == 1e-4
+  assert np.abs(b_eq).max() > 1.0
+
+
+@pytest.mark.parametrize('seed', 7 + np.arange(5))
+@pytest.mark.parametrize('scales', ((1e5, 1e-4), (1e-4, 1e5)))
+def test_solve_badly_scaled_b_c(seed, scales):
+  """Rescaled b and c (valid: the cones are invariant) come back in the original frame."""
+  rng = np.random.default_rng(seed)
+  m, n, z = 150, 100, 10
+  a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
+  b, c = scales[0] * b, scales[1] * c
+
+  solution = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p).solve(collect_stats=True)
+
+  _assert_solution(solution, a, b, c, p, z)
 
 
 def _compute_sigma_reference(solver, mu_curr, x, y, tau, s, alpha, d_x, d_y,
@@ -1901,14 +1945,14 @@ def test_max_step_size():
 ])
 def test_equilibrate_unequilibrate_roundtrip(strategy):
   """Equilibrating then unequilibrating iterates must be the identity for
-  every non-NONE strategy (sigma factor must cancel)."""
+  every non-NONE strategy (the sigma and gamma factors must cancel)."""
   rng = np.random.default_rng(42)
   m, n, z = 30, 20, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
   solver.equilibration_strategy = strategy
 
-  _, _, _, _, solver.d, solver.e, solver.sigma_eq = solver._equilibrate()  # pylint: disable=protected-access
+  _, _, _, _, solver.d, solver.e, solver.sigma_eq, solver.gamma_eq = solver._equilibrate()  # pylint: disable=protected-access
 
   x = rng.normal(size=n)
   y = rng.uniform(size=m)
@@ -2150,10 +2194,13 @@ def test_iterative_refinement_improves_residual():
       max_iterative_refinement_steps=50, verbose=True, collect_stats=True
   )
 
-  # Compare the first iteration (cold start) q-solve residual.
+  # Compare the first iteration (cold start) q-solve residual. With ||q||_inf
+  # normalized to 1 by the equilibration scalars, a single step can already
+  # sit at the rounding floor, where the ordering is noise.
   res_1 = sol_1.stats[0]['q_lin_sys_stats']['final_residual_norm']
   res_50 = sol_50.stats[0]['q_lin_sys_stats']['final_residual_norm']
-  assert res_1 >= res_50, (
+  floor = 8 * np.finfo(float).eps
+  assert res_1 >= res_50 or res_50 <= floor, (
       f"1-step residual {res_1} should be >= 50-step residual {res_50}"
   )
 
@@ -2473,8 +2520,7 @@ def test_augmented_equilibration_unbounded():
 
 def test_augmented_equilibration_scales_b_and_c():
   """AUGMENTED equilibration must drive |b| and |c| toward unit scale when
-  the original problem has them several orders of magnitude away from 1.
-  RUIZ scales b and c only passively by d/e and cannot reach this."""
+  the original problem has them several orders of magnitude away from 1."""
   rng = np.random.default_rng(99)
   m, n, z = 30, 20, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
@@ -2483,7 +2529,7 @@ def test_augmented_equilibration_scales_b_and_c():
   c = c * 1e-6
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
   solver.equilibration_strategy = qtqp.EquilibrationStrategy.AUGMENTED
-  _, _, b_eq, c_eq, d, e, sigma = solver._equilibrate()  # pylint: disable=protected-access
+  _, _, b_eq, c_eq, d, e, sigma, _ = solver._equilibrate()  # pylint: disable=protected-access
 
   # sigma absorbed most of the gross scale mismatch.
   assert sigma != 1.0
