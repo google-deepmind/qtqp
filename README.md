@@ -258,9 +258,13 @@ Key parameters:
 
 Choose one with the `equilibration_strategy` argument:
 
--   `qtqp.EquilibrationStrategy.RUIZ`: Default. Ruiz equilibration on `A` and
-    `P`; `b` and `c` are scaled passively by the accumulated row/column
-    scalings.
+-   `qtqp.EquilibrationStrategy.RUIZ`: Default. Ruiz equilibration on the KKT
+    block `[P, A'; A, 0]`, plus the two scalars a QP admits freely: a joint
+    scale on `b` and `c` (a rescale of the solution) taking `||b||_inf` to 1,
+    and a scale on the objective `P`, `c` (a rescale of the duals) taking
+    `max(||c||_inf, max |P_ij|)` to 1, both kept within `[1e-4, 1e4]`. `b`
+    and `c` never enter the row/column scalings, so the factorized block
+    keeps unit rows and columns.
 -   `qtqp.EquilibrationStrategy.AUGMENTED`: Ruiz equilibration on the symmetric
     augmented matrix containing `P`, `A`, `b`, and `c`. This lets `b` and `c`
     participate directly in the scaling and can improve reliability on
