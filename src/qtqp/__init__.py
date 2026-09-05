@@ -489,10 +489,11 @@ class QTQP:
     mu0 = float(y @ s) / (self.m - self.z)
     if not np.isfinite(mu0) or mu0 <= 0.0:
       return math.inf
-    t_x0 = p @ x + a.T @ y + c * tau + mu0 * x
+    px = p @ x
+    t_x0 = px + a.T @ y + c * tau + mu0 * x
     t_y0 = -(a @ x) + b * tau + mu0 * y
     t_y0[self.z :] -= mu0 / y[self.z :]
-    px0_ = float(x @ (p @ x)) if p.nnz else 0.0
+    px0_ = float(x @ px) if p.nnz else 0.0
     t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
             + mu0 * (tau - 1.0 / max(_EPS, tau)))
     return self._local_metric_norm(t_x0, t_y0, t_t0, y, tau, mu0)
@@ -867,14 +868,6 @@ class QTQP:
     self._norm_b = _norm(self.b, np.inf)
     self._norm_c = _norm(self.c, np.inf)
 
-    # Data operator norms (original scale) for the certificate-quality tests:
-    # ||A||_inf (rows, acts on x), ||A||_1 (columns, = ||A'||_inf, acts on y),
-    # and ||P||_inf.
-    abs_a = abs(self.a)
-    self._norm_a_inf = float(abs_a.sum(axis=1).max()) if self.a.nnz else 0.0
-    self._norm_a_one = float(abs_a.sum(axis=0).max()) if self.a.nnz else 0.0
-    self._norm_p_inf = float(abs(self.p).sum(axis=1).max()) if self.p.nnz else 0.0
-
     self._linear_solver = direct.DirectKktSolver(
         a=a,
         p=p,
@@ -1006,6 +999,9 @@ class QTQP:
             rhs=self.q, warm_start=self.kinv_q
         )
         stats_i["q_lin_sys_stats"] = q_lin_sys_stats
+        # The data column and leading tau coefficient are invariant across
+        # the predictor, corrector, and any Gondzio trials on this factor.
+        tau_data = self._tau_invariants(p, mu)
 
         # --- Step 2: Predictor (Affine) Step ---
         # Solve KKT with mu_target = 0 to find pure Newton direction.
@@ -1022,6 +1018,7 @@ class QTQP:
             s=s,
             tau=tau,
             correction=None,
+            tau_data=tau_data,
         )
         stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
 
@@ -1064,6 +1061,7 @@ class QTQP:
             s=s,
             tau=tau,
             correction=correction,
+            tau_data=tau_data,
         )
         stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
 
@@ -1123,6 +1121,7 @@ class QTQP:
               s=s,
               tau=tau,
               correction=correction_g,
+              tau_data=tau_data,
           )
           d_s_g = np.zeros_like(d_s)
           # Single-division form, matching the primary corrector.
@@ -1487,6 +1486,7 @@ class QTQP:
 
   def _newton_step(
       self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau, correction,
+      tau_data=None,
   ):
     """Computes a Newton search direction by solving the augmented KKT system.
 
@@ -1529,7 +1529,9 @@ class QTQP:
     tau_plus = None
     try:
       r_tau = (mu - mu_target) * tau_anchor
-      tau_plus = self._solve_for_tau(p, kinv_r, mu, mu_target, r_tau)
+      tau_plus = self._solve_for_tau(
+          p, kinv_r, mu, mu_target, r_tau, tau_data=tau_data
+      )
       lin_sys_stats["tau_method"] = "quadratic"
     except ValueError:
       logging.debug("Primary tau solve failed; falling back to linearized.")
@@ -1546,7 +1548,19 @@ class QTQP:
     x_plus, y_plus = kinv_r[: self.n], kinv_r[self.n :]
     return x_plus, y_plus, tau_plus, lin_sys_stats
 
-  def _solve_for_tau(self, p, kinv_r, mu, mu_target, r_tau) -> float:
+  def _tau_invariants(self, p, mu):
+    """Return (P K^-1 q, leading tau coefficient) for one outer iteration."""
+    kinv_q = self.kinv_q
+    t_a = mu + kinv_q @ self.q
+    p_kinv_q = None
+    if p.nnz > 0:
+      p_kinv_q = p @ kinv_q[: self.n]
+      t_a -= kinv_q[: self.n] @ p_kinv_q
+    return p_kinv_q, t_a
+
+  def _solve_for_tau(
+      self, p, kinv_r, mu, mu_target, r_tau, *, tau_data=None
+  ) -> float:
     """Solves for tau+ using the homogeneous embedding's tau equation.
 
     The parametric KKT solution is:
@@ -1568,15 +1582,15 @@ class QTQP:
     n = self.n
     q, kinv_q = self.q, self.kinv_q
 
-    t_a = mu + kinv_q @ q
+    # Standalone calls can compute these locally; the IPM passes the shared
+    # values explicitly so they cannot outlive the factorization that made them.
+    if tau_data is None:
+      tau_data = self._tau_invariants(p, mu)
+    p_kinv_q, t_a = tau_data
     t_b = -r_tau - kinv_r @ q
     t_c = -mu_target
     if p.nnz > 0:
-      # Memory access for the sparse matrix P is the bottleneck here.
-      # np.stack enables a single pass over P's data and indices, which
-      # is ~25% faster than two separate SpMVs (p @ kinv_r and p @ kinv_q).
-      p_kinv_r, p_kinv_q = (p @ np.stack([kinv_r[:n], kinv_q[:n]], axis=1)).T
-      t_a -= kinv_q[:n] @ p_kinv_q
+      p_kinv_r = p @ kinv_r[:n]
       t_b += kinv_r[:n] @ p_kinv_q + kinv_q[:n] @ p_kinv_r
       t_c -= kinv_r[:n] @ p_kinv_r
     logging.debug("t_a=%s, t_b=%s, t_c=%s", t_a, t_b, t_c)
