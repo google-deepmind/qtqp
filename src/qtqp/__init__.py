@@ -257,6 +257,8 @@ class Solution:
     s: The slack solution or certificate of dual infeasibility.
     stats: A list of statistics dictionaries from each iteration.
     status: SolutionStatus enum indicating the status.
+    iterations: Number of completed IPM steps, excluding initialization and
+      failed step attempts. Available even when statistics are not collected.
   """
 
   x: np.ndarray
@@ -264,6 +266,7 @@ class Solution:
   s: np.ndarray
   stats: List[Dict[str, Any]]
   status: SolutionStatus
+  iterations: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -376,6 +379,7 @@ class QTQP:
     # before solve() has initialized the tracking state.
     self._best_almost_score = math.inf
     self._best_almost_iterate = None
+    self._iterations = 0
 
   def _presolve(self, inf_bound: float = 1e20):
     """Drop inequality rows with trivially-satisfied RHS (b[i] >= inf_bound
@@ -656,6 +660,7 @@ class QTQP:
   ) -> Solution:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
+    self._iterations = 0
     try:
       return self._solve_impl(
           tol_feas=tol_feas,
@@ -988,7 +993,8 @@ class QTQP:
     # contract, instead of escaping as exceptions. Programming errors
     # (TypeError, NameError, ...) still propagate.
     try:
-      # self.it counts IPM steps already taken.
+      # self.it is the zero-based attempt index; _iterations counts completed
+      # iterate updates, so initialization and failed attempts do not count.
       for self.it in range(max_iter if run_loop else 0):
         stats_i = {}
         if self.it == 0:
@@ -1164,6 +1170,7 @@ class QTQP:
         y[self.z :] = np.maximum(y[self.z :], 1e-30)
         s[self.z :] = np.maximum(s[self.z :], 1e-30)
         tau = max(tau, 1e-30)
+        self._iterations += 1
 
         status = self._check_termination(
             x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
@@ -1194,21 +1201,21 @@ class QTQP:
         self._log_footer("Solved")
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
-        return Solution(x, y, s, stats, status)
+        return Solution(x, y, s, stats, status, iterations=self._iterations)
       case SolutionStatus.INFEASIBLE:
         self._log_footer("Primal infeasible / dual unbounded")
         x.fill(np.nan)
         s.fill(np.nan)
         y_scaled = y / abs(self.b @ y)
         y_scaled, s = self._postsolve(y_scaled, s)
-        return Solution(x, y_scaled, s, stats, status)
+        return Solution(x, y_scaled, s, stats, status, iterations=self._iterations)
       case SolutionStatus.UNBOUNDED:
         self._log_footer("Dual infeasible / primal unbounded")
         y.fill(np.nan)
         abs_ctx = abs(self.c @ x)
         x, s = x / abs_ctx, s / abs_ctx
         y, s = self._postsolve(y, s, y_dropped=np.nan)
-        return Solution(x, y, s, stats, status)
+        return Solution(x, y, s, stats, status, iterations=self._iterations)
       case SolutionStatus.HIT_MAX_ITER | SolutionStatus.UNFINISHED:
         # Salvage: the best iterate seen, if it meets the criteria at
         # the reduced tolerances, is an honestly-labeled
@@ -1225,7 +1232,10 @@ class QTQP:
           by, bs = self._postsolve(by, bs, s_dropped=self._dropped_slack(bx))
           if stats:
             stats[-1]["status"] = SolutionStatus.ALMOST_SOLVED
-          return Solution(bx, by, bs, stats, SolutionStatus.ALMOST_SOLVED)
+          return Solution(
+              bx, by, bs, stats, SolutionStatus.ALMOST_SOLVED,
+              iterations=self._iterations,
+          )
         if status is SolutionStatus.HIT_MAX_ITER:
           self._log_footer("Hit maximum iterations")
           final = status
@@ -1234,7 +1244,7 @@ class QTQP:
           final = SolutionStatus.FAILED
         x, y, s = x / tau, y / tau, s / tau
         y, s = self._postsolve(y, s, s_dropped=self._dropped_slack(x))
-        return Solution(x, y, s, stats, final)
+        return Solution(x, y, s, stats, final, iterations=self._iterations)
       case _:
         raise ValueError(f"Unknown convergence status: {status}")
 
@@ -1860,6 +1870,7 @@ class QTQP:
 
     stats_i.update({
         "iter": self.it,
+        "iterations": self._iterations,
         "ctx": ctx,
         "bty": bty,
         "pcost": pcost,
@@ -1934,4 +1945,4 @@ class QTQP:
 
   def _log_footer(self, message: str):
     if self.verbose:
-      print(f"{_SEPARA}\n| {message}")
+      print(f"{_SEPARA}\n| {message}\n| Completed IPM steps: {self._iterations}")
