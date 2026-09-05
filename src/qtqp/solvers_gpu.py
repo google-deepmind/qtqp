@@ -136,6 +136,7 @@ class CupyDenseSolver(LinearSolver):
     cp = self._cp
     self._n = n
     self._m = m
+    self._z = z
     self._A_gpu = None
     self._P_offdiag_gpu = None
     self._R_x_gpu = cp.empty(n, dtype=cp.float64)
@@ -165,6 +166,11 @@ class CupyDenseSolver(LinearSolver):
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    if self._z and np.any(diag[self._n : self._n + self._z] == 0.0):
+      raise ValueError(
+          "Dense Gram elimination requires positive regularization on equality "
+          "rows. Set min_static_regularization > 0 for initialization."
+      )
     cp = self._cp
     self._R_x_gpu.set(diag[:self._n])
     self._R_y_gpu.set(-diag[self._n:])

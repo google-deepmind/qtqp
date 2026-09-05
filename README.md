@@ -197,6 +197,9 @@ Key parameters:
 -   `step_size_scale` (0,1): Scale for line search step size to stay strictly
     interior.
 -   `min_static_regularization`: Diagonal regularization on KKT for robustness.
+    Dense Gram backends (`SCIPY_DENSE`, `CUPY_DENSE`) require a positive value
+    when initializing a problem with equality rows (`z > 0`); zero raises
+    `ValueError` because Gram elimination cannot invert a zero equality diagonal.
 -   `max_iterative_refinement_steps`, `linear_solver_atol/rtol`: Control
     iterative refinement of the linear solve. The default is 20 refinement
     steps, counting the initial solve.
