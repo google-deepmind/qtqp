@@ -154,9 +154,12 @@ class CupyDenseSolver(LinearSolver):
     super().set_kkt(kkt)
     cp = self._cp
     n = self._n
-    kkt_dense = kkt.toarray()
-    self._A_gpu = cp.asarray(kkt_dense[:n, n:].T, dtype=cp.float64)
-    P_block = kkt_dense[:n, :n]
+    # Extract before densifying, avoiding a full (n + m)^2 host allocation
+    # for a backend that only needs the m x n and n x n blocks.
+    self._A_gpu = cp.asarray(
+        kkt[:n, n:].T.toarray(order="F"), dtype=cp.float64
+    )
+    P_block = kkt[:n, :n].toarray()
     P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
