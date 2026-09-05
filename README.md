@@ -216,21 +216,18 @@ Key parameters:
     A solution found at initialization reports zero. In collected rows, `iter`
     remains the zero-based label and `iterations` is the completed-step count
     at that row; the final log footer reports the total completed count.
-    Every iteration also logs `delta_path`, a rigorous a posteriori upper
-    bound on the distance from the iterate to the exact central-path point
-    at the current `mu` (from the strong monotonicity of the regularized path
-    map); it is informative when small, conservative for aggressively
-    centered iterates, and saturates at the floating-point floor in the
-    final iterations. Its local-norm companion `delta_path_local` measures
-    the same residual in the barrier metric `H = mu*I + mu*hess(Phi)`
-    (a Newton-decrement analogue): it weights each component by the
-    curvature resisting it and remains informative for aggressive
-    iterates. `lambda_init` (also an attribute on the solver) is the same
-    measure at the deterministic initial point, before the first step:
-    healthy problems measure small, while pathologically scaled data
-    announces itself by tens of orders of magnitude — this diagnostic is
-    how corrupted infinity-sentinel bounds were found in the
-    Maros-Meszaros benchmark files.
+    Collected rows also include `delta_path`, an estimate of
+    `||T_mu(u)|| / mu`. In exact arithmetic with positive `mu`, this bounds
+    the distance to the central-path point by strong monotonicity. The
+    recorded value uses floating-point denominator guards, so it is a
+    diagnostic rather than a certified numerical bound. Its local-norm
+    companion `delta_path_local` approximates the residual norm
+    `lambda = ||T_mu(u)||_(H^-1)`, where
+    `H = mu*I + mu*hess(Phi)`. This score also uses denominator guards and
+    is not itself a distance bound. `lambda_init` (also an attribute on
+    the solver) is the same guarded local score at the chosen initial
+    point, warm or cold, before the first step. For an accepted warm
+    start, it reuses the screening score.
 -   `refinement_strategy`: Choose the iterative-refinement method used for KKT
     solves. Defaults to `qtqp.RefinementStrategy.GMRES`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
@@ -250,17 +247,26 @@ Key parameters:
     caps at a linear rate. Set False for the constant legacy schedule.
 -   `warm_start`: Optional `(x, y, s)` from a nearby problem (original scale,
     e.g. a previous solution's arrays). The point is equilibrated into the
-    operating scale, embedded interior at a few centering shifts, and the
-    best embedding is accepted only when the distance-to-path certificate
-    measures `lambda <= warm_start_threshold`; a vetoed point falls back to
-    the standard initialization, so warm starting is never worse than a
-    cold solve by more than the certificate evaluation (three matvecs per
-    shift). After `solve`, the measured `warm_lambda` and the `warm_accepted`
-    decision are attributes on the solver. A warm start is ignored on an
-    all-equality problem, which the initialization solves outright.
--   `warm_start_threshold`: Acceptance threshold for the certified warm
-    start (default `100.0`). Poisoned or mis-scaled points measure orders of
-    magnitude above it; same-problem re-entries orders of magnitude below.
+    operating scale, its inequality duals and slacks are floored at each
+    of `1e-6`, `1e-4`, `1e-2`, and `1.0`, and each candidate is normalized.
+    The candidate with the smallest guarded local score is accepted when
+    `lambda <= warm_start_threshold`; otherwise the solver uses the
+    standard initialization. This is empirical screening: acceptance does
+    not certify distance to the path or guarantee fewer iterations or less
+    time than a cold solve. Screening uses no factorization and six
+    matrix-vector products across the four candidates: shared `A @ x` and
+    `P @ x`, plus one `A.T @ y` per candidate. An accepted start skips the
+    cold initialization factorization and reuses its score as `lambda_init`;
+    a rejected start adds screening overhead before the cold solve. After
+    `solve`, the measured `warm_lambda` and the `warm_accepted` decision are
+    attributes on the solver. A warm start is ignored on an all-equality
+    problem, which the initialization solves outright.
+-   `warm_start_threshold`: Empirical screening threshold (default `100.0`),
+    not a certified distance tolerance. For the exact local score, the
+    theoretical distance bound instead requires
+    `eta = lambda / sqrt(mu) < 1` and is `eta / (1 - eta)`. The solver does
+    not use this test for acceptance, and its guarded score must not be
+    substituted into that bound as a numerical certificate.
 
 #### Equilibration strategies
 
