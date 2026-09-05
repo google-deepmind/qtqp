@@ -1296,8 +1296,8 @@ def _make_tau_gating_solver(converged):
   solver._linear_solver = FakeLinearSolver()  # pylint: disable=protected-access
   calls = {'quadratic': 0, 'linearized': 0}
 
-  def _fake_quadratic(self, p, kinv_r, mu, mu_target, r_tau):
-    del self, p, kinv_r, mu, mu_target, r_tau
+  def _fake_quadratic(self, p, kinv_r, mu, mu_target, r_tau, *, tau_data=None):
+    del self, p, kinv_r, mu, mu_target, r_tau, tau_data
     calls['quadratic'] += 1
     return 1.0
 
@@ -3525,10 +3525,10 @@ def test_gondzio_stacking_gates_on_fresh_tau_method(monkeypatch):
     counts = []
     orig = qtqp.QTQP._newton_step
     def spy(self, *, p, mu, mu_target, r_anchor, tau_anchor, x, y, s, tau,
-            correction):
+            correction, tau_data=None):
       out = orig(self, p=p, mu=mu, mu_target=mu_target, r_anchor=r_anchor,
                  tau_anchor=tau_anchor, x=x, y=y, s=s, tau=tau,
-                 correction=correction)
+                 correction=correction, tau_data=tau_data)
       if correction is None:
         counts.append(0)  # predictor: new iteration
       elif len(counts) > 0 and counts[-1] >= 0:
