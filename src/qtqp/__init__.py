@@ -662,6 +662,8 @@ class QTQP:
     """Solves the QP using a primal-dual interior-point method."""
     self._linear_solver = None
     self._iterations = 0
+    # Accepted warm starts skip initialization; its stats belong to this call.
+    self._init_lin_stats = {}
     try:
       return self._solve_impl(
           tol_feas=tol_feas,
