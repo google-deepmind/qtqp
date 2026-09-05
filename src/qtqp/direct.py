@@ -85,12 +85,12 @@ def diag_data_indices(mat: sp.spmatrix) -> np.ndarray:
   """
   mat.sort_indices()
   dim = mat.shape[0]
-  idxs = np.empty(dim, dtype=np.intp)
-  for k in range(dim):
-    start = mat.indptr[k]
-    idxs[k] = start + np.searchsorted(
-        mat.indices[start:mat.indptr[k + 1]], k
-    )
+  # The scaffold stores every diagonal entry explicitly, so column k (row k
+  # for CSR) holds exactly one entry with index k; find them all at once.
+  owner = np.repeat(np.arange(dim), np.diff(mat.indptr))
+  idxs = np.flatnonzero(mat.indices == owner)
+  if idxs.size != dim:
+    raise ValueError("KKT scaffold must store every diagonal entry once.")
   return idxs
 
 
@@ -119,6 +119,9 @@ class LinearSolver:
     self._kkt = kkt
     self._kkt_diag = kkt.diagonal()
     self._kkt_diag_idxs = diag_data_indices(kkt)
+    # Transposed view sharing kkt.data, so update_diag keeps it current and
+    # the matvec below does not rebuild a sparse object on every call.
+    self._kkt_t = kkt.T
 
   def update_diag(self, diag: np.ndarray) -> None:
     """Updates the KKT diagonal in place; called each iteration before factorize.
@@ -146,7 +149,7 @@ class LinearSolver:
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     res = self._kkt @ x
     res -= self._kkt_diag * x
-    res += self._kkt.T @ x
+    res += self._kkt_t @ x
     return res
 
   def format(self) -> str:
@@ -237,6 +240,15 @@ class DirectKktSolver:
     self._reg_diags = np.empty(self.n + self.m, dtype=np.float64)
     self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
     self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
+    if refinement_strategy is RefinementStrategy.GMRES:
+      # GMRES work arrays, allocated once for the largest cycle.
+      k, dim = gmres_restart, self.n + self.m
+      self._gm_v = np.empty((k + 1, dim))
+      self._gm_z = np.empty((k, dim))
+      self._gm_h = np.zeros((k + 1, k))
+      self._gm_cs = np.zeros(k)
+      self._gm_sn = np.zeros(k)
+      self._gm_g = np.zeros(k + 1)
 
   def update(self, mu: float, s: np.ndarray, y: np.ndarray):
     """Forms the KKT matrix diagonals and factorizes it.
@@ -539,13 +551,14 @@ class DirectKktSolver:
     the 2-norm, so this is a safe (slightly conservative) trigger for the
     inf-norm convergence test the outer loop applies.
     """
-    n = sol.size
-    v = np.empty((max_inner + 1, n))
-    z = np.empty((max_inner, n))
-    h = np.zeros((max_inner + 1, max_inner))
-    cs = np.zeros(max_inner)
-    sn = np.zeros(max_inner)
-    g = np.zeros(max_inner + 1)
+    v = self._gm_v[: max_inner + 1]
+    z = self._gm_z[:max_inner]
+    h = self._gm_h[: max_inner + 1, :max_inner]
+    h.fill(0.0)
+    cs = self._gm_cs[:max_inner]
+    sn = self._gm_sn[:max_inner]
+    g = self._gm_g[: max_inner + 1]
+    g.fill(0.0)
 
     applies = 0
     beta = float(np.linalg.norm(residual))

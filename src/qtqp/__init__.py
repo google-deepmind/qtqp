@@ -128,6 +128,43 @@ def _auto_linear_solver_order() -> list[LinearSolver]:
   return [LinearSolver.PARDISO] + fallbacks
 
 
+def _csc_col_inf_norms(mat: sp.csc_matrix, abs_data: np.ndarray) -> np.ndarray:
+  """Infinity norm of every column of a CSC matrix (0 for empty columns).
+
+  abs_data is |mat.data|; passing it in lets one pass over the entries serve
+  both the row and the column norms.
+  """
+  norms = np.zeros(mat.shape[1])
+  starts = mat.indptr[:-1]
+  nonempty = mat.indptr[1:] > starts
+  if abs_data.size:
+    norms[nonempty] = np.maximum.reduceat(abs_data, starts[nonempty])
+  return norms
+
+
+def _csc_row_order(mat: sp.csc_matrix) -> tuple[np.ndarray, np.ndarray]:
+  """Permutation taking mat.data to row-major order, with the row pointers.
+
+  Computed once per equilibration so the per-pass row norms are a gather and
+  a segmented max over the CSC data, with no temporary sparse matrices.
+  """
+  tags = np.arange(1, mat.nnz + 1, dtype=np.float64)
+  by_row = sp.csc_matrix((tags, mat.indices, mat.indptr), shape=mat.shape).tocsr()
+  return by_row.data.astype(np.intp) - 1, by_row.indptr
+
+
+def _csc_row_inf_norms(
+    abs_data: np.ndarray, row_perm: np.ndarray, row_indptr: np.ndarray, m: int
+) -> np.ndarray:
+  """Infinity norm of every row of a CSC matrix, given _csc_row_order."""
+  norms = np.zeros(m)
+  starts = row_indptr[:-1]
+  nonempty = row_indptr[1:] > starts
+  if abs_data.size:
+    norms[nonempty] = np.maximum.reduceat(abs_data[row_perm], starts[nonempty])
+  return norms
+
+
 def _resolve_linear_solver(
     linear_solver: LinearSolver,
 ) -> tuple[LinearSolver, direct.LinearSolver]:
@@ -1238,20 +1275,23 @@ class QTQP:
     sigma = gamma = 1.0
 
     # Sparsity patterns are static across iterations; the per-column nnz
-    # counts only need to be computed once for the scaling-broadcast step.
+    # counts only need to be computed once for the scaling-broadcast step,
+    # and the row ordering once for the row norms.
     a_col_counts = np.diff(a.indptr)
     p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
+    a_row_perm, a_row_indptr = _csc_row_order(a)
 
     for i in range(num_iters):
+      abs_a = np.abs(a.data)
       # Row norms (infinity norm)
-      d_i = sp.linalg.norm(a, np.inf, axis=1)
+      d_i = _csc_row_inf_norms(abs_a, a_row_perm, a_row_indptr, self.m)
       d_i = np.where(d_i == 0.0, 1.0, d_i)  # If a row is zero, set d_i 1.0.
       d_i = 1.0 / np.sqrt(d_i)
       d_i = np.clip(d_i, min_scale, max_scale)
 
       # Column norms (max of A col norms and P col norms)
-      e_i_a = sp.linalg.norm(a, np.inf, axis=0)
-      e_i_p = sp.linalg.norm(p, np.inf, axis=0)
+      e_i_a = _csc_col_inf_norms(a, abs_a)
+      e_i_p = _csc_col_inf_norms(p, np.abs(p.data))
       e_i = np.maximum(e_i_a, e_i_p)
       e_i = np.where(e_i == 0.0, 1.0, e_i)  # If a col is zero, set e_i 1.0.
       e_i = 1.0 / np.sqrt(e_i)
@@ -1331,20 +1371,26 @@ class QTQP:
     d, e = np.ones(self.m), np.ones(self.n)
     sigma = 1.0
 
-    # Sparsity patterns are static; pre-compute the per-column nnz counts.
+    # Sparsity patterns are static; pre-compute the per-column nnz counts
+    # and the row ordering for the row norms.
     a_col_counts = np.diff(a.indptr)
     p_col_counts = np.diff(p.indptr) if p.nnz > 0 else None
+    a_row_perm, a_row_indptr = _csc_row_order(a)
 
     for i in range(num_iters):
+      abs_a = np.abs(a.data)
       # Column inf-norms of the symmetric augmented matrix.
       # x-columns (0..n): max(||P[:,j]||_inf, ||A[:,j]||_inf, |c[j]|)
       norms_e = np.maximum(
-          sp.linalg.norm(p, np.inf, axis=0),
-          sp.linalg.norm(a, np.inf, axis=0),
+          _csc_col_inf_norms(p, np.abs(p.data)),
+          _csc_col_inf_norms(a, abs_a),
       )
       norms_e = np.maximum(norms_e, np.abs(c))
       # y-columns (n..n+m): max(||A[i,:]||_inf, |b[i]|)
-      norms_d = np.maximum(sp.linalg.norm(a, np.inf, axis=1), np.abs(b))
+      norms_d = np.maximum(
+          _csc_row_inf_norms(abs_a, a_row_perm, a_row_indptr, self.m),
+          np.abs(b),
+      )
       # tau-column (n+m): max(||c||_inf, ||b||_inf)
       norm_sigma = max(_norm(c, np.inf), _norm(b, np.inf))
 
