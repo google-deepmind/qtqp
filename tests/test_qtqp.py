@@ -3715,6 +3715,72 @@ def test_accepted_warm_start_skips_cold_init(monkeypatch):
   assert calls["n"] == 1, "vetoed warm start must fall back to the cold init"
 
 
+@pytest.mark.parametrize('linear_solver', [
+    qtqp.LinearSolver.SCIPY, qtqp.LinearSolver.SCIPY_DENSE,
+])
+def test_reused_solver_warm_start_has_no_stale_init_stats(
+    monkeypatch, linear_solver,
+):
+  """A zero-step warm solve reports only initialization work from this call."""
+  solver = qtqp.QTQP(
+      a=sparse.csc_matrix([[1.0], [-1.0]]),
+      b=np.full(2, 1e-3), c=np.zeros(1),
+      p=sparse.eye(1, format='csc'), z=0,
+  )
+  init_calls = 0
+  original_init = solver._init_variables
+
+  def counting_init(*args, **kwargs):
+    nonlocal init_calls
+    init_calls += 1
+    return original_init(*args, **kwargs)
+
+  monkeypatch.setattr(solver, '_init_variables', counting_init)
+  options = dict(verbose=False, collect_stats=True, linear_solver=linear_solver)
+  cold = solver.solve(**options)
+  assert cold.status == qtqp.SolutionStatus.SOLVED
+  assert init_calls == 1
+  assert solver._init_lin_stats['solves'] > 0
+
+  warm = solver.solve(warm_start=(cold.x, cold.y, cold.s), **options)
+  assert warm.status == qtqp.SolutionStatus.SOLVED
+  assert solver.warm_accepted
+  assert warm.iterations == 0
+  assert init_calls == 1, 'accepted warm start ran cold initialization'
+  assert len(warm.stats) == 1
+  assert warm.stats[0]['q_lin_sys_stats'] == {}
+  assert warm.stats[0]['predictor_lin_sys_stats'] == {}
+  assert warm.stats[0]['corrector_lin_sys_stats'] == {}
+
+  next_cold = solver.solve(**options)
+  assert next_cold.status == qtqp.SolutionStatus.SOLVED
+  assert init_calls == 2
+  assert solver._init_lin_stats['solves'] > 0
+
+
+@pytest.mark.parametrize('linear_solver', [
+    qtqp.LinearSolver.SCIPY, qtqp.LinearSolver.SCIPY_DENSE,
+])
+def test_reused_solver_preserves_returned_init_stats(linear_solver):
+  """Resetting per-solve state must not mutate an earlier solution's stats."""
+  solver = qtqp.QTQP(
+      a=sparse.csc_matrix([[1.0]]), b=np.ones(1), c=np.zeros(1),
+      p=sparse.eye(1, format='csc'), z=1,
+  )
+  options = dict(verbose=False, collect_stats=True, linear_solver=linear_solver)
+  first = solver.solve(**options)
+  assert first.status == qtqp.SolutionStatus.SOLVED
+  assert first.iterations == 0
+  first_stats = first.stats[0]['q_lin_sys_stats'].copy()
+  assert first_stats['solves'] > 0
+
+  second = solver.solve(**options)
+  assert second.status == qtqp.SolutionStatus.SOLVED
+  assert second.iterations == 0
+  assert second.stats[0]['q_lin_sys_stats']['solves'] > 0
+  assert first.stats[0]['q_lin_sys_stats'] == first_stats
+
+
 def test_equality_only_qp_unique_solution():
   """Equality-constrained strictly convex QP: the direct path recovers
   the unique KKT solution."""
