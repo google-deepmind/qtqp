@@ -69,6 +69,7 @@ class ScipyDenseSolver(LinearSolver):
   def set_dims(self, n: int, m: int, z: int) -> None:
     self._n = n
     self._m = m
+    self._z = z
     # Blocks extracted once from the KKT scaffold (populated in first set_kkt).
     self._A: np.ndarray | None = None         # (m, n) dense, Fortran-order
     self._P_offdiag: np.ndarray | None = None  # (n, n) P with diagonal zeroed, F-order
@@ -96,6 +97,11 @@ class ScipyDenseSolver(LinearSolver):
     self._P_offdiag = np.asfortranarray(P_block)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    if self._z and np.any(diag[self._n : self._n + self._z] == 0.0):
+      raise ValueError(
+          "Dense Gram elimination requires positive regularization on equality "
+          "rows. Set min_static_regularization > 0 for initialization."
+      )
     np.copyto(self._R_x, diag[:self._n])
     np.negative(diag[self._n:], out=self._R_y)
     np.divide(1.0, self._R_y, out=self._inv_R_y)
