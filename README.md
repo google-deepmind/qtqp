@@ -208,6 +208,11 @@ Key parameters:
 -   `collect_stats`: If True, populate `Solution.stats` with per-iteration
     diagnostics (sy, s/y statistics, complementarity, etc.). Defaults to False
     for faster throughput.
+    `Solution.iterations` always reports completed IPM steps, excluding
+    initialization and failed step attempts, even with `collect_stats=False`.
+    A solution found at initialization reports zero. In collected rows, `iter`
+    remains the zero-based label and `iterations` is the completed-step count
+    at that row; the final log footer reports the total completed count.
     Every iteration also logs `delta_path`, a rigorous a posteriori upper
     bound on the distance from the iterate to the exact central-path point
     at the current `mu` (from the strong monotonicity of the regularized path
