@@ -88,9 +88,12 @@ class ScipyDenseSolver(LinearSolver):
   def set_kkt(self, kkt: sp.spmatrix) -> None:
     super().set_kkt(kkt)
     n = self._n
-    kkt_dense = kkt.toarray()
-    self._A = np.asfortranarray(kkt_dense[:n, n:].T, dtype=np.float64)
-    P_block = kkt_dense[:n, :n]
+    # Densify only the blocks used by the Gram reduction: the full KKT
+    # would require O((n + m)^2) temporary storage when m >> n.
+    self._A = np.asfortranarray(
+        kkt[:n, n:].T.toarray(order="F"), dtype=np.float64
+    )
+    P_block = kkt[:n, :n].toarray()
     P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
     self._P_offdiag = np.asfortranarray(P_block)
