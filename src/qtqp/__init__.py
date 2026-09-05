@@ -480,22 +480,27 @@ class QTQP:
     del x
     return np.inf
 
-  def _lambda_local(self, x, y, s, tau, a, p, b, c):
-    """Local-norm distance-to-path measure at a working-scale point.
+  def _lambda_local(self, x, y, s, tau, a, p, b, c, *, ax=None, px=None):
+    """Guarded local-norm residual score at a working-scale point.
 
     lambda = ||T_mu(u)||_{H^-1} with H = mu*I + mu*hess(Phi) (diagonal),
-    evaluated at the point's own complementarity mu = y's/(m-z). Three
-    matvecs. Certified-distance semantics when small; a scaled residual
-    score when large. Returns inf when the point has no positive
-    complementarity to define a barrier parameter at (e.g. junk warm
-    points with sign-mixed y), which reads as maximally far from the path.
+    evaluated at the point's own complementarity mu = y's/(m-z), with
+    epsilon guards in the residual and metric. A threshold on this score
+    alone does not certify distance to the path or faster convergence.
+    Returns inf when complementarity cannot define a positive finite mu.
+
+    Optional ax and px must be the products A@x and P@x for this candidate
+    in the working frame. Without them, evaluation costs three matvecs.
     """
     mu0 = float(y @ s) / (self.m - self.z)
     if not np.isfinite(mu0) or mu0 <= 0.0:
       return math.inf
-    px = p @ x
+    if px is None:
+      px = p @ x
+    if ax is None:
+      ax = a @ x
     t_x0 = px + a.T @ y + c * tau + mu0 * x
-    t_y0 = -(a @ x) + b * tau + mu0 * y
+    t_y0 = -ax + b * tau + mu0 * y
     t_y0[self.z :] -= mu0 / y[self.z :]
     px0_ = float(x @ px) if p.nnz else 0.0
     t_t0 = (-(float(c @ x) + float(b @ y)) - px0_ / max(_EPS, tau)
@@ -503,13 +508,13 @@ class QTQP:
     return self._local_metric_norm(t_x0, t_y0, t_t0, y, tau, mu0)
 
   def _local_metric_norm(self, t_x, t_y, t_tau, y, tau, mu):
-    """||(t_x, t_y, t_tau)||_{H^-1} with H = mu*I + mu*diag(hess barrier).
+    """Guarded ||(t_x, t_y, t_tau)||_{H^-1}, H = mu*(I + hess barrier).
 
-    The barrier metric deflates the boundary-adjacent rows that make the
-    Euclidean certificate conservative on aggressively centered iterates
-    (Newton-decrement flavor). Shared by lambda_init, the warm-start
-    certification, and the delta_path_local diagnostic so the three
-    measures stay definitionally identical.
+    The barrier metric weights residual components by local curvature
+    (Newton-decrement flavor). Epsilon floors approximate the exact metric
+    near the numerical boundary. Shared by lambda_init, warm-start
+    screening, and delta_path_local; these are diagnostics, not standalone
+    distance or iteration-count guarantees.
     """
     h_y = np.full(self.m, mu)
     h_y[self.z :] += mu / (y[self.z :] * y[self.z :])
@@ -781,17 +786,19 @@ class QTQP:
         RICHARDSON.
       warm_start (tuple | None): Optional (x, y, s) from a nearby problem
         (original scale, e.g. a previous Solution's arrays). The point is
-        equilibrated into the operating scale, embedded interior at a few
-        centering shifts, and the best embedding is accepted only when the
-        distance-to-path certificate measures lambda <=
-        warm_start_threshold; otherwise the solve falls back to the
-        standard initialization. After solve, `warm_lambda` (the measured
-        lambda, or None when no warm start was given) and `warm_accepted`
-        are available as attributes on the solver.
-      warm_start_threshold (float): Acceptance threshold for the certified
-        warm start. Default 100.0: poisoned or mis-scaled points measure
-        orders of magnitude above it, same-problem re-entries orders of
-        magnitude below.
+        equilibrated into the operating scale and embedded interior using
+        four positivity floors. The candidate with the smallest guarded
+        local-norm residual score is accepted when lambda <=
+        warm_start_threshold; otherwise the standard initialization runs.
+        This is an empirical screen, not a distance certificate or a
+        no-slowdown guarantee. Screening shares A@x and P@x across candidates
+        and costs six matvecs total; an accepted score is reused as
+        `lambda_init`. After solve, `warm_lambda` (the minimum score, or None
+        when screening was skipped) and `warm_accepted` are available as
+        attributes on the solver. All-equality problems skip screening.
+      warm_start_threshold (float): Positive finite threshold for the
+        empirical warm-start screen (default 100.0). It does not bound the
+        distance to the path or the subsequent solve's iteration count.
       adaptive_step_size (bool): If True (the default), once mu < 1e-3
         the fraction-to-boundary scale follows min(0.9999,
         max(step_size_scale, 1 - 10*mu)) instead of the constant
@@ -894,12 +901,10 @@ class QTQP:
     self._best_almost_iterate = None
     status = SolutionStatus.UNFINISHED
 
-    # Certified warm start: ingest a caller-supplied (x, y, s) from a
-    # nearby problem, embed it interior at a few centering shifts, and
-    # accept the best embedding only when the certificate says it is
-    # actually near the path (lambda <= warm_start_threshold). A vetoed
-    # warm start falls back to the configured init: the certificate makes
-    # warm starting safe, which heuristic IPM warm starts are not.
+    # Empirical warm-start screen: try four interior embeddings and accept
+    # the smallest guarded local residual score below the threshold.
+    # Rejection falls back to cold initialization; acceptance guarantees
+    # neither proximity to the path nor fewer iterations than a cold solve.
     self.warm_lambda = None
     self.warm_accepted = False
     validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
@@ -909,6 +914,9 @@ class QTQP:
       wx, wy, ws = validated_warm
       if self.equilibration_strategy is not EquilibrationStrategy.NONE:
         wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
+      # Only y and s are shifted. Every candidate's x is the same wx times
+      # its radial normalization scale, so share these primal products.
+      awx, pwx = a @ wx, p @ wx
       best = (math.inf, None)
       for eta in (1e-6, 1e-4, 1e-2, 1.0):
         cx = wx.copy()
@@ -919,9 +927,14 @@ class QTQP:
         cs[: self.z] = 0.0
         ctau = 1.0
         cx, cy, ctau, cs = self._normalize(cx, cy, ctau, cs)
-        lam = self._lambda_local(cx, cy, cs, ctau, a, p, b, c)
+        # The pre-normalization tau is one, so ctau is exactly the scale
+        # applied to wx. Only A.T@cy needs a fresh matvec for this shift.
+        lam = self._lambda_local(
+            cx, cy, cs, ctau, a, p, b, c, ax=ctau * awx, px=ctau * pwx
+        )
         if lam < best[0]:
           best = (lam, (cx, cy, cs, ctau))
+      del awx, pwx  # Screening products are not needed by the IPM loop.
       self.warm_lambda = best[0]
       if best[0] <= warm_start_threshold:
         cx, cy, cs, ctau = best[1]
@@ -935,20 +948,20 @@ class QTQP:
       x, y, s, tau = cx, cy, cs, ctau
     else:
       # Cold start: the initialization factorization and solves run only
-      # when no warm start was given or the certificate vetoed it - an
-      # accepted warm start skips them entirely (certification costs three
-      # matvecs per centering shift, no factorization).
+      # when no warm start was given or screening vetoed it. An accepted
+      # warm start skips them (six screening matvecs, no factorization).
       x, y, s, tau, _ = self._init_variables(a, p, b, c)
 
-    # Initial-point diagnostic: the local-norm distance-to-path measure at
-    # the starting iterate (warm or configured init), before the first
-    # step. Healthy problems measure small (<= ~1e7 across NETLIB +
-    # Maros-Meszaros); pathologically scaled data announces itself here
-    # by tens of orders of magnitude — this diagnostic is how corrupted
-    # infinity-sentinel bounds in the benchmark datasets were found.
-    self.lambda_init = (
-        self._lambda_local(x, y, s, tau, a, p, b, c) if self.z < self.m else None
-    )
+    # The accepted candidate has already been scored at this exact point.
+    # Cold starts need their own initial diagnostic; equality-only problems
+    # have no inequality complementarity parameter and skip this score.
+    if self.warm_accepted:
+      self.lambda_init = self.warm_lambda
+    else:
+      self.lambda_init = (
+          self._lambda_local(x, y, s, tau, a, p, b, c)
+          if self.z < self.m else None
+      )
 
     self._log_header()
 
