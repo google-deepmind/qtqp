@@ -1704,7 +1704,8 @@ class QTQP:
     # kept for the distance-to-path certificate below; mu_hat is the
     # complementarity of THIS iterate in the operating scale.
     x_w, y_w, s_w = x, y, s
-    mu_hat = float(y_w @ s_w) / max(self.m - self.z, 1)
+    yts_work = float(y_w @ s_w)
+    mu_hat = yts_work / max(self.m - self.z, 1)
 
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
@@ -1812,13 +1813,16 @@ class QTQP:
     # above certificate_ktratio (1e9, as in Clarabel), which a weakly
     # separating near-solution never reaches while a genuine certificate
     # does, since the ratio grows like 1 / tau as tau -> 0.
-    yts_ret = float(y @ s)
+    # Keep numerator and denominator in the embedding's working frame.
+    # Unequilibration multiplies y's by 1/(sigma^2 * gamma), but leaves tau
+    # working-scale.
+    # Use current complementarity, not the preceding step's floored mu.
     nu = self.m - self.z
     nu_tau_sq = float(nu) * tau * tau
     # With no complementarity pairs (z == m) there is no certificate side.
-    on_solution_side = nu == 0 or yts_ret < nu_tau_sq
-    on_certificate_side = nu > 0 and yts_ret > self.certificate_ktratio * nu_tau_sq
-    ktratio = (yts_ret / nu_tau_sq if nu_tau_sq > 0.0
+    on_solution_side = nu == 0 or yts_work < nu_tau_sq
+    on_certificate_side = nu > 0 and yts_work > self.certificate_ktratio * nu_tau_sq
+    ktratio = (yts_work / nu_tau_sq if nu_tau_sq > 0.0
                else (0.0 if nu == 0 else math.inf))
 
     if (
