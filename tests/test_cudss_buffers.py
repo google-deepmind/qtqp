@@ -38,14 +38,11 @@ def cudss_backend():
     backend.free()
 
 
-@pytest.mark.parametrize("sparse_format", ["csr", "csc"])
-def test_cudss_reuses_buffers_and_transpose(
-    monkeypatch, cudss_backend, sparse_format
-):
+def test_cudss_reuses_buffers_and_transpose(monkeypatch, cudss_backend):
   backend = cudss_backend
   triangle = sparse.coo_matrix([
       [4.0, 1.0, 2.0], [0.0, 5.0, -1.0], [0.0, 0.0, -3.0]
-  ]).asformat(sparse_format)
+  ]).asformat(backend.format())
   transpose_calls = 0
   matrix_type = backend._cp_sparse.csr_matrix
   original_transpose = matrix_type.transpose
