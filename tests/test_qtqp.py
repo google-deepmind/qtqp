@@ -1164,6 +1164,63 @@ def test_numeric_failure_returns_failed_status():
     solver2.solve(verbose=False)
 
 
+def _assert_failed_before_iterating(solver, solution, n, m):
+  assert solution.status == qtqp.SolutionStatus.FAILED
+  assert solution.iterations == 0
+  assert solution.stats == []
+  assert solution.x.shape == (n,) and np.all(np.isnan(solution.x))
+  assert solution.y.shape == (m,) and np.all(np.isnan(solution.y))
+  assert solution.s.shape == (m,) and np.all(np.isnan(solution.s))
+  assert solver._linear_solver is None  # pylint: disable=protected-access
+
+
+def test_initialization_zero_pivot_returns_failed():
+  """A factorization failure in the initialization, before any iterate
+  exists, must surface as FAILED with NaN arrays, not as an exception.
+  With no static regularization the rank-one P block on two free variables
+  gives an exactly zero pivot in the initialization KKT system, which
+  QDLDL (no pivoting) rejects; this is the failure seen on dependent
+  equality rows when the static regularization is lowered."""
+  pytest.importorskip('qdldl')
+  a = sparse.csc_matrix(np.array([[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]]))
+  b = np.zeros(2)
+  c = np.array([1.0, 1.0, 0.0, 0.0])
+  p = sparse.csc_matrix(np.array([
+      [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, 1.0],
+  ]))
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=0, p=p)
+  solution = solver.solve(
+      verbose=False, linear_solver=qtqp.LinearSolver.QDLDL,
+      min_static_regularization=0.0,
+  )
+  _assert_failed_before_iterating(solver, solution, 4, 2)
+
+
+def test_initialization_numeric_failure_returns_failed(monkeypatch):
+  """Any numeric failure raised by the initialization solves is reported
+  as FAILED, on every backend; programming errors still propagate."""
+  rng = np.random.default_rng(44)
+  a, b, c, p = _gen_feasible(30, 20, 4, random_state=rng)
+  solver = qtqp.QTQP(a=a, b=b, c=c, z=4, p=p)
+
+  def failing_init(self, *args, **kwargs):
+    raise RuntimeError('synthetic initialization factorization failure')
+
+  monkeypatch.setattr(qtqp.direct.DirectKktSolver, 'update_init', failing_init)
+  solution = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  _assert_failed_before_iterating(solver, solution, 20, 30)
+
+  def buggy_init(self, *args, **kwargs):
+    raise TypeError('programming error must propagate')
+
+  monkeypatch.setattr(qtqp.direct.DirectKktSolver, 'update_init', buggy_init)
+  with pytest.raises(TypeError):
+    qtqp.QTQP(a=a, b=b, c=c, z=4, p=p).solve(
+        verbose=False, linear_solver=qtqp.LinearSolver.SCIPY,
+    )
+
+
 def test_solve_for_tau_handles_linear_equation():
   """Near-zero quadratic coefficient should fall back to a linear solve."""
   p = sparse.csc_matrix((1, 1))

@@ -341,7 +341,9 @@ Choose one with the `refinement_strategy` argument:
     feasibility, `5e-5` gap): the returned
     solution is that best iterate, honestly labeled as not meeting the
     full `SOLVED` contract. `SOLVED` semantics are unchanged. A
-    breakdown whose best iterate does not qualify returns `FAILED`.
+    breakdown whose best iterate does not qualify returns `FAILED`, as
+    does a numeric failure in the initialization factorization, with NaN
+    arrays because no iterate exists yet.
 -   `stats`: (list of dicts) Per-iteration diagnostics. Empty unless
     `collect_stats=True`. When enabled, includes primal/dual objective,
     residuals, gap, mu, elapsed time, and complementarity statistics.

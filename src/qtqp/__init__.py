@@ -950,7 +950,23 @@ class QTQP:
       # Cold start: the initialization factorization and solves run only
       # when no warm start was given or screening vetoed it. An accepted
       # warm start skips them (six screening matvecs, no factorization).
-      x, y, s, tau, _ = self._init_variables(a, p, b, c)
+      # A numeric failure here (an exactly zero pivot on linearly dependent
+      # equality rows is the observed case) leaves no iterate to salvage,
+      # so it is reported as FAILED with NaN arrays instead of raised.
+      try:
+        x, y, s, tau, _ = self._init_variables(a, p, b, c)
+      except (ValueError, ArithmeticError, np.linalg.LinAlgError,
+              RuntimeError) as exc:
+        logging.warning("Numeric failure during initialization: %s", exc)
+        self._log_footer("Failed to initialize")
+        y, s = self._postsolve(
+            np.full(self.m, np.nan), np.full(self.m, np.nan),
+            y_dropped=np.nan, s_dropped=np.nan,
+        )
+        return Solution(
+            np.full(self.n, np.nan), y, s, stats, SolutionStatus.FAILED,
+            iterations=self._iterations,
+        )
 
     # The accepted candidate has already been scored at this exact point.
     # Cold starts need their own initial diagnostic; equality-only problems
