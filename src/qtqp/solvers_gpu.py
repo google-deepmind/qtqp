@@ -24,7 +24,32 @@ import scipy.sparse as sp
 from .direct import LinearSolver
 
 
-class CuDssSolver(LinearSolver):
+class _GpuSolver(LinearSolver):
+  """Host interface around device solves and non-destructive device matvecs."""
+
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    self._x_gpu.set(x)
+    return self._matvec_gpu(self._x_gpu).get()
+
+  def solve(self, rhs: np.ndarray) -> np.ndarray:
+    return self._solve_gpu(rhs).get()
+
+  def solve_and_matvec(
+      self, rhs: np.ndarray, *, out: np.ndarray, add_to: np.ndarray | None = None
+  ) -> np.ndarray:
+    # Form the complete vector on-device, then evaluate its actual matvec.
+    # Queue both operations before either download; never reconstruct the
+    # residual from the RHS or a recurrence that omits factorization error.
+    solution = self._solve_gpu(rhs)
+    if add_to is not None:
+      self._x_gpu.set(add_to)
+      self._cp.add(self._x_gpu, solution, out=solution)
+    product = self._matvec_gpu(solution)
+    solution.get(out=out)
+    return product.get()
+
+
+class CuDssSolver(_GpuSolver):
   """Wrapper around Nvidia's CuDSS for GPU-accelerated solving.
 
   Maintains a single GPU sparse matrix used for both nvmath (factorize/solve)
@@ -91,18 +116,16 @@ class CuDssSolver(LinearSolver):
 
     self._solver.factorize()
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    self._x_gpu.set(x)
+  def _matvec_gpu(self, x):
     return (
-        self._kkt_gpu @ self._x_gpu
-        + self._kkt_gpu_t @ self._x_gpu
-        - self._kkt_diag_gpu * self._x_gpu
-    ).get()
+        self._kkt_gpu @ x
+        + self._kkt_gpu_t @ x
+        - self._kkt_diag_gpu * x
+    )
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
+  def _solve_gpu(self, rhs):
     self._rhs_gpu.set(rhs)
-    result = self._solver.solve()
-    return self._cp.asnumpy(result)
+    return self._solver.solve(stream=self._cp.cuda.get_current_stream())
 
   def format(self) -> Literal["csr"]:
     return "csr"
@@ -116,7 +139,7 @@ class CuDssSolver(LinearSolver):
       gc.collect(0)  # Run GC only on the youngest generation.
 
 
-class CupyDenseSolver(LinearSolver):
+class CupyDenseSolver(_GpuSolver):
   """GPU Cholesky solver via Gram/Schur-complement reduction (cupy).
 
   GPU counterpart of ScipyDenseSolver.  See that class's docstring for the
@@ -147,6 +170,8 @@ class CupyDenseSolver(LinearSolver):
     self._G_gpu = cp.empty((n, n), dtype=cp.float64)
     self._diag_idx = cp.arange(n)
     self._result_gpu = cp.empty(n + m, dtype=cp.float64)
+    # Keep the solve result intact while computing its device matvec.
+    self._matvec_result_gpu = cp.empty(n + m, dtype=cp.float64)
     self._x_gpu = cp.empty(n + m, dtype=cp.float64)
     self._rhs_gpu = cp.empty(n + m, dtype=cp.float64)
     self._g_gpu = cp.empty(n, dtype=cp.float64)
@@ -189,13 +214,11 @@ class CupyDenseSolver(LinearSolver):
     self._G_gpu[idx, idx] += 1e-14 * cp.max(self._G_gpu[idx, idx])
     self._L = cp.linalg.cholesky(self._G_gpu)
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
-    """Note: `x` must not alias the returned buffer."""
+  def _matvec_gpu(self, x):
     cp = self._cp
     n = self._n
-    self._x_gpu.set(x)
-    x_x, x_y = self._x_gpu[:n], self._x_gpu[n:]
-    result = self._result_gpu
+    x_x, x_y = x[:n], x[n:]
+    result = self._matvec_result_gpu
     cp.dot(self._P_offdiag_gpu, x_x, out=result[:n])
     cp.multiply(self._R_x_gpu, x_x, out=self._g_gpu)
     result[:n] += self._g_gpu
@@ -203,10 +226,9 @@ class CupyDenseSolver(LinearSolver):
     result[:n] += self._g_gpu
     cp.dot(self._A_gpu, x_x, out=result[n:])
     result[n:] -= self._R_y_gpu * x_y
-    return cp.asnumpy(result)
+    return result
 
-  def solve(self, rhs: np.ndarray) -> np.ndarray:
-    """Note: `rhs` must not alias the returned buffer."""
+  def _solve_gpu(self, rhs):
     cp = self._cp
     n = self._n
     self._rhs_gpu.set(rhs)
@@ -222,7 +244,7 @@ class CupyDenseSolver(LinearSolver):
     cp.dot(self._A_gpu, x, out=result[n:])
     result[n:] -= self._rhs_gpu[n:]
     result[n:] *= inv_R_y
-    return cp.asnumpy(result)
+    return result
 
   def format(self) -> Literal["csr"]:
     return "csr"

@@ -146,6 +146,23 @@ class LinearSolver:
     """Solves the factorized system for the given right-hand side."""
     raise NotImplementedError
 
+  def solve_and_matvec(
+      self, rhs: np.ndarray, *, out: np.ndarray, add_to: np.ndarray | None = None
+  ) -> np.ndarray:
+    """Write the solved (optionally corrected) vector to out and return K @ out.
+
+    ``out`` is caller-owned storage, independent of backend work buffers.
+    Copy/add before the matvec: some backends reuse their solve buffer for
+    matvec output. The returned product may itself be a backend work buffer.
+    GPU overrides can keep the intermediate vector on the device.
+    """
+    correction = self.solve(rhs)
+    if add_to is None:
+      np.copyto(out, correction)
+    else:
+      np.add(add_to, correction, out=out)
+    return self @ out
+
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     res = self._kkt @ x
     res -= self._kkt_diag * x
@@ -385,8 +402,11 @@ class DirectKktSolver:
       # never be used for rollback.
       old_residual_norm = residual_norm
       sol_prev = sol
-      sol = sol + self._solver.solve(residual)
-      residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
+      sol = np.empty_like(residual)
+      product = self._solver.solve_and_matvec(
+          residual, out=sol, add_to=sol_prev
+      )
+      residual = self._kkt_rhs - product + self._diag_correction * sol
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence (<= so an exact zero residual converges even
@@ -573,8 +593,8 @@ class DirectKktSolver:
     for j in range(max_inner):
       # Right preconditioning: build the Krylov subspace of A M^{-1}.
       applies = j + 1
-      z[j] = self._solver.solve(v[j])
-      w = self._solver @ z[j] - self._diag_correction * z[j]
+      w = self._solver.solve_and_matvec(v[j], out=z[j])
+      w = w - self._diag_correction * z[j]
 
       # Modified Gram-Schmidt against the existing basis, with DGKS
       # reorthogonalization if the orthogonalization pass projected out

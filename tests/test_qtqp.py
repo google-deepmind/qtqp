@@ -3133,6 +3133,8 @@ def test_richardson_stall_rollback_regimes():
     """Delegates to ScipySolver, recording returned corrections; the
     second solve() is corrupted by corrupt_fn."""
 
+    solve_and_matvec = qtqp.direct.LinearSolver.solve_and_matvec
+
     def __init__(self, corrupt_fn):
       self._inner = qtqp.direct.ScipySolver()
       self._corrupt_fn = corrupt_fn
@@ -3425,6 +3427,8 @@ def test_richardson_rollback_returns_genuine_iterate_dense():
   s[:z] = 0.0
 
   class _CorruptSecond:
+    solve_and_matvec = qtqp.direct.LinearSolver.solve_and_matvec
+
     def __init__(self, inner):
       self._inner = inner
       self._calls = 0
