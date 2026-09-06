@@ -73,7 +73,12 @@ def test_bounded_qp_does_not_become_an_unbounded_certificate(
 
   assert solution.status is qtqp.SolutionStatus.SOLVED
   np.testing.assert_allclose(solution.x, [1e10], rtol=1e-8)
-  np.testing.assert_allclose(solution.s, [1000.0], rtol=1e-6)
+  # With x ~ 1e10 the Clarabel-form primal residual, relative to
+  # max(1, ||b|| + ||x|| + ||s||), only bounds |s - b| by about 1e2 at
+  # tol_feas = 1e-8; assert that guarantee, which is what the solver
+  # promises, rather than a tighter slack that depends on rounding.
+  slack_bound = 1e-8 * (1.0 + 1000.0 + abs(solution.x[0]) + abs(solution.s[0]))
+  assert abs(solution.s[0] - 1000.0) <= slack_bound
   if equilibration is qtqp.EquilibrationStrategy.RUIZ:
     # The scaled problem is P=1, c=-100, b=1. Its initial y=s=tau=1
     # gives ratio 1, preserved by homogeneous normalization. Returning

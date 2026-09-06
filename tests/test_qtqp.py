@@ -2283,6 +2283,16 @@ def test_iterative_refinement_improves_residual():
 @pytest.mark.parametrize('reg', [0.0, 1e-4, 1e-8])
 def test_min_static_regularization(reg):
   """Test that different min_static_regularization values still produce SOLVED."""
+  if reg == 0.0:
+    # Without static regularization the initialization system has zero
+    # diagonal entries on the equality rows. Accelerate and Pardiso
+    # factorize it; SciPy's LU reports it as exactly singular and the solve
+    # returns FAILED, so the zero case is not meaningful on hosts where
+    # AUTO resolves to SciPy.
+    resolved, backend = qtqp._resolve_linear_solver(qtqp.LinearSolver.AUTO)  # pylint: disable=protected-access
+    backend.free()
+    if resolved is qtqp.LinearSolver.SCIPY:
+      pytest.skip('SciPy LU cannot factorize the unregularized initialization system')
   rng = np.random.default_rng(42)
   m, n, z = 30, 20, 5
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
