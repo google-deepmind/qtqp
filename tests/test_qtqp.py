@@ -713,8 +713,11 @@ def test_raise_error_negative_invalid_shapes():
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
 
 
-def test_solve_frees_linear_solver_on_exception(monkeypatch):
-  """Linear solver resources should be freed when an IPM step raises."""
+@pytest.mark.parametrize('error', [RuntimeError, TypeError])
+def test_solve_frees_linear_solver_on_exception(monkeypatch, error):
+  """Linear solver resources are freed however the initialization ends: a
+  numeric failure (RuntimeError) becomes a FAILED solution, a programming
+  error (TypeError) propagates, and the backend is freed either way."""
 
   class FailingSolver(qtqp.direct.LinearSolver):
 
@@ -722,7 +725,7 @@ def test_solve_frees_linear_solver_on_exception(monkeypatch):
       self.freed = False
 
     def factorize(self):
-      raise RuntimeError("forced factorization failure")
+      raise error("forced factorization failure")
 
     def solve(self, rhs):
       del rhs
@@ -746,8 +749,13 @@ def test_solve_frees_linear_solver_on_exception(monkeypatch):
   a, b, c, p = _gen_feasible(m, n, z, random_state=rng)
   solver = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p)
 
-  with pytest.raises(RuntimeError, match='forced factorization failure'):
-    solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  if error is TypeError:
+    with pytest.raises(TypeError, match='forced factorization failure'):
+      solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+  else:
+    solution = solver.solve(verbose=False, linear_solver=qtqp.LinearSolver.SCIPY)
+    assert solution.status == qtqp.SolutionStatus.FAILED
+    assert solution.iterations == 0
 
   assert backend.freed
   assert solver._linear_solver is None  # pylint: disable=protected-access

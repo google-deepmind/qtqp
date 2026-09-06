@@ -953,10 +953,12 @@ class QTQP:
       # A numeric failure here (an exactly zero pivot on linearly dependent
       # equality rows is the observed case) leaves no iterate to salvage,
       # so it is reported as FAILED with NaN arrays instead of raised.
+      # ValueError is not caught: before the first step it signals a
+      # usage error, such as a dense backend asked to initialize equality
+      # rows with zero regularization, and must reach the caller.
       try:
         x, y, s, tau, _ = self._init_variables(a, p, b, c)
-      except (ValueError, ArithmeticError, np.linalg.LinAlgError,
-              RuntimeError) as exc:
+      except (ArithmeticError, np.linalg.LinAlgError, RuntimeError) as exc:
         logging.warning("Numeric failure during initialization: %s", exc)
         self._log_footer("Failed to initialize")
         y, s = self._postsolve(
