@@ -53,13 +53,14 @@ class CuDssSolver(LinearSolver):
     """Transfers KKT to GPU; called once at init time."""
     super().set_kkt(kkt)
     self._kkt_gpu = self._cp_sparse.csr_matrix(kkt)
+    # The transpose shares data, so diagonal updates keep both views current.
+    self._kkt_gpu_t = self._kkt_gpu.T
     self._kkt_diag_gpu = self._cp.asarray(self._kkt_diag)
     self._kkt_diag_idxs_gpu = self._cp.asarray(self._kkt_diag_idxs)
 
   def update_diag(self, diag: np.ndarray) -> None:
-    diag_gpu = self._cp.asarray(diag)
-    self._kkt_gpu.data[self._kkt_diag_idxs_gpu] = diag_gpu
-    self._cp.copyto(self._kkt_diag_gpu, diag_gpu)
+    self._kkt_diag_gpu.set(diag)
+    self._kkt_gpu.data[self._kkt_diag_idxs_gpu] = self._kkt_diag_gpu
 
   def factorize(self):
     cp = self._cp
@@ -94,7 +95,7 @@ class CuDssSolver(LinearSolver):
     self._x_gpu.set(x)
     return (
         self._kkt_gpu @ self._x_gpu
-        + self._kkt_gpu.T @ self._x_gpu
+        + self._kkt_gpu_t @ self._x_gpu
         - self._kkt_diag_gpu * self._x_gpu
     ).get()
 
