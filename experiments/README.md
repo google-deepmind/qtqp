@@ -109,3 +109,114 @@ problem.
 - Both call into BLAS, so results move with the BLAS build and thread count.
 - `--budget` drops a solver from larger sizes of a family once it exceeds the
   limit, which is why `qtqp` shows `(retired)` on `random_ineq` at `n = 1200`.
+
+## `benchmark_linear_term_sweep.py`
+
+Solves 100 QPs that differ only in the linear term, with `p`, `a`, `b` and `z`
+fixed — a frontier sweep, a rolling rebalance, a scenario grid. Both libraries
+have a mechanism for this and they are not the same mechanism, which is the
+point of the comparison:
+
+- **QTQP** takes `warm_start=(x, y, s)`, screens it, and saves *interior point
+  iterations*. Every solve still equilibrates and factorises.
+- **cvx-quadprog's `Sweep`** caches the *factorisation*. `J` depends only on
+  `G` and `R` only on `G` and the active set, so both survive a change of
+  linear term; a still-valid active set is recovered in `O(n^2)` with no
+  iteration at all, and a stale one is repaired rather than abandoned.
+
+```bash
+python experiments/benchmark_linear_term_sweep.py
+python experiments/benchmark_linear_term_sweep.py --n 400 --steps 100
+python experiments/benchmark_linear_term_sweep.py --family box --csv out.csv
+```
+
+Three regimes set how near consecutive problems are: `path` walks the term
+along a ray, `jitter` applies an independent 1% relative perturbation, and
+`independent` redraws it from scratch. The last is the control — nothing is
+being reused there, so a mechanism that still claims a speed-up is measuring
+something else.
+
+### Results
+
+`portfolio`, `n = 200`, 100 solves per regime, same machine as above. Milliseconds
+per solve, with the speed-up over the *same library's* cold run:
+
+| regime | qtqp_cold | qtqp_warm | gi_cold | gi_sweep |
+|---|---:|---:|---:|---:|
+| `path` | 15.02 | 7.82 (**1.9x**) | 6.48 | 0.29 (**22.0x**) |
+| `jitter` | 16.29 | 12.01 (**1.4x**) | 7.30 | 0.40 (**18.1x**) |
+| `independent` | 15.29 | 14.49 (1.1x) | 6.62 | 52.06 (**0.13x**) |
+
+Mean iterations per solve — QTQP's IPM steps, cvx-quadprog's active-set adds
+plus removes — which is where the wall-clock comes from:
+
+| regime | qtqp_cold | qtqp_warm | gi_cold | gi_sweep |
+|---|---:|---:|---:|---:|
+| `path` | 8.2 | 3.2 | 192.1 | 2.6 |
+| `jitter` | 9.0 | 6.2 | 198.8 | 4.7 |
+| `independent` | 8.4 | 8.4 | 191.4 | 131.4 |
+
+Reuse hit rate (`warm_accepted`; for `Sweep`, an `iterations` of `(0,0)`):
+
+| regime | qtqp_warm | gi_sweep |
+|---|---:|---:|
+| `path` | 99% | 58% |
+| `jitter` | 99% | 0% |
+| `independent` | 99% | 0% |
+
+### What the numbers say
+
+**`Sweep` is the bigger win by an order of magnitude, when the problems really
+are near.** 22x on `path` at `n = 200`, and 36x at `n = 400`. QTQP's warm start
+tops out near 2x. That gap is structural rather than incidental: `Sweep` is
+amortising the factorisation, which is most of a solve, while `warm_start`
+amortises only the iterations and leaves equilibration and factorisation to be
+paid 100 times. QTQP's iterations drop 2.6x on `path` (8.2 → 3.2) but its wall
+clock only 1.9x, and the difference is exactly that fixed per-solve cost.
+
+**Almost none of `Sweep`'s win comes from cache hits.** On `jitter` the outright
+hit rate is **0%** and it is still 18x faster, because a stale active set is
+repaired from the cached factors instead of walked from cold: 199 active-set
+operations become 4.7. The hit-rate column badly understates the mechanism, and
+reading it alone would give the wrong picture.
+
+**The control earns its place: `Sweep` on unrelated problems is 8x *slower*
+than solving cold** (52.06ms against 6.62ms), and 7x slower at `n = 400`. It
+still cuts iterations (191 → 131), so it is not that repair fails — it is that
+each repaired iteration carries an `O(n^2)` recovery and a full KKT
+verification, and against genuinely unrelated data that overhead is paid for
+nothing. `Sweep` is the right tool only when consecutive problems are actually
+adjacent, and the wrong one otherwise by a wide margin.
+
+**`warm_accepted` is not a useful signal at the default threshold.** It reads
+99% in *every* regime, including the control where the warm start buys exactly
+zero iterations (8.4 cold, 8.4 warm). The underlying `warm_lambda` score does
+discriminate — median 1.7 on `path` against 3.04 on `independent` — but the
+default `warm_start_threshold` of 100 sits far above both, so everything is
+accepted. This matches what QTQP's own README says about the screen ("acceptance
+does not certify distance to the path or guarantee fewer iterations"); worth
+knowing that in practice it accepts essentially always. Acceptance is not
+*harmful* when it does not help (8.32 against 8.43 iterations when rejected),
+and tightening the threshold to 1.0 is actively worse: it rejects the `path`
+warm starts too, doubling iterations from 4.05 to 8.18.
+
+**Geometry moves the constants, not the conclusions.** On `box` at `n = 200`
+the same pattern holds with `gi_sweep` at 20.8x on `path`, 15.3x on `jitter`,
+and 0.25x on the control.
+
+### Caveats
+
+- The dense conversion for cvx-quadprog is *outside* the timed region here,
+  unlike in `benchmark_cvx_quadprog.py`: it depends only on `p` and `a`, which
+  do not change across the sequence, so a real caller converts once. Charging
+  it 100 times would measure a mistake rather than the mechanism.
+- QTQP is constructed fresh per problem because `c` is a constructor argument.
+  That is validation and presolve, not a factorisation; it is timed separately
+  and recorded in the CSV as `construct_ms`.
+- The warm start is chained — each solve starts from the previous solution —
+  which is what a sweep would do, and which makes the `independent` regime a
+  genuine control rather than a repeat of the same start.
+- All four configurations are compared on every one of the 100 solves. The
+  largest relative objective disagreement was 7.9e-09 on `portfolio` at
+  `n = 200`, 6.5e-09 at `n = 400`, and 2.3e-08 on `box` — all consistent with
+  QTQP's `tol_feas = 1e-8`, so no configuration is fast by being wrong.
