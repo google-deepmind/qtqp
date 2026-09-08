@@ -31,32 +31,32 @@ of 3. Milliseconds; `nact` is how many of the `m` constraints bind.
 
 | n | m | nact | qtqp | qtqp_dense | gi | gi_fast |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 200 | 53 | 7.9 | 5.2 | 1.1 | **0.4** |
-| 400 | 800 | 190 | 48.2 | 22.3 | 11.8 | **2.3** |
-| 1200 | 2400 | 565 | 526.1 | 216.1 | 152.5 | **50.2** |
+| 100 | 200 | 53 | 5.2 | 5.2 | 1.1 | **0.4** |
+| 400 | 800 | 190 | 22.6 | 22.3 | 11.4 | **2.4** |
+| 1200 | 2400 | 565 | 215.9 | 215.5 | 150.4 | **50.2** |
 
 `portfolio` — factor covariance, `sum(x)==1` plus caps at `2/n`:
 
 | n | m | nact | qtqp | qtqp_dense | gi | gi_fast |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 201 | 82 | 8.1 | 5.3 | 2.2 | **0.7** |
-| 400 | 801 | 380 | 48.3 | 23.8 | 29.3 | **15.8** |
-| 1200 | 2401 | 1171 | 518.1 | **205.6** | 465.9 | 707.3 |
+| 100 | 201 | 82 | 5.4 | 5.3 | 2.2 | **0.7** |
+| 400 | 801 | 380 | 24.5 | 23.9 | 29.4 | **15.8** |
+| 1200 | 2401 | 1171 | **206.4** | 208.0 | 473.3 | 714.8 |
 
 `random_ineq` — dense `P`, dense general inequality rows, `m = 2n`:
 
 | n | m | nact | qtqp | qtqp_dense | gi | gi_fast |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 200 | 95 | 14.7 | 6.4 | **6.2** | 6.6 |
-| 400 | 800 | 399 | 483.3 | **51.5** | 230.5 | 226.4 |
-| 1200 | 2400 | 1190 | (retired) | **479.5** | 3099.4 | 3195.0 |
+| 100 | 200 | 95 | 6.6 | 6.6 | **6.3** | 6.6 |
+| 400 | 800 | 399 | 46.9 | **46.5** | 228.2 | 229.1 |
+| 1200 | 2400 | 1190 | **472.1** | 474.5 | 3086.5 | 3172.4 |
 
 `band_sparse` — tridiagonal `P` (`nnz = 3n-2`), box constraints:
 
 | n | m | nact | qtqp | gi | gi_fast |
 |---:|---:|---:|---:|---:|---:|
-| 200 | 400 | 159 | 5.9 | 4.4 | **0.6** |
-| 1200 | 2400 | 910 | **18.2** | 208.6 | 40.5 |
+| 400 | 800 | 301 | 9.2 | 15.8 | **2.4** |
+| 1200 | 2400 | 910 | **18.5** | 206.8 | 41.5 |
 | 2000 | 4000 | 1523 | **29.8** | 908.8 | 95.6 |
 | 5000 | 10000 | 3751 | **68.2** | 11546.9 | 2203.7 |
 
@@ -67,7 +67,7 @@ of 3. Milliseconds; `nact` is how many of the `m` constraints bind.
 QTQP pays a fixed setup cost — equilibration, symbolic factorisation, the first
 numeric factorisation — that a few hundred microseconds of dual walking does not
 justify. `random_ineq` is the exception even at this size: with dense rows it is
-already a tie at `n = 100` (`gi` 6.2ms against `qtqp_dense` 6.4ms).
+already a tie at `n = 100` (`gi` 6.3ms against `qtqp` 6.6ms).
 
 **Sparse belongs to QTQP, by margins nothing else here reaches.** On
 `band_sparse` at `n = 5000`, QTQP is 169x faster than the exact walk and 32x
@@ -108,7 +108,8 @@ problem.
   QTQP-only and are recorded in `tests/test_cvx_quadprog.py` instead.
 - Both call into BLAS, so results move with the BLAS build and thread count.
 - `--budget` drops a solver from larger sizes of a family once it exceeds the
-  limit, which is why `qtqp` shows `(retired)` on `random_ineq` at `n = 1200`.
+  limit, shown as `(retired)`. Nothing retires at the sizes recorded above;
+  before `AUTO` learned to read density, `qtqp` did on `random_ineq`.
 
 ## `benchmark_linear_term_sweep.py`
 

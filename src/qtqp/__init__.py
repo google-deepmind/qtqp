@@ -95,6 +95,39 @@ class LinearSolver(enum.Enum):
 _AUTO_SOLVER_CACHE: dict[str, LinearSolver] = {}
 _AUTO_UNAVAILABLE_ERRORS = (ImportError, OSError)
 
+# Density in P or A at or above which AUTO switches to the dense Gram backend.
+#
+# Density is a poor predictor of which backend wins, and the threshold is set
+# where it stops being one. Fill-in is what actually decides: at n=600 and an
+# identical 0.028 density, a banded P favours the sparse backend by 2.9x while
+# a scattered P with the same nnz favours the dense one by 4.2x, so no
+# threshold in that range can be right for both. What is reliable is the top of
+# the range -- from about 0.24 up, every structure measured favoured dense,
+# including a banded P with half-bandwidth 75 (density 0.236, dense by 3.5x),
+# because a matrix that full has no ordering left that avoids dense factors.
+#
+# 0.25 therefore buys the cases where the answer is unambiguous and leaves the
+# structure-dependent middle on the sparse path it already took. Problems there
+# keep today's behaviour, including today's losses: a scattered P at 0.05
+# density is ~5x slower than it would be on SCIPY_DENSE, and callers who know
+# their data has no exploitable structure should still pass the backend
+# explicitly. Predicting that band properly needs a symbolic fill estimate,
+# not a density.
+_AUTO_DENSE_DENSITY = 0.25
+
+# Peak dense working set AUTO will commit to unasked, in float64 entries.
+#
+# ScipyDenseSolver allocates 3 n-by-n blocks (G, its Cholesky factor, and P
+# with the diagonal zeroed) plus 2 m-by-n ones (A and its scaled copy), so the
+# bound is 3n^2 + 2mn. 32e6 entries is 256MB, which covers a dense n=1200 with
+# m=2n (81MB) and refuses an n=3000 (504MB).
+#
+# Past the cap AUTO stays sparse even when the data is dense, which is the slow
+# path this constant otherwise exists to avoid; the size where that starts is
+# logged, since passing SCIPY_DENSE explicitly is then the right call and only
+# the caller can weigh the allocation.
+_AUTO_DENSE_MAX_ENTRIES = 32_000_000
+
 
 def _instantiate_linear_solver(linear_solver: LinearSolver) -> direct.LinearSolver:
   """Instantiate a concrete linear solver backend."""
@@ -165,12 +198,99 @@ def _csc_row_inf_norms(
   return norms
 
 
+def _auto_prefers_dense(
+    p: sp.csc_matrix,
+    a: sp.csc_matrix,
+    z: int,
+    min_static_regularization: float,
+) -> bool:
+  """Whether AUTO should pick the dense Gram backend for this problem.
+
+  The sparse backends factorize the (n+m) KKT system; SCIPY_DENSE eliminates y
+  and factorizes an n x n Gram matrix instead. Which is faster is a question
+  about the data, not the platform, and AUTO answered it on platform alone --
+  so on a constraint matrix with no zeros in it, it ran a sparse factorization
+  over a dense matrix and paid up to 17x for it.
+
+  Either block being dense is enough to decide, because the Gram is
+  `H + A' D^-1 A`: a dense P makes the first term dense and a dense A makes the
+  second one dense, and either way no ordering saves the sparse factorization.
+  They are tested separately rather than pooled for a reason. A clique bound
+  over A's rows -- sum of squared row counts, the obvious way to charge for
+  fill -- lets one dense row speak for the whole matrix, and a single budget
+  row over an otherwise banded problem is exactly the case where the sparse
+  backend still wins, by 1.7x at n=3000. Row density averaged over A does not
+  make that mistake.
+
+  Args:
+    p: The QP matrix, as stored (symmetric, both triangles).
+    a: The constraint matrix.
+    z: Number of equality rows.
+    min_static_regularization: The regularization the solve will use.
+
+  Returns:
+    True when the dense backend should be preferred.
+  """
+  m, n = a.shape
+  if n == 0 or m == 0:
+    return False
+
+  # Dense Gram elimination cannot invert a zero equality diagonal, so with
+  # equality rows and no regularization SCIPY_DENSE raises where the sparse
+  # backends solve. AUTO must not turn a working solve into a ValueError.
+  if z > 0 and min_static_regularization <= 0.0:
+    logging.debug(
+        "AUTO: staying sparse because dense Gram elimination cannot invert a "
+        "zero equality diagonal (z=%d, min_static_regularization=%g).",
+        z,
+        min_static_regularization,
+    )
+    return False
+
+  dense_entries = 3 * n * n + 2 * m * n
+  if max(p.nnz / (n * n), a.nnz / (m * n)) < _AUTO_DENSE_DENSITY:
+    return False
+
+  if dense_entries > _AUTO_DENSE_MAX_ENTRIES:
+    logging.debug(
+        "AUTO: data is dense but the dense backend would need %.1f MB "
+        "(cap %.1f MB); staying sparse. Pass "
+        "linear_solver=LinearSolver.SCIPY_DENSE to override.",
+        dense_entries * 8 / 1e6,
+        _AUTO_DENSE_MAX_ENTRIES * 8 / 1e6,
+    )
+    return False
+  return True
+
+
 def _resolve_linear_solver(
     linear_solver: LinearSolver,
+    *,
+    prefer_dense: bool = False,
 ) -> tuple[LinearSolver, direct.LinearSolver]:
-  """Resolve a requested solver enum to a concrete backend instance."""
+  """Resolve a requested solver enum to a concrete backend instance.
+
+  Args:
+    linear_solver: The requested backend, possibly AUTO.
+    prefer_dense: For AUTO only, try the dense Gram backend first. Set from
+      `_auto_prefers_dense`, so it is a property of the problem; it is
+      deliberately not written to the platform-keyed cache, which records only
+      which sparse backend imported successfully.
+
+  Returns:
+    The resolved enum and an instance of its backend.
+  """
   if linear_solver is not LinearSolver.AUTO:
     return linear_solver, _instantiate_linear_solver(linear_solver)
+
+  if prefer_dense:
+    try:
+      return (
+          LinearSolver.SCIPY_DENSE,
+          _instantiate_linear_solver(LinearSolver.SCIPY_DENSE),
+      )
+    except _AUTO_UNAVAILABLE_ERRORS as e:
+      logging.debug("AUTO skipped SCIPY_DENSE: %s", e)
 
   cached = _AUTO_SOLVER_CACHE.get(sys.platform)
   if cached is not None:
@@ -848,8 +968,14 @@ class QTQP:
     self.verbose = verbose
     self.equilibration_strategy = equilibration_strategy
 
+    # Density is read from the original data, before equilibration: scaling
+    # changes the values but never the sparsity pattern, and the backend has to
+    # be chosen before there is anything equilibrated to look at.
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
-        linear_solver
+        linear_solver,
+        prefer_dense=_auto_prefers_dense(
+            self.p, self.a, self.z, min_static_regularization
+        ),
     )
     if verbose:
       print(

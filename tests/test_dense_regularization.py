@@ -68,7 +68,11 @@ def test_public_dense_zero_shift_error_frees_backend(monkeypatch, backend_name, 
   monkeypatch.setattr(backend, "free", lambda: freed.append(True))
   requested = (qtqp.LinearSolver.SCIPY_DENSE if backend_name == "scipy"
                else qtqp.LinearSolver.CUPY_DENSE)
-  monkeypatch.setattr(qtqp, "_resolve_linear_solver", lambda _: (requested, backend))
+  # Accepts and ignores the prefer_dense keyword: this test pins backend
+  # freeing, not AUTO's backend choice.
+  monkeypatch.setattr(
+      qtqp, "_resolve_linear_solver", lambda _, **__: (requested, backend)
+  )
   solver = qtqp.QTQP(
       a=sparse.csc_matrix([[1.0], [2.0]]), b=np.array([1.0, 2.0]),
       p=sparse.csc_matrix([[1.0]]), c=np.zeros(1), z=z,

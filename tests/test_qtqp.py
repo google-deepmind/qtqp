@@ -738,10 +738,12 @@ def test_solve_frees_linear_solver_on_exception(monkeypatch, error):
       self.freed = True
 
   backend = FailingSolver()
+  # Accepts and ignores the prefer_dense keyword: this test pins that the
+  # backend is freed on failure, not AUTO's backend choice.
   monkeypatch.setattr(
       qtqp,
       '_resolve_linear_solver',
-      lambda linear_solver: (linear_solver, backend),
+      lambda linear_solver, **_: (linear_solver, backend),
   )
 
   rng = np.random.default_rng(842)
