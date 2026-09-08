@@ -353,7 +353,8 @@ Choose one with the `refinement_strategy` argument:
 
 The backend linear system solver can be changed by passing a `qtqp.LinearSolver`
 to the `solve` method via the `linear_solver` argument. By default
-`linear_solver=qtqp.LinearSolver.AUTO`. AUTO resolves to
+`linear_solver=qtqp.LinearSolver.AUTO`. On fully dense data AUTO resolves to
+`qtqp.LinearSolver.SCIPY_DENSE`; otherwise it resolves to
 `qtqp.LinearSolver.PARDISO` first on Linux / Windows and to
 `qtqp.LinearSolver.ACCELERATE` first on macOS, then falls back through the
 other sparse CPU backends before finally using `qtqp.LinearSolver.SCIPY`.
@@ -374,14 +375,36 @@ Recommended starting points:
 
 #### Automatic selection: `qtqp.LinearSolver.AUTO`
 
-Runtime selection for sparse CPU backends.
+Runtime selection, from the problem's data first and then from the platform.
 
-- Linux / Windows preference order starts with `PARDISO`.
-- macOS preference order starts with `ACCELERATE`.
+- If `a` is fully dense (no zeros) and either `p` is fully dense too or
+  `m >= n`, AUTO resolves to `SCIPY_DENSE`. In both shapes the dense Gram
+  costs `m n^2 + n^3/3`, which is what the sparse solver pays for its best
+  elimination ordering, and a BLAS3 Cholesky beats a sparse LDL on the same
+  dense block.
+- Otherwise, Linux / Windows preference order starts with `PARDISO` and macOS
+  with `ACCELERATE`.
 - The default install brings in `py-mkl-pardiso` on Linux / Windows `x86_64`
   and `macldlt` on macOS `arm64`.
 - If the preferred backend is unavailable, QTQP tries the remaining sparse CPU
   backends and finally falls back to `SCIPY`.
+
+The switch is only taken where the dense backend is at or below the sparse
+flop count for *any* ordering, so the choice does not depend on the BLAS
+build, the platform, or which sparse backend AUTO would otherwise pick. Two
+shapes with dense data are therefore left on the sparse path: a dense `a` with
+`m < n`, where the sparse solver eliminates x first and forms only an `m x m`
+clique, and a dense `p` with a sparse `a`, where `SCIPY_DENSE` currently
+densifies `a` and runs through its zeros. AUTO also declines when there are
+equality rows (`z > 0`) with `min_static_regularization == 0`, which dense
+Gram elimination rejects; that case is logged at debug level.
+
+Anything short of fully dense keeps the sparse path, including data that is
+dense enough that `SCIPY_DENSE` would win. Density is a weak predictor there —
+fill-in is what decides, and a banded `p` and a scattered `p` of *identical*
+density can favour opposite backends by 3-4x. If your data is sparse but has
+no exploitable structure, measure `SCIPY_DENSE` rather than assuming AUTO
+picked it.
 
 #### scipy SuperLU: `qtqp.LinearSolver.SCIPY`
 

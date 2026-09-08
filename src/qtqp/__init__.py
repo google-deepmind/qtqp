@@ -95,6 +95,19 @@ class LinearSolver(enum.Enum):
 _AUTO_SOLVER_CACHE: dict[str, LinearSolver] = {}
 _AUTO_UNAVAILABLE_ERRORS = (ImportError, OSError)
 
+# Fraction of a block's entries that must be nonzero for AUTO to read it as
+# dense.
+#
+# The rule in `_auto_prefers_dense` is a flop-count argument, and it only holds
+# for a block with no structure left to exploit, so the threshold sits next to
+# 1 rather than at a calibrated middle. At 0.25, for instance, a row of A with
+# 0.25n nonzeros costs the sparse solver a (0.25n)^2 clique update against the
+# dense backend's full n^2 -- 16x fewer flops on that term, and the comparison
+# below is no longer conservative. Giving up the middle costs nothing in
+# practice: data that is dense for real reasons (covariance matrices, dense
+# dynamics) has no zeros in it at all.
+_AUTO_DENSE_NNZ_FRACTION = 0.9
+
 
 def _instantiate_linear_solver(linear_solver: LinearSolver) -> direct.LinearSolver:
   """Instantiate a concrete linear solver backend."""
@@ -163,6 +176,81 @@ def _csc_row_inf_norms(
   if abs_data.size:
     norms[nonempty] = np.maximum.reduceat(abs_data[row_perm], starts[nonempty])
   return norms
+
+
+def _auto_prefers_dense(
+    p: sp.csc_matrix,
+    a: sp.csc_matrix,
+    z: int,
+    min_static_regularization: float,
+) -> bool:
+  """Whether AUTO should pick the dense Gram backend for this problem.
+
+  The sparse backends factorize the (n+m) augmented KKT system; SCIPY_DENSE
+  eliminates y and factorizes an n x n Gram instead. Which of the two is
+  cheaper is a question about the data, and AUTO answered it from the platform
+  alone -- so a constraint matrix with no zeros in it still got a sparse
+  factorization, at up to 17x the cost of the dense backend on the same
+  problem.
+
+  The switch is taken only where the dense backend is at or below the sparse
+  flop count for *any* elimination ordering, so that no BLAS build, sparse
+  backend or platform can flip the answer:
+
+  - **Both blocks dense.** The best ordering available to the sparse solver
+    eliminates the y nodes first, costing `m n^2 + n^3/3` -- exactly what the
+    Gram costs -- and an SPD Cholesky in BLAS3 beats an indefinite sparse LDL
+    on the same dense block. Safe for every m/n.
+  - **`a` dense, `p` sparse.** The same parity holds at `m == n`. Below it the
+    sparse solver eliminates x first and forms only an m x m clique
+    (`n m^2 + m^3/3`), beating the Gram by about `(n/m)^2`: at n=3000, m=10
+    and P = I it is milliseconds against a 3000x3000 dense Cholesky per
+    iteration. Hence the `m >= n` bound. This is also the branch that covers
+    LPs, where `p` is all-zero and reads as sparse; an LP with `m < n` is
+    unbounded except on a measure-zero set, so the bound gives up only the
+    well-posed problems where the sparse solver genuinely wins.
+  - **`p` dense, `a` sparse** stays sparse, even though it is the commonest
+    dense QP. `ScipyDenseSolver` densifies `a` and runs dsyrk through its
+    zeros, so it pays `n^3/3 + m n^2` against the sparse solver's `n^3/3` plus
+    fill-limited work on `a`. The measured wins there are real but they are
+    sparse-solver constants, which do not transfer across backends. Forming
+    `A' D^-1 A` as a sparse product when `a` is sparse would delete the
+    `m n^2` term and make this branch unconditional; that belongs in the
+    backend, not here.
+
+  Args:
+    p: The QP matrix, as stored (symmetric, both triangles).
+    a: The constraint matrix.
+    z: Number of equality rows.
+    min_static_regularization: The regularization the solve will use.
+
+  Returns:
+    True when the dense backend should be preferred.
+  """
+  m, n = a.shape
+  # An empty block satisfies the nnz test vacuously; there is nothing to route.
+  if m == 0 or n == 0:
+    return False
+
+  # Dense Gram elimination cannot invert a zero equality diagonal, so with
+  # equality rows and no regularization SCIPY_DENSE raises where the sparse
+  # backends solve. AUTO must not turn a working solve into a ValueError.
+  if z > 0 and min_static_regularization <= 0.0:
+    logging.debug(
+        "AUTO: staying sparse because dense Gram elimination cannot invert a "
+        "zero equality diagonal (z=%d, min_static_regularization=%g).",
+        z,
+        min_static_regularization,
+    )
+    return False
+
+  p_dense = p.nnz >= _AUTO_DENSE_NNZ_FRACTION * n * n
+  a_dense = a.nnz >= _AUTO_DENSE_NNZ_FRACTION * m * n
+  if p_dense and a_dense:
+    return True
+  if a_dense:
+    return m >= n
+  return False
 
 
 def _resolve_linear_solver(
@@ -848,6 +936,15 @@ class QTQP:
     self.verbose = verbose
     self.equilibration_strategy = equilibration_strategy
 
+    # Only AUTO is redirected: a caller who named a backend gets it, and the
+    # heuristic does not run at all in that case. The density is read from the
+    # original data, before equilibration -- scaling changes the values but
+    # never the sparsity pattern, and the backend has to be chosen before there
+    # is anything equilibrated to look at.
+    if linear_solver is LinearSolver.AUTO and _auto_prefers_dense(
+        self.p, self.a, self.z, min_static_regularization
+    ):
+      linear_solver = LinearSolver.SCIPY_DENSE
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
     )
