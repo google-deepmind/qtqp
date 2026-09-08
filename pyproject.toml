@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "cvx-quadprog",
 ]
 
 [tool.setuptools]
