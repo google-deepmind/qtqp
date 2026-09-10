@@ -355,6 +355,10 @@ class QTQP:
     else:
       if not sp.isspmatrix_csc(p):
         raise TypeError("QP matrix 'p' must be in CSC format.")
+      if p.shape != (self.n, self.n):
+        raise ValueError(
+            f"p must have shape ({self.n}, {self.n}), got {p.shape}"
+        )
       # Cast to float64 before canonicalizing and before the symmetry
       # check: integer arithmetic wraps in both.
       p = p.astype(np.float64)
