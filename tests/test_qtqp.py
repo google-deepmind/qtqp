@@ -713,6 +713,16 @@ def test_raise_error_negative_invalid_shapes():
     _ = qtqp.QTQP(a=a, b=b, c=c, z=z, p=p_invalid).solve()
 
 
+@pytest.mark.parametrize('shape', [(0, 0), (1, 1), (3, 3), (1, 2), (2, 1)])
+@pytest.mark.parametrize('dtype', [np.int32, np.float64])
+def test_rejects_incorrect_quadratic_shape_at_construction(shape, dtype):
+  p = sparse.csc_matrix(shape, dtype=dtype)
+  with pytest.raises(ValueError, match=r"p must have shape \(2, 2\), got"):
+    qtqp.QTQP(
+        a=sparse.eye(2, format='csc'), b=np.ones(2), c=np.ones(2), z=0, p=p,
+    )
+
+
 @pytest.mark.parametrize('error', [RuntimeError, TypeError])
 def test_solve_frees_linear_solver_on_exception(monkeypatch, error):
   """Linear solver resources are freed however the initialization ends: a
