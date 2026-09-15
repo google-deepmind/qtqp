@@ -123,7 +123,7 @@ class ScipySolver(LinearSolver):
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+  def matvec(self, x: np.ndarray) -> np.ndarray:
     """Returns K @ x directly from the full symmetric copy."""
     return self._full_kkt @ x
 
@@ -406,7 +406,7 @@ class UmfpackSolver(LinearSolver):
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+  def matvec(self, x: np.ndarray) -> np.ndarray:
     """Returns K @ x directly from the full symmetric copy."""
     return self._full_kkt @ x
 

@@ -86,7 +86,7 @@ def test_cudss_reuses_buffers_and_transpose(monkeypatch, cudss_backend):
     if solver is None:
       solver = backend._solver
     assert backend._solver is solver
-    np.testing.assert_allclose(backend @ expected, rhs, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(backend.matvec(expected), rhs, rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(
         backend.solve(rhs), expected, rtol=1e-11, atol=1e-11
     )
