@@ -25,6 +25,37 @@ test = [
     "pytest-cov",
 ]
 
+# Optional linear-solver backends, one extra per LinearSolver member, so a
+# user can ask for the backend they want without building the others. Each is
+# imported lazily inside the wrapper's __init__, and a missing one raises
+# rather than failing at import time -- see solvers_sparse.py/solvers_gpu.py.
+#
+# LinearSolver.CUDSS and LinearSolver.CUPY_DENSE. cupy-cuda12x is the CUDA 12
+# wheel; on CUDA 11 install cupy-cuda11x by hand instead, which provides the
+# same `cupy` and `cupyx` modules.
+gpu = [
+    "cupy-cuda12x",
+    "nvmath-python",
+]
+# LinearSolver.QDLDL. Pure wheels, so this one installs anywhere.
+qdldl = ["qdldl"]
+# LinearSolver.CHOLMOD. Builds against SuiteSparse; see CONTRIBUTING.md for
+# the conda-forge route if no headers are present.
+cholmod = ["scikit-sparse>=0.5"]
+# LinearSolver.UMFPACK. Also builds against SuiteSparse.
+umfpack = ["scikit-umfpack"]
+# LinearSolver.MUMPS, reached through PETSc. Unavailable on Windows.
+mumps = ["petsc4py; platform_system != 'Windows'"]
+# Every sparse backend pip can install. LinearSolver.EIGEN is missing on
+# purpose: nanoeigenpy is published on conda-forge only, so there is no name
+# to put here -- `conda install -c conda-forge nanoeigenpy` is the only route.
+sparse = [
+    "qdldl",
+    "scikit-sparse>=0.5",
+    "scikit-umfpack",
+    "petsc4py; platform_system != 'Windows'",
+]
+
 [tool.setuptools]
 license-files = []
 package-dir = {"" = "src"}
@@ -33,6 +64,24 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
+
+[tool.deptry]
+# The backends are imported inside the wrapper classes, under their module
+# name rather than their distribution name; record the mapping instead of
+# letting deptry guess it.
+[tool.deptry.package_module_name_map]
+py-mkl-pardiso = ["pymklpardiso"]
+scikit-sparse = ["sksparse"]
+scikit-umfpack = ["scikits"]
+cupy-cuda12x = ["cupy", "cupyx"]
+nvmath-python = ["nvmath"]
+
+[tool.deptry.per_rule_ignores]
+# nanoeigenpy (LinearSolver.EIGEN) is conda-forge only, so it cannot be
+# declared as a dependency at all. CI installs it with conda; see ci.yml.
+DEP001 = ["nanoeigenpy"]
+# The test extra is tooling, run rather than imported by src/.
+DEP002 = ["pytest", "pytest-cov"]
 
 [tool.pytest.ini_options]
 # Docstring examples in the public API are part of the suite: a plain

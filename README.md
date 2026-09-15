@@ -39,6 +39,24 @@ automatically:
 - Linux / Windows `x86_64`: `py-mkl-pardiso`
 - macOS `arm64`: `macldlt`
 
+Every other backend is optional and has an extra named after its
+`LinearSolver` member, so you install only the one you want:
+
+```bash
+python -m pip install 'qtqp[gpu]'      # CUDSS and CUPY_DENSE, via CUDA 12
+python -m pip install 'qtqp[qdldl]'    # QDLDL
+python -m pip install 'qtqp[cholmod]'  # CHOLMOD, needs SuiteSparse
+python -m pip install 'qtqp[umfpack]'  # UMFPACK, needs SuiteSparse
+python -m pip install 'qtqp[mumps]'    # MUMPS via PETSc, not on Windows
+python -m pip install 'qtqp[sparse]'   # all four sparse backends at once
+```
+
+`qtqp[gpu]` pulls the CUDA 12 wheel; on CUDA 11 install `cupy-cuda11x` by
+hand instead. `LinearSolver.EIGEN` has no extra because `nanoeigenpy` is
+published on conda-forge only — `conda install -c conda-forge nanoeigenpy` is
+the only route to it. `SCIPY` and `SCIPY_DENSE` need nothing beyond the
+runtime dependencies, and `AUTO` uses whichever of these is present.
+
 To install from source, first clone the repository:
 
 ```bash
