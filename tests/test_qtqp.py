@@ -3241,9 +3241,6 @@ def test_richardson_stall_rollback_regimes():
     def __getattr__(self, name):
       return getattr(self._inner, name)
 
-    def __matmul__(self, other):
-      return self._inner @ other
-
     def solve(self, rhs):
       self._solve_calls += 1
       out = self._inner.solve(rhs)
@@ -3531,8 +3528,6 @@ def test_richardson_rollback_returns_genuine_iterate_dense():
       self._calls = 0
     def __getattr__(self, name):
       return getattr(self._inner, name)
-    def __matmul__(self, other):
-      return self._inner @ other
     def solve(self, rhs):
       self._calls += 1
       out = self._inner.solve(rhs)

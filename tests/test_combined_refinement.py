@@ -38,7 +38,7 @@ class _SharedBufferBackend(direct.LinearSolver):
     np.copyto(self.buffer, np.linalg.solve(self.matrix, rhs))
     return self.buffer
 
-  def __matmul__(self, vector):
+  def matvec(self, vector):
     np.copyto(self.buffer, self.matrix @ vector)
     return self.buffer
 
@@ -71,7 +71,7 @@ def test_fallback_copies_before_shared_buffer_matvec(add):
     np.testing.assert_array_equal(base, base_before)
   # A later backend operation may destroy its product, but not the
   # preconditioned vector already saved in caller-owned storage.
-  backend @ np.zeros(2)
+  backend.matvec(np.zeros(2))
   np.testing.assert_allclose(out, expected, rtol=0, atol=1e-15)
 
 
@@ -184,5 +184,5 @@ def test_richardson_rollback_preserves_true_iterate_with_combined_buffer():
   assert residual == stats['final_residual_norm'] == 0.9375
   np.testing.assert_array_equal(warm, [0.5, -0.25])
   np.testing.assert_array_equal(rhs, [3.0, -2.0])
-  backend @ np.zeros(2)
+  backend.matvec(np.zeros(2))
   np.testing.assert_array_equal(actual, expected)

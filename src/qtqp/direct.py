@@ -100,8 +100,8 @@ class LinearSolver:
   """Base class for KKT linear system solvers.
 
   To add a new solver, subclass this and implement factorize, solve, and format.
-  set_kkt, __matmul__, and free are provided; override __matmul__ for a more
-  efficient matvec (e.g. a pre-allocated dense array).
+  set_kkt, matvec, and free are provided; override matvec for a more
+  efficient product (e.g. a pre-allocated dense array).
   """
 
   def set_dims(self, n: int, m: int, z: int) -> None:
@@ -163,9 +163,9 @@ class LinearSolver:
       np.copyto(out, correction)
     else:
       np.add(add_to, correction, out=out)
-    return self @ out
+    return self.matvec(out)
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+  def matvec(self, x: np.ndarray) -> np.ndarray:
     """Returns the full symmetric product K @ x from the stored triangle.
 
     Only one triangle of K is stored, so the product is assembled as
@@ -337,18 +337,22 @@ class DirectKktSolver:
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
     """Applies the true (unregularized) KKT matrix to x.
 
-    The factorized matrix carries the static regularization, so the backend's
-    own matvec returns kkt_reg @ x. The true product is recovered by removing
-    the diagonal shift regularization added:
-
-      kkt_true @ x = kkt_reg @ x - diag_correction * x
-
-    This is the operator every refinement residual is measured against, and
-    the one GMRES builds its Krylov subspace from. The fused
-    `LinearSolver.solve_and_matvec` path computes the same product one term
-    at a time, so it cannot route through here.
+    This is the operator every refinement residual is measured against and
+    the one GMRES builds its Krylov subspace from. The backend only knows
+    the regularized matrix it factorized; see _unregularize.
     """
-    return self._solver @ x - self._diag_correction * x
+    return self._unregularize(self._solver.matvec(x), x)
+
+  def _unregularize(self, reg_product: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Turns kkt_reg @ x, as the backend computes it, into kkt_true @ x.
+
+    The factorized matrix carries the static regularization on its diagonal,
+    so kkt_true @ x = kkt_reg @ x - diag_correction * x. The fused
+    `LinearSolver.solve_and_matvec` path hands back kkt_reg @ x directly and
+    calls this on it; __matmul__ does the same for a standalone product.
+    A new array is returned: reg_product may be a backend work buffer.
+    """
+    return reg_product - self._diag_correction * x
 
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
@@ -406,8 +410,8 @@ class DirectKktSolver:
 
   def _solve_richardson(self, rhs_norm, tolerance, warm_start):
     """Classical iterative refinement: preconditioned Richardson iteration."""
-    # Initial sol and residual, measured against the true operator; see
-    # __matmul__ for why that is not the backend's own matvec.
+    # Initial sol and residual, measured against the true operator (see
+    # __matmul__), not the regularized matrix the backend factorized.
     sol = warm_start.copy()
     residual = self._kkt_rhs - self @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
@@ -428,7 +432,7 @@ class DirectKktSolver:
       product = self._solver.solve_and_matvec(
           residual, out=sol, add_to=sol_prev
       )
-      residual = self._kkt_rhs - product + self._diag_correction * sol
+      residual = self._kkt_rhs - self._unregularize(product, sol)
       residual_norm = np.linalg.norm(residual, np.inf)
 
       # Check for convergence (<= so an exact zero residual converges even
@@ -610,8 +614,7 @@ class DirectKktSolver:
     for j in range(max_inner):
       # Right preconditioning: build the Krylov subspace of A M^{-1}.
       applies = j + 1
-      w = self._solver.solve_and_matvec(v[j], out=z[j])
-      w = w - self._diag_correction * z[j]
+      w = self._unregularize(self._solver.solve_and_matvec(v[j], out=z[j]), z[j])
 
       # Modified Gram-Schmidt against the existing basis, with DGKS
       # reorthogonalization if the orthogonalization pass projected out
