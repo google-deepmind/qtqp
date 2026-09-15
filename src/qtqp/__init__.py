@@ -770,13 +770,6 @@ class QTQP:
     """
     h_y = np.full(self.m, mu)
     h_y[self.z :] += mu / (y[self.z :] * y[self.z :])
-    # Floor h_y like every other denominator below. It is the only one that
-    # can vanish on a well-formed problem: with no inequality rows the
-    # barrier term above is an empty slice, so h_y is mu throughout, and mu
-    # is exactly 0 whenever y's is (an all-equality problem, or iteration 0
-    # of the embedding). Without the floor the reciprocal divides by zero
-    # and delta_path_local comes back inf.
-    np.maximum(h_y, _EPS, out=h_y)
     h_tau = mu + mu / max(_EPS, tau * tau)
     return math.sqrt(
         float(t_x @ t_x) / max(_EPS, mu)
@@ -2114,7 +2107,16 @@ class QTQP:
 
     # Distance-to-path diagnostics are pure stats consumers: skip the
     # per-iteration vector work entirely on the default fast path.
-    if collect_stats:
+    if collect_stats and self.z == self.m:
+      # No complementarity pairs, so mu_hat is 0 by construction and there
+      # is no central path to measure a distance from. Report both path
+      # diagnostics as absent, as lambda_init already is for this case,
+      # rather than a floored number that means nothing. This is also the
+      # one well-formed input on which the barrier metric would divide by
+      # zero: with no inequality rows h_y is mu throughout.
+      stats_i["delta_path"] = None
+      stats_i["delta_path_local"] = None
+    elif collect_stats:
       # A posteriori distance-to-path certificate. The regularized path map
       # T_mu is mu-strongly monotone, so
       #     ||u - u*(mu)|| <= ||T_mu(u)|| / mu  =: delta_path,
