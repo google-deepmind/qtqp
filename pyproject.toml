@@ -25,6 +25,27 @@ test = [
     "pytest-cov",
 ]
 
+# Optional linear-solver backends. Only the backends that install cleanly
+# from PyPI get an extra; the rest come from conda-forge, see README.md. Each
+# is imported lazily inside the wrapper's __init__, so a missing one raises
+# when that backend is selected rather than at import time -- see
+# solvers_sparse.py and solvers_gpu.py.
+#
+# LinearSolver.QDLDL. Ships wheels for every platform.
+qdldl = ["qdldl"]
+# LinearSolver.CUDSS and LinearSolver.CUPY_DENSE, spelled out once per CUDA
+# major version: cupy publishes one wheel per toolkit, and only the matching
+# nvmath-python extra pulls the cuDSS library CuDssSolver needs -- a bare
+# nvmath-python does not carry it.
+gpu-cu12 = [
+    "cupy-cuda12x",
+    "nvmath-python[cu12]",
+]
+gpu-cu13 = [
+    "cupy-cuda13x",
+    "nvmath-python[cu13]",
+]
+
 [tool.setuptools]
 license-files = []
 package-dir = {"" = "src"}
@@ -33,6 +54,25 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
+
+[tool.deptry]
+# The backends are imported inside the wrapper classes, under their module
+# name rather than their distribution name; record the mapping instead of
+# letting deptry guess it.
+[tool.deptry.package_module_name_map]
+py-mkl-pardiso = ["pymklpardiso"]
+cupy-cuda12x = ["cupy", "cupyx"]
+cupy-cuda13x = ["cupy", "cupyx"]
+nvmath-python = ["nvmath"]
+
+[tool.deptry.per_rule_ignores]
+# Backends that cannot be pip dependencies: nanoeigenpy is published on
+# conda-forge only, and scikit-sparse (sksparse), scikit-umfpack (scikits)
+# and petsc4py publish sdists only. CI installs them from conda-forge, or
+# from pip once conda-forge has supplied the SuiteSparse headers; see ci.yml.
+DEP001 = ["nanoeigenpy", "sksparse", "scikits", "petsc4py"]
+# The test extra is tooling, run rather than imported by src/.
+DEP002 = ["pytest", "pytest-cov"]
 
 [tool.pytest.ini_options]
 # Docstring examples in the public API are part of the suite: a plain
