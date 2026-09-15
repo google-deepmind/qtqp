@@ -56,7 +56,7 @@ class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
 def test_auto_prefers_linux_windows_primary_backend(monkeypatch):
   """AUTO should try PARDISO first on non-macOS platforms."""
   attempts = []
-  scipy_backend = qtqp.direct.ScipySolver()
+  scipy_backend = qtqp.solvers_sparse.ScipySolver()
   monkeypatch.setattr(qtqp, '_AUTO_SOLVER_CACHE', {})
 
   def fake_instantiate(linear_solver):
@@ -98,7 +98,7 @@ def test_auto_prefers_linux_windows_primary_backend(monkeypatch):
 def test_auto_prefers_macos_primary_backend(monkeypatch):
   """AUTO should try ACCELERATE first on macOS."""
   attempts = []
-  scipy_backend = qtqp.direct.ScipySolver()
+  scipy_backend = qtqp.solvers_sparse.ScipySolver()
   monkeypatch.setattr(qtqp, '_AUTO_SOLVER_CACHE', {})
 
   def fake_instantiate(linear_solver):
@@ -155,7 +155,7 @@ def test_auto_caches_resolved_backend(monkeypatch):
     ):
       raise ImportError(f"{linear_solver.name} unavailable")
     if linear_solver is qtqp.LinearSolver.SCIPY:
-      return qtqp.direct.ScipySolver()
+      return qtqp.solvers_sparse.ScipySolver()
     raise AssertionError(f"Unexpected AUTO candidate: {linear_solver}")
 
   monkeypatch.setattr(qtqp, '_instantiate_linear_solver', fake_instantiate)
@@ -169,8 +169,8 @@ def test_auto_caches_resolved_backend(monkeypatch):
 
   assert first_resolved is qtqp.LinearSolver.SCIPY
   assert second_resolved is qtqp.LinearSolver.SCIPY
-  assert isinstance(first_backend, qtqp.direct.ScipySolver)
-  assert isinstance(second_backend, qtqp.direct.ScipySolver)
+  assert isinstance(first_backend, qtqp.solvers_sparse.ScipySolver)
+  assert isinstance(second_backend, qtqp.solvers_sparse.ScipySolver)
   assert attempts == [
       qtqp.LinearSolver.PARDISO,
       qtqp.LinearSolver.CHOLMOD,
@@ -3169,7 +3169,7 @@ def test_richardson_stall_rollback_regimes():
     solve_and_matvec = qtqp.direct.LinearSolver.solve_and_matvec
 
     def __init__(self, corrupt_fn):
-      self._inner = qtqp.direct.ScipySolver()
+      self._inner = qtqp.solvers_sparse.ScipySolver()
       self._corrupt_fn = corrupt_fn
       self._solve_calls = 0
       self.returned = []
@@ -3203,7 +3203,7 @@ def test_richardson_stall_rollback_regimes():
     return solver.solve(rhs=np.concatenate([c, b]), warm_start=np.zeros(n + m))
 
   # Reference: the identical solver stopped before the corrupted step.
-  _, stats_best = run(qtqp.direct.ScipySolver(), steps=1)
+  _, stats_best = run(qtqp.solvers_sparse.ScipySolver(), steps=1)
 
   # Material blowup (~1e6 x): rolled back to the pre-stall iterate.
   blowup = _CorruptSecondSolve(lambda out: out + 1e6 * np.ones_like(out))
@@ -3479,7 +3479,7 @@ def test_richardson_rollback_returns_genuine_iterate_dense():
   solver = qtqp.direct.DirectKktSolver(
       a=a, p=p, z=z, min_static_regularization=1e-8,
       max_iterative_refinement_steps=10, atol=0.0, rtol=0.0,
-      solver=_CorruptSecond(qtqp.direct.ScipyDenseSolver()),
+      solver=_CorruptSecond(qtqp.solvers_dense.ScipyDenseSolver()),
       refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,
   )
   solver.update(mu=mu, s=s, y=y)
@@ -3507,7 +3507,7 @@ def test_gmres_zero_operator_breakdown_returns():
   solver = qtqp.direct.DirectKktSolver(
       a=a, p=p, z=m_, min_static_regularization=1e-8,
       max_iterative_refinement_steps=8, atol=1e-12, rtol=1e-12,
-      solver=qtqp.direct.ScipySolver(),
+      solver=qtqp.solvers_sparse.ScipySolver(),
       refinement_strategy=qtqp.RefinementStrategy.GMRES, gmres_restart=8,
   )
   # mu = 0 with all-equality rows makes every TRUE diagonal exactly zero,
@@ -3534,7 +3534,7 @@ def test_gmres_actually_restarts_across_cycles():
   y = rng.uniform(0.5, 1.5, size=m)
   s[:z] = 0.0
   solver = qtqp.direct.DirectKktSolver(
-      a=a, p=p, z=z, solver=qtqp.direct.ScipySolver(),
+      a=a, p=p, z=z, solver=qtqp.solvers_sparse.ScipySolver(),
       refinement_strategy=qtqp.RefinementStrategy.GMRES, gmres_restart=2,
       min_static_regularization=1e-2,  # large clamp => hard refinement
       max_iterative_refinement_steps=40, atol=1e-12, rtol=0.0,
@@ -3559,7 +3559,7 @@ def test_nonfinite_backend_solution_raises(monkeypatch):
   s = rng.uniform(0.5, 1.5, size=m)
   y = rng.uniform(0.5, 1.5, size=m)
   s[:z] = 0.0
-  backend = qtqp.direct.ScipySolver()
+  backend = qtqp.solvers_sparse.ScipySolver()
   solver = qtqp.direct.DirectKktSolver(
       a=a, p=p, z=z, solver=backend,
       refinement_strategy=qtqp.RefinementStrategy.RICHARDSON,

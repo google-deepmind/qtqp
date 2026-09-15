@@ -19,8 +19,10 @@ Solver backends live in separate modules:
   solvers_dense   — ScipyDenseSolver (Gram/Cholesky CPU)
   solvers_gpu     — CuDssSolver, CupyDenseSolver (CUDA)
 
-All backend classes are re-exported here so that ``from . import direct``
-followed by ``direct.ScipySolver`` continues to work.
+This module imports none of them: the layering runs one way, from the
+backend modules to the ``LinearSolver`` interface defined here. Backend
+classes are reached through their own module (``qtqp.solvers_sparse.ScipySolver``)
+or through the ``qtqp.LinearSolver`` enum, not through ``direct``.
 """
 
 import enum
@@ -667,18 +669,3 @@ class DirectKktSolver:
   def free(self):
     """Frees the solver resources."""
     self._solver.free()
-
-
-# Re-export all backend solver classes so that ``direct.ScipySolver`` etc.
-# continue to work without changing __init__.py or test imports.
-from .solvers_sparse import AccelerateSolver  # noqa: F401
-from .solvers_sparse import CholModSolver  # noqa: F401
-from .solvers_sparse import EigenSolver  # noqa: F401
-from .solvers_sparse import MklPardisoSolver  # noqa: F401
-from .solvers_sparse import MumpsSolver  # noqa: F401
-from .solvers_sparse import QdldlSolver  # noqa: F401
-from .solvers_sparse import ScipySolver  # noqa: F401
-from .solvers_sparse import UmfpackSolver  # noqa: F401
-from .solvers_dense import ScipyDenseSolver  # noqa: F401
-from .solvers_gpu import CuDssSolver  # noqa: F401
-from .solvers_gpu import CupyDenseSolver  # noqa: F401

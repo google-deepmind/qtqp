@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from qtqp import direct
+from qtqp import solvers_gpu
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def cudss_backend():
     pytest.skip(f"CUDA device unavailable: {error}")
   if not devices:
     pytest.skip("No CUDA device available")
-  backend = direct.CuDssSolver()
+  backend = solvers_gpu.CuDssSolver()
   try:
     yield backend
   finally:

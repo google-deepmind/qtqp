@@ -43,6 +43,9 @@ import numpy as np
 import scipy.sparse as sp
 
 from . import direct
+from . import solvers_dense
+from . import solvers_gpu
+from . import solvers_sparse
 from .direct import RefinementStrategy
 
 __version__ = "0.0.7"
@@ -107,17 +110,17 @@ class LinearSolver(enum.Enum):
   """
 
   AUTO = "auto"
-  ACCELERATE = direct.AccelerateSolver
-  SCIPY = direct.ScipySolver
-  SCIPY_DENSE = direct.ScipyDenseSolver
-  CUPY_DENSE = direct.CupyDenseSolver
-  UMFPACK = direct.UmfpackSolver
-  PARDISO = direct.MklPardisoSolver
-  QDLDL = direct.QdldlSolver
-  CHOLMOD = direct.CholModSolver
-  CUDSS = direct.CuDssSolver
-  EIGEN = direct.EigenSolver
-  MUMPS = direct.MumpsSolver
+  ACCELERATE = solvers_sparse.AccelerateSolver
+  SCIPY = solvers_sparse.ScipySolver
+  SCIPY_DENSE = solvers_dense.ScipyDenseSolver
+  CUPY_DENSE = solvers_gpu.CupyDenseSolver
+  UMFPACK = solvers_sparse.UmfpackSolver
+  PARDISO = solvers_sparse.MklPardisoSolver
+  QDLDL = solvers_sparse.QdldlSolver
+  CHOLMOD = solvers_sparse.CholModSolver
+  CUDSS = solvers_gpu.CuDssSolver
+  EIGEN = solvers_sparse.EigenSolver
+  MUMPS = solvers_sparse.MumpsSolver
 
 
 _AUTO_SOLVER_CACHE: dict[str, LinearSolver] = {}
