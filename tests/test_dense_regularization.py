@@ -23,10 +23,10 @@ import qtqp
 
 def _dense_backend(name):
   if name == "scipy":
-    return qtqp.direct.ScipyDenseSolver()
+    return qtqp.solvers_dense.ScipyDenseSolver()
   # Initialization/setup use only NumPy-compatible allocation and transfer
   # primitives. The invalid diagonal must raise before any device operation.
-  backend = qtqp.direct.CupyDenseSolver.__new__(qtqp.direct.CupyDenseSolver)
+  backend = qtqp.solvers_gpu.CupyDenseSolver.__new__(qtqp.solvers_gpu.CupyDenseSolver)
   backend._cp = np
   return backend
 
@@ -100,7 +100,7 @@ def test_standalone_dense_solver_rejects_zero_equality_shift(
 
 
 def test_dense_positive_mu_allows_zero_static_regularization():
-  solver = _direct_solver(qtqp.direct.ScipyDenseSolver())
+  solver = _direct_solver(qtqp.solvers_dense.ScipyDenseSolver())
   try:
     mu = 0.2
     solver.update(mu=mu, s=np.zeros(1), y=np.ones(1))

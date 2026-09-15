@@ -18,7 +18,8 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from qtqp import direct
+from qtqp import solvers_dense
+from qtqp import solvers_gpu
 
 
 @pytest.mark.parametrize("backend_name", ["scipy", "cupy"])
@@ -53,11 +54,11 @@ def test_dense_setup_only_densifies_required_blocks(
     )
 
   if backend_name == "scipy":
-    backend = direct.ScipyDenseSolver()
+    backend = solvers_dense.ScipyDenseSolver()
   else:
     # Setup only uses allocation/transfer primitives. NumPy stands in for
     # those so the host-memory regression is covered without a CUDA device.
-    backend = direct.CupyDenseSolver.__new__(direct.CupyDenseSolver)
+    backend = solvers_gpu.CupyDenseSolver.__new__(solvers_gpu.CupyDenseSolver)
     backend._cp = np
   backend.set_dims(n=n, m=m, z=0)
   backend.set_kkt(kkt)
