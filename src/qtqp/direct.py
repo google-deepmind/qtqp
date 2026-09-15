@@ -19,10 +19,10 @@ Solver backends live in separate modules:
   solvers_dense   — ScipyDenseSolver (Gram/Cholesky CPU)
   solvers_gpu     — CuDssSolver, CupyDenseSolver (CUDA)
 
-This module imports none of them at module level: the layering runs one way,
-from the backend modules to the ``LinearSolver`` interface defined here. The
-backend names stay reachable as ``direct.ScipySolver`` etc. through a lazy
-module ``__getattr__`` at the bottom of the file.
+This module imports none of them: the layering runs one way, from the
+backend modules to the ``LinearSolver`` interface defined here. Backend
+classes are reached through their own module (``qtqp.solvers_sparse.ScipySolver``)
+or through the ``qtqp.LinearSolver`` enum, not through ``direct``.
 """
 
 import enum
@@ -662,45 +662,3 @@ class DirectKktSolver:
   def free(self):
     """Frees the solver resources."""
     self._solver.free()
-
-
-
-# The backend classes lived in this module before they were split out, and
-# were re-exported here afterwards so ``direct.ScipySolver`` kept working.
-# The eager re-exports formed an import cycle; resolving the names on
-# attribute access instead keeps the aliases without one. Nothing inside the
-# package uses them: __init__.py imports the backend modules directly.
-_BACKEND_ALIASES = {
-    "AccelerateSolver": "solvers_sparse",
-    "CholModSolver": "solvers_sparse",
-    "EigenSolver": "solvers_sparse",
-    "MklPardisoSolver": "solvers_sparse",
-    "MumpsSolver": "solvers_sparse",
-    "QdldlSolver": "solvers_sparse",
-    "ScipySolver": "solvers_sparse",
-    "UmfpackSolver": "solvers_sparse",
-    "ScipyDenseSolver": "solvers_dense",
-    "CuDssSolver": "solvers_gpu",
-    "CupyDenseSolver": "solvers_gpu",
-}
-
-
-def __getattr__(name: str) -> Any:
-  """Resolves a backend class that used to live here (PEP 562).
-
-  The class is imported on first access and cached in the module globals,
-  so the import runs once and later lookups never reach this hook.
-  """
-  module_name = _BACKEND_ALIASES.get(name)
-  if module_name is None:
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-  import importlib  # pylint: disable=g-import-not-at-top
-
-  cls = getattr(importlib.import_module(f".{module_name}", __package__), name)
-  globals()[name] = cls
-  return cls
-
-
-def __dir__() -> list[str]:
-  """Lists the module's own names plus the lazily resolved backend aliases."""
-  return sorted(set(globals()) | set(_BACKEND_ALIASES))
