@@ -47,12 +47,18 @@ pytest                          # the full suite, including doctests in src/
 Style rules are deliberately excluded from the lint gate; only correctness
 rules (`E9`, `F`) are enforced.
 
-To see what the suite reaches, run it with coverage. CI fails below the
-threshold committed in `pyproject.toml`:
+To see what the suite reaches, run it with coverage:
 
 ```bash
-pytest --cov=qtqp --cov-report=term-missing
+pytest --cov --cov-report=term-missing
 ```
+
+Coverage is reported, not gated. Every CI leg installs a different subset of
+the optional linear solvers, so the figure differs per leg and a single
+threshold would move with whichever packages happen to resolve.
+`test_required_solvers_are_available` guards the case a threshold was meant to
+catch: a backend that CI installs dropping out of the run instead of its
+parametrized tests silently disappearing.
 
 ## Code reviews
 
