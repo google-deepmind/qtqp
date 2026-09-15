@@ -84,7 +84,7 @@ def test_dense_setup_only_densifies_required_blocks(
         p @ expected[:n] + a.T @ expected[n:],
         a @ expected[:n] - expected[n:],
     ])
-    np.testing.assert_allclose(backend @ expected, rhs, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(backend.matvec(expected), rhs, rtol=1e-13, atol=1e-13)
     np.testing.assert_allclose(
         backend.solve(rhs), expected, rtol=1e-11, atol=1e-11
     )

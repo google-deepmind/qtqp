@@ -27,7 +27,7 @@ from .direct import LinearSolver
 class _GpuSolver(LinearSolver):
   """Host interface around device solves and non-destructive device matvecs."""
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+  def matvec(self, x: np.ndarray) -> np.ndarray:
     """Uploads x, evaluates K @ x on the device and downloads the product."""
     self._x_gpu.set(x)
     return self._matvec_gpu(self._x_gpu).get()
