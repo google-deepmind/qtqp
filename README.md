@@ -39,23 +39,35 @@ automatically:
 - Linux / Windows `x86_64`: `py-mkl-pardiso`
 - macOS `arm64`: `macldlt`
 
-Every other backend is optional and has an extra named after its
-`LinearSolver` member, so you install only the one you want:
+Every other backend is optional. Two of them install cleanly from PyPI and
+have an extra named after the `LinearSolver` member they provide:
 
 ```bash
-python -m pip install 'qtqp[gpu]'      # CUDSS and CUPY_DENSE, via CUDA 12
-python -m pip install 'qtqp[qdldl]'    # QDLDL
-python -m pip install 'qtqp[cholmod]'  # CHOLMOD, needs SuiteSparse
-python -m pip install 'qtqp[umfpack]'  # UMFPACK, needs SuiteSparse
-python -m pip install 'qtqp[mumps]'    # MUMPS via PETSc, not on Windows
-python -m pip install 'qtqp[sparse]'   # all four sparse backends at once
+python -m pip install 'qtqp[qdldl]'     # QDLDL
+python -m pip install 'qtqp[gpu-cu12]'  # CUDSS and CUPY_DENSE on CUDA 12
+python -m pip install 'qtqp[gpu-cu13]'  # CUDSS and CUPY_DENSE on CUDA 13
 ```
 
-`qtqp[gpu]` pulls the CUDA 12 wheel; on CUDA 11 install `cupy-cuda11x` by
-hand instead. `LinearSolver.EIGEN` has no extra because `nanoeigenpy` is
-published on conda-forge only — `conda install -c conda-forge nanoeigenpy` is
-the only route to it. `SCIPY` and `SCIPY_DENSE` need nothing beyond the
-runtime dependencies, and `AUTO` uses whichever of these is present.
+The two GPU extras differ only in CUDA major version, so pick the one that
+matches your toolkit. Each pulls the matching `cupy` wheel together with the
+`nvmath-python` extra that carries the cuDSS library; plain `nvmath-python`
+does not bring it, and `LinearSolver.CUDSS` stays unavailable without it.
+
+The remaining backends have no extra, because pip cannot install them without
+help. `scikit-sparse` (CHOLMOD), `scikit-umfpack` (UMFPACK) and `petsc4py`
+(MUMPS, unavailable on Windows) publish source distributions only: pip builds
+each from source, the two SuiteSparse packages need headers pip cannot
+supply, and PETSc is a long build that fails on most machines. `nanoeigenpy`
+(EIGEN) is not on PyPI at all. conda-forge is the supported route to all
+four, and the one CI itself uses:
+
+```bash
+conda install -y -c conda-forge suitesparse scikit-umfpack nanoeigenpy petsc4py
+python -m pip install 'scikit-sparse>=0.5'
+```
+
+`SCIPY` and `SCIPY_DENSE` need nothing beyond the runtime dependencies, and
+`AUTO` uses whichever of these is present.
 
 To install from source, first clone the repository:
 

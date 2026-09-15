@@ -25,35 +25,25 @@ test = [
     "pytest-cov",
 ]
 
-# Optional linear-solver backends, one extra per LinearSolver member, so a
-# user can ask for the backend they want without building the others. Each is
-# imported lazily inside the wrapper's __init__, and a missing one raises
-# rather than failing at import time -- see solvers_sparse.py/solvers_gpu.py.
+# Optional linear-solver backends. Only the backends that install cleanly
+# from PyPI get an extra; the rest come from conda-forge, see README.md. Each
+# is imported lazily inside the wrapper's __init__, so a missing one raises
+# when that backend is selected rather than at import time -- see
+# solvers_sparse.py and solvers_gpu.py.
 #
-# LinearSolver.CUDSS and LinearSolver.CUPY_DENSE. cupy-cuda12x is the CUDA 12
-# wheel; on CUDA 11 install cupy-cuda11x by hand instead, which provides the
-# same `cupy` and `cupyx` modules.
-gpu = [
-    "cupy-cuda12x",
-    "nvmath-python",
-]
-# LinearSolver.QDLDL. Pure wheels, so this one installs anywhere.
+# LinearSolver.QDLDL. Ships wheels for every platform.
 qdldl = ["qdldl"]
-# LinearSolver.CHOLMOD. Builds against SuiteSparse; see CONTRIBUTING.md for
-# the conda-forge route if no headers are present.
-cholmod = ["scikit-sparse>=0.5"]
-# LinearSolver.UMFPACK. Also builds against SuiteSparse.
-umfpack = ["scikit-umfpack"]
-# LinearSolver.MUMPS, reached through PETSc. Unavailable on Windows.
-mumps = ["petsc4py; platform_system != 'Windows'"]
-# Every sparse backend pip can install. LinearSolver.EIGEN is missing on
-# purpose: nanoeigenpy is published on conda-forge only, so there is no name
-# to put here -- `conda install -c conda-forge nanoeigenpy` is the only route.
-sparse = [
-    "qdldl",
-    "scikit-sparse>=0.5",
-    "scikit-umfpack",
-    "petsc4py; platform_system != 'Windows'",
+# LinearSolver.CUDSS and LinearSolver.CUPY_DENSE, spelled out once per CUDA
+# major version: cupy publishes one wheel per toolkit, and only the matching
+# nvmath-python extra pulls the cuDSS library CuDssSolver needs -- a bare
+# nvmath-python does not carry it.
+gpu-cu12 = [
+    "cupy-cuda12x",
+    "nvmath-python[cu12]",
+]
+gpu-cu13 = [
+    "cupy-cuda13x",
+    "nvmath-python[cu13]",
 ]
 
 [tool.setuptools]
@@ -71,15 +61,16 @@ namespaces = false
 # letting deptry guess it.
 [tool.deptry.package_module_name_map]
 py-mkl-pardiso = ["pymklpardiso"]
-scikit-sparse = ["sksparse"]
-scikit-umfpack = ["scikits"]
 cupy-cuda12x = ["cupy", "cupyx"]
+cupy-cuda13x = ["cupy", "cupyx"]
 nvmath-python = ["nvmath"]
 
 [tool.deptry.per_rule_ignores]
-# nanoeigenpy (LinearSolver.EIGEN) is conda-forge only, so it cannot be
-# declared as a dependency at all. CI installs it with conda; see ci.yml.
-DEP001 = ["nanoeigenpy"]
+# Backends that cannot be pip dependencies: nanoeigenpy is published on
+# conda-forge only, and scikit-sparse (sksparse), scikit-umfpack (scikits)
+# and petsc4py publish sdists only. CI installs them from conda-forge, or
+# from pip once conda-forge has supplied the SuiteSparse headers; see ci.yml.
+DEP001 = ["nanoeigenpy", "sksparse", "scikits", "petsc4py"]
 # The test extra is tooling, run rather than imported by src/.
 DEP002 = ["pytest", "pytest-cov"]
 
