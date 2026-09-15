@@ -34,12 +34,14 @@ class MklPardisoSolver(LinearSolver):
   """Wrapper around pymklpardiso.PardisoSolver."""
 
   def __init__(self):
+    """Imports pymklpardiso; the solver is created on the first factorize."""
     import pymklpardiso  # pylint: disable=g-import-not-at-top
 
     self._pymklpardiso = pymklpardiso
     self._solver: pymklpardiso.PardisoSolver | None = None
 
   def factorize(self):
+    """Analyzes the pattern on the first call, then refactorizes the values."""
     triu = self._kkt
     if self._solver is None:
       # Initial analysis is pattern-only (cheap). On error recovery we
@@ -55,6 +57,7 @@ class MklPardisoSolver(LinearSolver):
       self._solver.refactor(triu.data)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves for rhs, re-analyzing with scaling and matching after an error."""
     try:
       return self._solver.solve(rhs)
     except RuntimeError as e:
@@ -68,6 +71,7 @@ class MklPardisoSolver(LinearSolver):
       return self._solver.solve(rhs)
 
   def format(self) -> Literal["csr"]:
+    """Returns 'csr', the KKT scaffold format PARDISO is analyzed against."""
     return "csr"
 
 
@@ -75,21 +79,25 @@ class QdldlSolver(LinearSolver):
   """Wrapper around qdldl.Solver for quasi-definite LDL factorization."""
 
   def __init__(self):
+    """Imports qdldl; the factorization is built on the first factorize."""
     import qdldl  # pylint: disable=g-import-not-at-top
 
     self.qdldl = qdldl
     self.factorization: qdldl.Solver | None = None
 
   def factorize(self):
+    """Builds the LDL' factorization once, then updates it with new values."""
     if self.factorization is None:
       self.factorization = self.qdldl.Solver(self._kkt, upper=True)
     else:
       self.factorization.update(self._kkt, upper=True)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format qdldl is built against."""
     return "csc"
 
 
@@ -97,27 +105,38 @@ class ScipySolver(LinearSolver):
   """Wrapper around scipy.linalg.factorized."""
 
   def __init__(self):
+    """Defers the factorization to the first factorize call."""
     self.factorization = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Stores the KKT and a mirrored full symmetric copy.
+
+    SuperLU takes no triangle-only input, so the mirrored copy is what this
+    backend factorizes and multiplies by.
+    """
     super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
     self._full_diag_idxs = diag_data_indices(self._full_kkt)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Writes the diagonal into both the stored triangle and the full copy."""
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Returns K @ x directly from the full symmetric copy."""
     return self._full_kkt @ x
 
   def factorize(self):
+    """Builds a SuperLU factorization of the full symmetric matrix."""
     self.factorization = sp.linalg.factorized(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self.factorization(rhs)
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format the mirrored copy is built in."""
     return "csc"
 
 
@@ -125,12 +144,19 @@ class CholModSolver(LinearSolver):
   """Wrapper around sksparse.cholmod for Cholesky LDLt factorization."""
 
   def __init__(self):
+    """Imports sksparse.cholmod; the factor is built on the first factorize."""
     import sksparse.cholmod  # pylint: disable=g-import-not-at-top
 
     self.cholmod = sksparse.cholmod
     self.factorization: sksparse.cholmod.CholeskyFactor | None = None
 
   def factorize(self):
+    """Runs a simplicial LDL' factorization, reusing the symbolic analysis.
+
+    Raises:
+      ValueError: on any CHOLMOD failure, which is the breakdown the caller's
+        salvage path expects instead of a backend-specific exception.
+    """
     if self.factorization is None:
       # Must use simplicial mode: the KKT matrix is indefinite (has negative
       # eigenvalues from the -(D+mu*I) block), so we need LDL factorization.
@@ -149,9 +175,11 @@ class CholModSolver(LinearSolver):
       raise ValueError(f"CHOLMOD factorization failed: {exc}") from exc
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self.factorization.solve(rhs)
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format CHOLMOD is analyzed against."""
     return "csc"
 
 
@@ -159,12 +187,14 @@ class EigenSolver(LinearSolver):
   """Wrapper around Eigen Simplicial LDL^T."""
 
   def __init__(self):
+    """Imports nanoeigenpy; the solver is created on the first factorize."""
     import nanoeigenpy  # pylint: disable=g-import-not-at-top
 
     self.nanoeigenpy = nanoeigenpy
     self._solver: nanoeigenpy.SimplicialLDLT | None = None
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Stores the KKT transposed, since only Lower LDL' is exposed."""
     # Eigen itself supports either triangle, but nanoeigenpy's Python module
     # exposes only the default Lower-flavored SimplicialLDLT class, so adapt
     # the shared upper-triangular KKT into the lower triangle here.  The base
@@ -173,10 +203,12 @@ class EigenSolver(LinearSolver):
     super().set_kkt(kkt.T.tocsc())
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Writes the new diagonal into the stored lower triangle."""
     self._kkt.data[self._kkt_diag_idxs] = diag
     np.copyto(self._kkt_diag, diag)
 
   def factorize(self):
+    """Analyzes the pattern on the first call, then factorizes the values."""
     if self._solver is None:
       self._solver = self.nanoeigenpy.SimplicialLDLT()
       self._solver.analyzePattern(self._kkt)
@@ -184,9 +216,11 @@ class EigenSolver(LinearSolver):
     self._solver.factorize(self._kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self._solver.solve(rhs)
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format the lower triangle is built in."""
     return "csc"
 
 
@@ -199,6 +233,7 @@ class MumpsSolver(LinearSolver):
   """
 
   def __init__(self):
+    """Imports petsc4py; the Mat/KSP pair is built on the first factorize."""
     import petsc4py.PETSc  # pylint: disable=g-import-not-at-top
 
     self._PETSc = petsc4py.PETSc
@@ -208,6 +243,12 @@ class MumpsSolver(LinearSolver):
     self._x = None
 
   def factorize(self):
+    """Builds the PETSc Mat/KSP pair once, then refactorizes in place.
+
+    The first call runs MUMPS symbolic analysis; later calls only mark the
+    shared value array dirty and redo the numeric factorization. Workspace
+    exhaustion (INFOG(1) == -9) doubles ICNTL(14) and retries.
+    """
     PETSc = self._PETSc
     kkt = self._kkt
 
@@ -277,6 +318,7 @@ class MumpsSolver(LinearSolver):
       self._ksp.setUp()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves for rhs, taking the real part on complex-scalar PETSc builds."""
     self._b.array[:] = rhs
     self._ksp.solve(self._b, self._x)
     # Some PETSc conda builds use complex scalars, so the solution
@@ -286,6 +328,7 @@ class MumpsSolver(LinearSolver):
     return self._sol
 
   def format(self) -> Literal["csr"]:
+    """Returns 'csr', the KKT scaffold format the PETSc Mat wraps."""
     return "csr"
 
   def free(self):
@@ -304,12 +347,14 @@ class AccelerateSolver(LinearSolver):
   """Wrapper around macldlt for Apple Accelerate sparse LDL^T (macOS only)."""
 
   def __init__(self):
+    """Imports macldlt; the factorization is built on the first factorize."""
     import macldlt  # pylint: disable=g-import-not-at-top
 
     self._macldlt = macldlt
     self._solver = None
 
   def factorize(self):
+    """Builds the Accelerate LDL' factorization once, then refactorizes."""
     if self._solver is None:
       self._solver = self._macldlt.LDLTSolver(
         self._kkt, triangle="upper", factorization="ldlt_sbk", ordering="metis")
@@ -317,9 +362,11 @@ class AccelerateSolver(LinearSolver):
       self._solver.refactor(self._kkt.data)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self._solver.solve(rhs)
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format Accelerate is analyzed against."""
     return "csc"
 
 
@@ -333,6 +380,7 @@ class UmfpackSolver(LinearSolver):
   """
 
   def __init__(self):
+    """Creates the UMFPACK context and selects its symmetric strategy."""
     import scikits.umfpack as umfpack  # pylint: disable=g-import-not-at-top
 
     self._umfpack = umfpack
@@ -344,27 +392,37 @@ class UmfpackSolver(LinearSolver):
     self._symbolic_done = False
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Stores the KKT and a mirrored full symmetric copy.
+
+    UMFPACK factorizes a general matrix, so the mirrored copy is what this
+    backend analyzes, factorizes and multiplies by.
+    """
     super().set_kkt(kkt)
     self._full_kkt = _full_symmetric_from_upper(kkt, "csc")
     self._full_diag_idxs = diag_data_indices(self._full_kkt)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Writes the diagonal into both the stored triangle and the full copy."""
     super().update_diag(diag)
     self._full_kkt.data[self._full_diag_idxs] = diag
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Returns K @ x directly from the full symmetric copy."""
     return self._full_kkt @ x
 
   def factorize(self):
+    """Runs symbolic analysis once, then the numeric factorization each call."""
     if not self._symbolic_done:
       self._ctx.symbolic(self._full_kkt)
       self._symbolic_done = True
     self._ctx.numeric(self._full_kkt)
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves the factorized system for rhs."""
     return self._ctx.solve(
         self._umfpack.UMFPACK_A, self._full_kkt, rhs, autoTranspose=True
     )
 
   def format(self) -> Literal["csc"]:
+    """Returns 'csc', the KKT scaffold format the mirrored copy is built in."""
     return "csc"

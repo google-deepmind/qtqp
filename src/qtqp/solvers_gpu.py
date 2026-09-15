@@ -28,15 +28,22 @@ class _GpuSolver(LinearSolver):
   """Host interface around device solves and non-destructive device matvecs."""
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Uploads x, evaluates K @ x on the device and downloads the product."""
     self._x_gpu.set(x)
     return self._matvec_gpu(self._x_gpu).get()
 
   def solve(self, rhs: np.ndarray) -> np.ndarray:
+    """Solves on the device and downloads the solution."""
     return self._solve_gpu(rhs).get()
 
   def solve_and_matvec(
       self, rhs: np.ndarray, *, out: np.ndarray, add_to: np.ndarray | None = None
   ) -> np.ndarray:
+    """Writes the solved vector to out and returns K @ out.
+
+    Subclasses supply the device halves (_solve_gpu, _matvec_gpu); this
+    composes them so one refinement step costs a single round trip.
+    """
     # Form the complete vector on-device, then evaluate its actual matvec.
     # Queue both operations before either download; never reconstruct the
     # residual from the RHS or a recurrence that omits factorization error.
@@ -61,6 +68,7 @@ class CuDssSolver(_GpuSolver):
   """
 
   def __init__(self):
+    """Imports cupy and nvmath; all device state is built on first use."""
     import cupy  # pylint: disable=g-import-not-at-top
     import cupyx.scipy.sparse  # pylint: disable=g-import-not-at-top
     import nvmath  # pylint: disable=g-import-not-at-top
@@ -84,10 +92,16 @@ class CuDssSolver(_GpuSolver):
     self._kkt_diag_idxs_gpu = self._cp.asarray(self._kkt_diag_idxs)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Uploads the new diagonal into the device copy of the KKT."""
     self._kkt_diag_gpu.set(diag)
     self._kkt_gpu.data[self._kkt_diag_idxs_gpu] = self._kkt_diag_gpu
 
   def factorize(self):
+    """Plans the cuDSS solve on the first call, then factorizes.
+
+    The plan wraps the device matrix's data pointer, so diagonal updates
+    made in place stay visible without invalidating it.
+    """
     cp = self._cp
     if self._solver is None:
       sparse_system_type = (
@@ -117,6 +131,7 @@ class CuDssSolver(_GpuSolver):
     self._solver.factorize()
 
   def _matvec_gpu(self, x):
+    """Returns K @ x for a device vector, without leaving the device."""
     return (
         self._kkt_gpu @ x
         + self._kkt_gpu_t @ x
@@ -124,10 +139,12 @@ class CuDssSolver(_GpuSolver):
     )
 
   def _solve_gpu(self, rhs):
+    """Uploads the right-hand side and returns the solution, left on device."""
     self._rhs_gpu.set(rhs)
     return self._solver.solve(stream=self._cp.cuda.get_current_stream())
 
   def format(self) -> Literal["csr"]:
+    """Returns 'csr', the KKT scaffold format cuDSS is planned against."""
     return "csr"
 
   def free(self):
@@ -148,6 +165,7 @@ class CupyDenseSolver(_GpuSolver):
   """
 
   def __init__(self):
+    """Imports cupy; the device buffers are allocated in set_dims."""
     import cupy  # pylint: disable=g-import-not-at-top
     import cupyx.scipy.linalg  # pylint: disable=g-import-not-at-top
 
@@ -157,6 +175,7 @@ class CupyDenseSolver(_GpuSolver):
     self._m = 0
 
   def set_dims(self, n: int, m: int, z: int) -> None:
+    """Records the block sizes and pre-allocates every device buffer."""
     cp = self._cp
     self._n = n
     self._m = m
@@ -178,6 +197,11 @@ class CupyDenseSolver(_GpuSolver):
     self._L = None  # Lower-triangular Cholesky factor
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Uploads the A and P blocks that the Gram reduction reads.
+
+    Both blocks are extracted before densifying, so a backend that needs
+    only the m x n and n x n blocks never allocates (n + m)^2 on the host.
+    """
     super().set_kkt(kkt)
     cp = self._cp
     n = self._n
@@ -192,6 +216,12 @@ class CupyDenseSolver(_GpuSolver):
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Uploads R_x and R_y from the KKT diagonal and caches the R_y inverses.
+
+    Raises:
+      ValueError: if an equality row carries no regularization, which leaves
+        D singular and the Gram elimination undefined.
+    """
     if self._z and np.any(diag[self._n : self._n + self._z] == 0.0):
       raise ValueError(
           "Dense Gram elimination requires positive regularization on equality "
@@ -204,6 +234,7 @@ class CupyDenseSolver(_GpuSolver):
     cp.sqrt(self._inv_R_y_gpu, out=self._inv_sqrt_R_y_gpu)
 
   def factorize(self) -> None:
+    """Forms the Gram matrix G = H + A' D^-1 A on the device and factorizes it."""
     cp = self._cp
     idx = self._diag_idx
     cp.copyto(self._G_gpu, self._P_offdiag_gpu)
@@ -215,6 +246,11 @@ class CupyDenseSolver(_GpuSolver):
     self._L = cp.linalg.cholesky(self._G_gpu)
 
   def _matvec_gpu(self, x):
+    """Returns K @ x for a device vector, from the stored dense blocks.
+
+    The product lands in its own buffer so an in-flight solve result stays
+    intact while its residual is evaluated.
+    """
     cp = self._cp
     n = self._n
     x_x, x_y = x[:n], x[n:]
@@ -229,6 +265,7 @@ class CupyDenseSolver(_GpuSolver):
     return result
 
   def _solve_gpu(self, rhs):
+    """Solves the reduced Gram system and back-substitutes y, on the device."""
     cp = self._cp
     n = self._n
     self._rhs_gpu.set(rhs)
@@ -247,4 +284,5 @@ class CupyDenseSolver(_GpuSolver):
     return result
 
   def format(self) -> Literal["csr"]:
+    """Returns 'csr', the KKT scaffold format this backend reads blocks from."""
     return "csr"

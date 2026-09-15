@@ -166,6 +166,12 @@ class LinearSolver:
     return self @ out
 
   def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Returns the full symmetric product K @ x from the stored triangle.
+
+    Only one triangle of K is stored, so the product is assembled as
+    kkt @ x + kkt.T @ x with the twice-counted diagonal removed once.
+    Backends that keep their own full or dense copy override this.
+    """
     res = self._kkt @ x
     res -= self._kkt_diag * x
     res += self._kkt_t @ x
@@ -176,6 +182,7 @@ class LinearSolver:
     raise NotImplementedError
 
   def free(self) -> None:
+    """Releases backend resources; the base class holds none."""
     pass
 
 

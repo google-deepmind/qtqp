@@ -56,6 +56,7 @@ class ScipyDenseSolver(LinearSolver):
   """
 
   def __init__(self):
+    """Binds the LAPACK and BLAS primitives the Gram reduction calls."""
     from scipy.linalg import lapack, blas  # pylint: disable=g-import-not-at-top
 
     self._dpotrf = lapack.dpotrf
@@ -67,6 +68,11 @@ class ScipyDenseSolver(LinearSolver):
     self._m = 0
 
   def set_dims(self, n: int, m: int, z: int) -> None:
+    """Records the block sizes and pre-allocates every per-iteration buffer.
+
+    Sizing the buffers once from n and m keeps update_diag, factorize,
+    solve and the matvec allocation-free across IPM iterations.
+    """
     self._n = n
     self._m = m
     self._z = z
@@ -87,6 +93,11 @@ class ScipyDenseSolver(LinearSolver):
     self._g = np.empty(n, dtype=np.float64)
 
   def set_kkt(self, kkt: sp.spmatrix) -> None:
+    """Densifies the A and P blocks that the Gram reduction reads.
+
+    Only the m x n and n x n blocks are densified: the full KKT would cost
+    O((n + m)^2) of temporary storage when m >> n.
+    """
     super().set_kkt(kkt)
     n = self._n
     # Densify only the blocks used by the Gram reduction: the full KKT
@@ -100,6 +111,12 @@ class ScipyDenseSolver(LinearSolver):
     self._P_offdiag = np.asfortranarray(P_block)
 
   def update_diag(self, diag: np.ndarray) -> None:
+    """Splits the KKT diagonal into R_x and R_y and caches the R_y inverses.
+
+    Raises:
+      ValueError: if an equality row carries no regularization, which leaves
+        D singular and the Gram elimination undefined.
+    """
     if self._z and np.any(diag[self._n : self._n + self._z] == 0.0):
       raise ValueError(
           "Dense Gram elimination requires positive regularization on equality "
@@ -111,6 +128,11 @@ class ScipyDenseSolver(LinearSolver):
     np.sqrt(self._inv_R_y, out=self._inv_sqrt_R_y)
 
   def factorize(self) -> None:
+    """Forms the Gram matrix G = H + A' D^-1 A and takes its Cholesky.
+
+    Raises:
+      numpy.linalg.LinAlgError: if dpotrf reports a non-zero info.
+    """
     # G = P_offdiag + diag(R_x) + A' diag(1/R_y) A
     np.copyto(self._G, self._P_offdiag)
     self._G[self._diag_idx] += self._R_x
@@ -163,4 +185,5 @@ class ScipyDenseSolver(LinearSolver):
     return result
 
   def format(self) -> Literal["csr"]:
+    """Returns 'csr', the KKT scaffold format this backend reads blocks from."""
     return "csr"
