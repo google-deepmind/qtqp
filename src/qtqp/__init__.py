@@ -770,6 +770,13 @@ class QTQP:
     """
     h_y = np.full(self.m, mu)
     h_y[self.z :] += mu / (y[self.z :] * y[self.z :])
+    # Floor h_y like every other denominator below. It is the only one that
+    # can vanish on a well-formed problem: with no inequality rows the
+    # barrier term above is an empty slice, so h_y is mu throughout, and mu
+    # is exactly 0 whenever y's is (an all-equality problem, or iteration 0
+    # of the embedding). Without the floor the reciprocal divides by zero
+    # and delta_path_local comes back inf.
+    np.maximum(h_y, _EPS, out=h_y)
     h_tau = mu + mu / max(_EPS, tau * tau)
     return math.sqrt(
         float(t_x @ t_x) / max(_EPS, mu)
@@ -1972,6 +1979,12 @@ class QTQP:
 
     return max(0.0, tau_sol)
 
+  # The coefficients below are deliberately allowed to overflow or go
+  # non-finite: this is the fallback taken when the exact tau quadratic has
+  # already failed, so KKT noise can be arbitrarily large. Every path out of
+  # here is screened by an np.isfinite guard before tau_sol is returned, so
+  # the intermediate warnings report handled cases rather than defects.
+  @np.errstate(invalid="ignore", over="ignore", divide="ignore")
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
   ) -> float:
