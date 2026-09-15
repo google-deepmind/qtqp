@@ -153,7 +153,7 @@ import qtqp
 
 This exposes the main solver class `qtqp.QTQP` with constructor:
 
-```python
+```text
 QTQP(
     *,
     a: scipy.sparse.csc_matrix,
@@ -184,7 +184,7 @@ Arguments:
 
 This class has a single API method `solve`:
 
-```python
+```text
 solve(
     *,
     tol_feas: float = 1e-8,
