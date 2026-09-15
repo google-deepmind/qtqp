@@ -258,7 +258,9 @@ Key parameters:
     is not itself a distance bound. `lambda_init` (also an attribute on
     the solver) is the same guarded local score at the chosen initial
     point, warm or cold, before the first step. For an accepted warm
-    start, it reuses the screening score.
+    start, it reuses the screening score. On an all-equality problem
+    (`z == m`) there are no complementarity pairs and hence no central
+    path, so all three are reported as `None`.
 -   `refinement_strategy`: Choose the iterative-refinement method used for KKT
     solves. Defaults to `qtqp.RefinementStrategy.GMRES`.
 -   `gmres_restart`: Restart length for `qtqp.RefinementStrategy.GMRES`.
