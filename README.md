@@ -39,8 +39,8 @@ automatically:
 - Linux / Windows `x86_64`: `py-mkl-pardiso`
 - macOS `arm64`: `macldlt`
 
-Every other backend is optional. Two of them install cleanly from PyPI and
-have an extra named after the `LinearSolver` member they provide:
+Every other backend is optional. Those that install cleanly from PyPI have
+an extra, one for QDLDL and one per CUDA major version for the GPU pair:
 
 ```bash
 python -m pip install 'qtqp[qdldl]'     # QDLDL
