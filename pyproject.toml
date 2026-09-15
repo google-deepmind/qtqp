@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pytest-cov",
 ]
 
 [tool.setuptools]
@@ -32,3 +33,30 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
+
+[tool.pytest.ini_options]
+# Docstring examples in the public API are part of the suite: a plain
+# `pytest` run executes them, so a docstring cannot drift from behaviour
+# without turning CI red.
+addopts = "--doctest-modules"
+testpaths = ["src", "tests"]
+
+[tool.coverage.run]
+source = ["qtqp"]
+# The CUDA backends cannot run on any CI runner we have, so counting them
+# would only push the threshold below what the rest of the package can be
+# held to. Lint (ruff E9,F) is what guards them instead.
+omit = ["*/qtqp/solvers_gpu.py"]
+
+[tool.coverage.report]
+show_missing = true
+# Coverage is reported, not gated: every CI leg installs a different subset
+# of the optional linear solvers, so a threshold would move with whichever
+# packages happen to resolve. test_required_solvers_are_available guards the
+# case a threshold was meant to catch (a backend silently dropping out).
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

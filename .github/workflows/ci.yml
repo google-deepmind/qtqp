@@ -42,6 +42,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # Backends each leg installs. test_required_solvers_are_available
+        # fails if one of them stops importing, instead of its parametrized
+        # tests silently disappearing from the run.
+        include:
+          - os: ubuntu-latest
+            required-solvers: SCIPY,SCIPY_DENSE,UMFPACK,QDLDL,CHOLMOD,EIGEN,MUMPS,PARDISO
+          - os: windows-latest
+            required-solvers: SCIPY,SCIPY_DENSE,UMFPACK,QDLDL,CHOLMOD,EIGEN,PARDISO
+          - os: macos-latest
+            required-solvers: SCIPY,SCIPY_DENSE,UMFPACK,QDLDL,CHOLMOD,EIGEN,MUMPS,ACCELERATE
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -85,13 +95,19 @@ jobs:
           conda install -y -c conda-forge suitesparse scikit-umfpack nanoeigenpy
           python -m pip install 'scikit-sparse>=0.5'
           python -m pip install -U pip
-          python -m pip install qdldl pytest
+          python -m pip install qdldl pytest pytest-cov
           python -m pip install -e .[test] || python -m pip install -e .
 
-      - name: Run tests
+      - name: Run tests with coverage
         shell: bash -l {0}
+        # Coverage is reported on every leg, not gated: each installs a
+        # different subset of the optional linear solvers, so the figure
+        # differs per leg and a single threshold would move with whichever
+        # packages resolve.
+        env:
+          QTQP_REQUIRED_SOLVERS: ${{ matrix.required-solvers }}
         run: |
-          pytest
+          pytest --cov --cov-report=term-missing
 
   build-and-publish:
     if: startsWith(github.ref, 'refs/tags/')

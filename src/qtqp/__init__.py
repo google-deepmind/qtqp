@@ -76,7 +76,35 @@ _SCALAR_MAX = 1e4
 
 
 class LinearSolver(enum.Enum):
-  """Available linear solvers."""
+  """Available linear solvers.
+
+  Each member names a backend for the KKT system solved at every interior
+  point iteration. AUTO resolves from the problem data first (fully dense
+  ``p`` and ``a`` route to SCIPY_DENSE) and otherwise from the platform's
+  preference order; see the README's "Automatic selection" section. Every
+  other member is a specific backend and raises if its dependency is
+  missing. SCIPY is always available.
+
+  Example:
+    The backend changes how the Newton system is factorized, not what the
+    problem is, so the answer does not depend on the choice:
+
+    >>> import numpy as np
+    >>> import scipy.sparse as sp
+    >>> import qtqp
+    >>> a = sp.csc_matrix(
+    ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+    ... )
+    >>> b = np.array([1.0, 1.0, 0.0, 0.0])
+    >>> c = np.array([-1.0, -1.0])
+    >>> problem = qtqp.QTQP(a=a, b=b, c=c, z=0)
+    >>> auto = problem.solve(verbose=False)
+    >>> scipy_backend = problem.solve(
+    ...     verbose=False, linear_solver=qtqp.LinearSolver.SCIPY
+    ... )
+    >>> bool(np.allclose(auto.x, scipy_backend.x, atol=1e-6))
+    True
+  """
 
   AUTO = "auto"
   ACCELERATE = direct.AccelerateSolver
@@ -276,7 +304,34 @@ def _resolve_linear_solver(
 
 
 class SolutionStatus(enum.Enum):
-  """Possible statuses of the QP solution."""
+  """Possible statuses of the QP solution.
+
+  SOLVED and ALMOST_SOLVED carry a primal-dual solution in (x, y, s);
+  INFEASIBLE and UNBOUNDED carry a certificate instead; HIT_MAX_ITER,
+  FAILED and UNFINISHED carry the best iterate seen, which satisfies
+  nothing in particular.
+
+  Example:
+    A bounded LP is solved, while dropping the bounds leaves the same
+    objective unbounded below:
+
+    >>> import numpy as np
+    >>> import scipy.sparse as sp
+    >>> import qtqp
+    >>> c = np.array([-1.0, -1.0])
+    >>> bounded = sp.csc_matrix(
+    ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+    ... )
+    >>> qtqp.QTQP(
+    ...     a=bounded, b=np.array([1.0, 1.0, 0.0, 0.0]), c=c, z=0
+    ... ).solve(verbose=False).status
+    <SolutionStatus.SOLVED: 'solved'>
+    >>> unbounded = sp.csc_matrix([[-1.0, 0.0], [0.0, -1.0]])
+    >>> qtqp.QTQP(
+    ...     a=unbounded, b=np.array([0.0, 0.0]), c=c, z=0
+    ... ).solve(verbose=False).status
+    <SolutionStatus.UNBOUNDED: 'unbounded'>
+  """
 
   SOLVED = "solved"
   INFEASIBLE = "infeasible"
@@ -328,6 +383,32 @@ class EquilibrationStrategy(enum.Enum):
     sigma * tau_eq), so iterate (un)equilibration must apply 1/sigma to
     keep the recovered x/tau, y/tau, s/tau in the original scale. This
     strategy has no objective scale (gamma == 1).
+
+  Example:
+    Equilibration rescales the data the solver works on and is undone
+    before the solution is returned, so the strategy is a conditioning
+    choice rather than a modelling one:
+
+    >>> import numpy as np
+    >>> import scipy.sparse as sp
+    >>> import qtqp
+    >>> a = sp.csc_matrix(
+    ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+    ... )
+    >>> problem = qtqp.QTQP(
+    ...     a=a,
+    ...     b=np.array([1.0, 1.0, 0.0, 0.0]),
+    ...     c=np.array([-1.0, -1.0]),
+    ...     z=0,
+    ... )
+    >>> for strategy in qtqp.EquilibrationStrategy:
+    ...   solution = problem.solve(
+    ...       verbose=False, equilibration_strategy=strategy
+    ...   )
+    ...   print(strategy.value, np.round(solution.x, 6))
+    none [1. 1.]
+    ruiz [1. 1.]
+    augmented [1. 1.]
   """
 
   NONE = "none"
@@ -347,6 +428,31 @@ class Solution:
     status: SolutionStatus enum indicating the status.
     iterations: Number of completed IPM steps, excluding initialization and
       failed step attempts. Available even when statistics are not collected.
+
+  Example:
+    `stats` is empty unless the solve was asked to collect it, while
+    `iterations` is always reported:
+
+    >>> import numpy as np
+    >>> import scipy.sparse as sp
+    >>> import qtqp
+    >>> a = sp.csc_matrix(
+    ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+    ... )
+    >>> solution = qtqp.QTQP(
+    ...     a=a,
+    ...     b=np.array([1.0, 1.0, 0.0, 0.0]),
+    ...     c=np.array([-1.0, -1.0]),
+    ...     z=0,
+    ... ).solve(verbose=False)
+    >>> np.round(solution.x, 6)
+    array([1., 1.])
+    >>> solution.s.shape, solution.y.shape
+    ((4,), (4,))
+    >>> solution.stats
+    []
+    >>> solution.iterations > 0
+    True
   """
 
   x: np.ndarray
@@ -379,6 +485,26 @@ class QTQP:
     max. -(1/2) x.T @ p @ x - b.T @ y
     s.t. p @ x + a.T @ y = -c
          y[z:] >= 0
+
+  The first `z` rows of `a` are the equality rows; the rest are
+  inequalities. Build the solver once for a given (a, b, c, p, z) and call
+  `solve` on it.
+
+  Example:
+    A two-variable QP with one equality row and two inequality rows:
+
+    >>> import numpy as np
+    >>> import scipy.sparse as sp
+    >>> import qtqp
+    >>> p = sp.csc_matrix([[3.0, -1.0], [-1.0, 2.0]])
+    >>> a = sp.csc_matrix([[-1.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+    >>> b = np.array([-1.0, 0.3, -0.5])
+    >>> c = np.array([-1.0, -1.0])
+    >>> solution = qtqp.QTQP(p=p, a=a, b=b, c=c, z=1).solve(verbose=False)
+    >>> solution.status
+    <SolutionStatus.SOLVED: 'solved'>
+    >>> np.round(solution.x, 6)
+    array([ 0.3, -0.7])
   """
 
   def __init__(
@@ -398,6 +524,37 @@ class QTQP:
       c: Cost vector (n,).
       z: The number of equality constraints (zero-cone size).
       p: QP matrix in CSC format (n x n). Assumed zero if None.
+
+    Raises:
+      TypeError: If `a` or `p` is not in CSC format.
+      ValueError: If the shapes disagree, the data is not finite, `z` is
+        outside [0, m], or nothing is left to solve after presolve.
+
+    Example:
+      Omitting `p` states an LP -- the quadratic term is taken as zero:
+
+      >>> import numpy as np
+      >>> import scipy.sparse as sp
+      >>> import qtqp
+      >>> a = sp.csc_matrix(
+      ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+      ... )
+      >>> problem = qtqp.QTQP(
+      ...     a=a,
+      ...     b=np.array([1.0, 1.0, 0.0, 0.0]),
+      ...     c=np.array([-1.0, -1.0]),
+      ...     z=0,
+      ... )
+      >>> problem.m, problem.n, problem.z
+      (4, 2, 0)
+
+      The arguments are keyword-only, so a mistyped one is rejected rather
+      than silently bound to the wrong matrix:
+
+      >>> qtqp.QTQP(a, np.array([1.0]), np.array([1.0]), 0)
+      Traceback (most recent call last):
+        ...
+      TypeError: QTQP.__init__() takes 1 positional argument but 5 were given
     """
     self.m, self.n = a.shape
     self.z = z
@@ -758,7 +915,50 @@ class QTQP:
       adaptive_step_size: bool = True,
       max_centrality_correctors: int = 1,
   ) -> Solution:
-    """Solves the QP using a primal-dual interior-point method."""
+    """Solves the QP using a primal-dual interior-point method.
+
+    Every argument is keyword-only and documented on the private
+    implementation below; the defaults solve to 1e-8 on all three
+    criteria with an automatically chosen backend.
+
+    Returns:
+      A `Solution`. Check `status` before reading `x`, `y` and `s`: only
+      SOLVED and ALMOST_SOLVED return a primal-dual solution, and the
+      infeasible statuses return a certificate in the same fields.
+
+    Example:
+      A solver can be reused: each call re-solves from scratch, and
+      tightening or loosening the tolerances does not require rebuilding
+      the problem.
+
+      >>> import numpy as np
+      >>> import scipy.sparse as sp
+      >>> import qtqp
+      >>> a = sp.csc_matrix(
+      ...     [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+      ... )
+      >>> problem = qtqp.QTQP(
+      ...     a=a,
+      ...     b=np.array([1.0, 1.0, 0.0, 0.0]),
+      ...     c=np.array([-1.0, -1.0]),
+      ...     z=0,
+      ... )
+      >>> loose = problem.solve(verbose=False, tol_feas=1e-4)
+      >>> tight = problem.solve(verbose=False, tol_feas=1e-10)
+      >>> loose.status, tight.status
+      (<SolutionStatus.SOLVED: 'solved'>, <SolutionStatus.SOLVED: 'solved'>)
+
+      `collect_stats` fills `Solution.stats` with one row per iteration:
+
+      >>> detailed = problem.solve(verbose=False, collect_stats=True)
+      >>> len(detailed.stats) > 0
+      True
+
+      An iteration cap the problem cannot meet is reported, not raised:
+
+      >>> problem.solve(verbose=False, max_iter=1).status
+      <SolutionStatus.HIT_MAX_ITER: 'hit_max_iter'>
+    """
     self._linear_solver = None
     self._iterations = 0
     # Accepted warm starts skip initialization; its stats belong to this call.
