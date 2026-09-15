@@ -48,6 +48,19 @@ from . import solvers_gpu
 from . import solvers_sparse
 from .direct import RefinementStrategy
 
+# The public API, as documented in README.md. The submodules imported above
+# stay reachable as qtqp.direct, qtqp.solvers_sparse and so on; they are not
+# listed here because the README documents the backends through the
+# LinearSolver enum rather than through the classes that implement them.
+__all__ = [
+    "EquilibrationStrategy",
+    "LinearSolver",
+    "QTQP",
+    "RefinementStrategy",
+    "Solution",
+    "SolutionStatus",
+]
+
 __version__ = "0.0.7"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
