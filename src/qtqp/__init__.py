@@ -79,9 +79,11 @@ class LinearSolver(enum.Enum):
   """Available linear solvers.
 
   Each member names a backend for the KKT system solved at every interior
-  point iteration. AUTO picks the fastest backend importable on this
-  platform; every other member is a specific backend and raises if its
-  dependency is missing. SCIPY is always available.
+  point iteration. AUTO resolves from the problem data first (fully dense
+  ``p`` and ``a`` route to SCIPY_DENSE) and otherwise from the platform's
+  preference order; see the README's "Automatic selection" section. Every
+  other member is a specific backend and raises if its dependency is
+  missing. SCIPY is always available.
 
   Example:
     The backend changes how the Newton system is factorized, not what the

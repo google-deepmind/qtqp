@@ -50,10 +50,10 @@ omit = ["*/qtqp/solvers_gpu.py"]
 
 [tool.coverage.report]
 show_missing = true
-# Every CI leg installs a different subset of the optional linear solvers,
-# so the floor is what the thinnest environment reaches (macOS/Accelerate
-# only, ~88%) with room for the spread between legs.
-fail_under = 85
+# Coverage is reported, not gated: every CI leg installs a different subset
+# of the optional linear solvers, so a threshold would move with whichever
+# packages happen to resolve. test_required_solvers_are_available guards the
+# case a threshold was meant to catch (a backend silently dropping out).
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",

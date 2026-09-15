@@ -16,6 +16,7 @@
 """Tests for QTQP solver."""
 
 import importlib
+import os
 import sys
 import types
 import numpy as np
@@ -206,6 +207,18 @@ try:
     _SOLVERS.append(qtqp.LinearSolver.CUDSS)
 except Exception as e:  # pylint: disable=broad-exception-caught
   print(f'Skipping CUDSS tests: {e}')
+
+
+def test_required_solvers_are_available():
+  """A backend that CI installs must be tested, not silently dropped.
+
+  QTQP_REQUIRED_SOLVERS is set per operating system in ci.yml. Left unset
+  locally, so a partial environment sees no change.
+  """
+  names = os.environ.get('QTQP_REQUIRED_SOLVERS', '')
+  required = {qtqp.LinearSolver[n] for n in names.split(',') if n}
+  missing = required - set(_SOLVERS)
+  assert not missing, f'expected on this CI leg but unavailable: {missing}'
 
 
 def _gen_feasible(m, n, z, random_state=None):
