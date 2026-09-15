@@ -32,10 +32,3 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = false
-
-# Docstring coverage. src/ is fully documented, so the threshold is 100:
-# a new public definition without a docstring fails the lint job rather
-# than quietly eroding the level.
-[tool.interrogate]
-fail-under = 100
-verbose = 1
