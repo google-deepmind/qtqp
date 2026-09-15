@@ -334,6 +334,22 @@ class DirectKktSolver:
     self._solver.factorize()
     np.subtract(self._reg_diags, self._true_diags, out=self._diag_correction)
 
+  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+    """Applies the true (unregularized) KKT matrix to x.
+
+    The factorized matrix carries the static regularization, so the backend's
+    own matvec returns kkt_reg @ x. The true product is recovered by removing
+    the diagonal shift regularization added:
+
+      kkt_true @ x = kkt_reg @ x - diag_correction * x
+
+    This is the operator every refinement residual is measured against, and
+    the one GMRES builds its Krylov subspace from. The fused
+    `LinearSolver.solve_and_matvec` path computes the same product one term
+    at a time, so it cannot route through here.
+    """
+    return self._solver @ x - self._diag_correction * x
+
   def solve(
       self, rhs: np.ndarray, warm_start: np.ndarray
   ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -390,13 +406,10 @@ class DirectKktSolver:
 
   def _solve_richardson(self, rhs_norm, tolerance, warm_start):
     """Classical iterative refinement: preconditioned Richardson iteration."""
-    # Initial sol and residual.
-    # The true residual is kkt_rhs - kkt_true @ sol. We split the matvec as:
-    #   kkt_true @ sol = kkt_reg @ sol - diag_correction @ sol
-    # so residual = kkt_rhs - kkt_reg @ sol + diag_correction * sol.
-    # self._solver @ sol computes kkt_reg @ sol (using the factorized matrix).
+    # Initial sol and residual, measured against the true operator; see
+    # __matmul__ for why that is not the backend's own matvec.
     sol = warm_start.copy()
-    residual = self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
+    residual = self._kkt_rhs - self @ sol
     residual_norm = np.linalg.norm(residual, np.inf)
 
     # Iterative refinement loop.
@@ -469,8 +482,7 @@ class DirectKktSolver:
   def _solve_gmres(self, rhs_norm, tolerance, warm_start):
     """Restarted right-preconditioned GMRES.
 
-    Operator      A x  = self._solver @ x - self._diag_correction * x  (=
-                          kkt_true x).
+    Operator      A x  = self @ x  (= kkt_true x, see __matmul__).
     Preconditioner M^-1 x = self._solver.solve(x)  (the direct factor).
 
     Each inner Arnoldi step costs one factor-solve plus one matvec; the
@@ -482,9 +494,7 @@ class DirectKktSolver:
     solution than the warm start.
     """
     sol = warm_start.copy()
-    residual = (
-        self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
-    )
+    residual = self._kkt_rhs - self @ sol
     residual_norm = float(np.linalg.norm(residual, np.inf))
 
     best_sol = sol.copy()
@@ -508,9 +518,7 @@ class DirectKktSolver:
 
       # Recompute the exact inf-norm residual; the per-cycle running check
       # is in 2-norm.
-      residual = (
-          self._kkt_rhs - self._solver @ sol + self._diag_correction * sol
-      )
+      residual = self._kkt_rhs - self @ sol
       residual_norm = float(np.linalg.norm(residual, np.inf))
 
       if residual_norm < best_residual_norm:
