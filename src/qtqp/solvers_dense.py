@@ -144,14 +144,14 @@ class ScipyDenseSolver(LinearSolver):
     # that makes it very slightly indefinite (eigenvalue ~ -1e-8) when 1/R_y
     # spans many orders of magnitude.  A tiny relative perturbation fixes
     # this; iterative refinement (which uses the exact block matvec in
-    # __matmul__) corrects for any factorization-level perturbation.
+    # matvec) corrects for any factorization-level perturbation.
     self._G[self._diag_idx] += 1e-14 * np.max(self._G[self._diag_idx])
     np.copyto(self._chol, self._G)
     self._chol, info = self._dpotrf(self._chol, lower=True, overwrite_a=True)
     if info != 0:
       raise np.linalg.LinAlgError(f"Cholesky failed (dpotrf info={info})")
 
-  def __matmul__(self, x: np.ndarray) -> np.ndarray:
+  def matvec(self, x: np.ndarray) -> np.ndarray:
     """Note: `x` must not alias the returned buffer."""
     n = self._n
     x_x, x_y = x[:n], x[n:]

@@ -41,7 +41,19 @@ def _append_solver_if_available(linear_solver, module_name):
 
 
 class _TriangularMatvecSolver(qtqp.direct.LinearSolver):
-  """Minimal solver used only to exercise the base symmetric-triangle matvec."""
+  """Minimal solver used only to exercise the base symmetric-triangle matvec.
+
+  Records the KKT scaffold it is handed. DirectKktSolver passes the storage
+  it chose to its backend, so the backend is where a test can observe that
+  choice without reaching past the public surface.
+  """
+
+  def __init__(self):
+    self.received_kkt = None
+
+  def set_kkt(self, kkt):
+    self.received_kkt = kkt
+    super().set_kkt(kkt)
 
   def factorize(self):
     pass
@@ -829,6 +841,7 @@ def test_upper_triangular_kkt_matvec_matches_full():
   s[:z] = 0.0
   vec = rng.normal(size=n + m)
 
+  backend = _TriangularMatvecSolver()
   linear_solver = qtqp.direct.DirectKktSolver(
       a=a,
       p=p,
@@ -837,7 +850,7 @@ def test_upper_triangular_kkt_matvec_matches_full():
       max_iterative_refinement_steps=2,
       atol=1e-12,
       rtol=1e-12,
-      solver=_TriangularMatvecSolver(),
+      solver=backend,
   )
   linear_solver.update(mu=mu, s=s, y=y)
 
@@ -857,13 +870,62 @@ def test_upper_triangular_kkt_matvec_matches_full():
       dtype=np.float64,
   )
 
-  assert (linear_solver._kkt - sparse.triu(linear_solver._kkt)).nnz == 0  # pylint: disable=protected-access
+  received = backend.received_kkt
+  assert (received - sparse.triu(received)).nnz == 0
   np.testing.assert_allclose(
-      linear_solver._solver @ vec,  # pylint: disable=protected-access
-      kkt_full @ vec,
-      rtol=1e-10,
-      atol=1e-10,
+      linear_solver @ vec, kkt_full @ vec, rtol=1e-10, atol=1e-10
   )
+
+
+def test_matmul_removes_static_regularization():
+  """`solver @ x` is the true KKT product even when regularization is active.
+
+  The companion of the test above: there the static regularization was
+  inactive, so the backend's own (regularized) matvec already equaled the
+  true one. Here it is forced on, so the two differ and the diagonal
+  correction has to be removed for the identity to hold.
+  """
+  rng = np.random.default_rng(4242)
+  m, n, z = 18, 11, 3
+  a, _, _, p = _gen_feasible(m, n, z, random_state=rng)
+  mu = rng.uniform()
+  s = rng.uniform(size=m)
+  y = rng.uniform(size=m)
+  s[:z] = 0.0
+  vec = rng.normal(size=n + m)
+
+  # Far above any true diagonal entry, so every one of them is shifted.
+  min_reg = 1.0
+  linear_solver = qtqp.direct.DirectKktSolver(
+      a=a,
+      p=p,
+      z=z,
+      min_static_regularization=min_reg,
+      max_iterative_refinement_steps=2,
+      atol=1e-12,
+      rtol=1e-12,
+      solver=qtqp.LinearSolver.SCIPY.value(),
+  )
+  linear_solver.update(mu=mu, s=s, y=y)
+
+  diag_y = np.full(m, mu, dtype=np.float64)
+  diag_y[z:] = s[z:] / y[z:] + mu
+  assert np.any(p.diagonal() + mu < min_reg) or np.any(diag_y < min_reg), (
+      'regularization must be active for this test to mean anything'
+  )
+  kkt_true = sparse.bmat(
+      [
+          [p + sparse.diags(np.full(n, mu)), a.T],
+          [a, -sparse.diags(diag_y)],
+      ],
+      format='csc',
+      dtype=np.float64,
+  )
+
+  np.testing.assert_allclose(
+      linear_solver @ vec, kkt_true @ vec, rtol=1e-10, atol=1e-10
+  )
+  linear_solver.free()
 
 
 @pytest.mark.parametrize('seed', 942 + np.arange(20))
@@ -2921,10 +2983,12 @@ def test_gmres_rollback_on_stalled_refinement():
       gmres_restart=5,
   )
   solver.update(mu=mu, s=s, y=y)
-  warm = solver._solver.solve(  # pylint: disable=protected-access
-      np.concatenate([rhs[:n], -rhs[n:]])  # match _solve's RHS adjustment
-  )
-  _, stats = solver.solve(rhs=rhs, warm_start=warm)
+  # Build the very good warm start through the public surface rather than
+  # reaching for the raw factor: one refinement solve from zero already
+  # lands at the rounding floor for this system. Copy it, since a backend
+  # may hand back a buffer it reuses on the next call.
+  warm, _ = solver.solve(rhs=rhs, warm_start=np.zeros(n + m))
+  _, stats = solver.solve(rhs=rhs, warm_start=warm.copy())
   solver.free()
   # Either we converged immediately, or the returned residual is no worse
   # than what one direct factor-solve from warm_start would give.
@@ -3176,9 +3240,6 @@ def test_richardson_stall_rollback_regimes():
 
     def __getattr__(self, name):
       return getattr(self._inner, name)
-
-    def __matmul__(self, other):
-      return self._inner @ other
 
     def solve(self, rhs):
       self._solve_calls += 1
@@ -3467,8 +3528,6 @@ def test_richardson_rollback_returns_genuine_iterate_dense():
       self._calls = 0
     def __getattr__(self, name):
       return getattr(self._inner, name)
-    def __matmul__(self, other):
-      return self._inner @ other
     def solve(self, rhs):
       self._calls += 1
       out = self._inner.solve(rhs)
@@ -3490,9 +3549,7 @@ def test_richardson_rollback_returns_genuine_iterate_dense():
   # reported one (the aliasing bug produced residuals ~1e50 here).
   kkt_rhs = q.copy()
   kkt_rhs[n:] *= -1.0
-  true_res = np.linalg.norm(
-      kkt_rhs - solver._solver @ sol + solver._diag_correction * sol, np.inf
-  )
+  true_res = np.linalg.norm(kkt_rhs - solver @ sol, np.inf)
   np.testing.assert_allclose(true_res, stats["final_residual_norm"], rtol=1e-6)
 
 
