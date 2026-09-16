@@ -1985,6 +1985,12 @@ class QTQP:
 
     return max(0.0, tau_sol)
 
+  # The coefficients below are deliberately allowed to overflow or go
+  # non-finite: this is the fallback taken when the exact tau quadratic has
+  # already failed, so KKT noise can be arbitrarily large. Every path out of
+  # here is screened by an np.isfinite guard before tau_sol is returned, so
+  # the intermediate warnings report handled cases rather than defects.
+  @np.errstate(invalid="ignore", over="ignore", divide="ignore")
   def _solve_for_tau_linearized_fallback(
       self, p, kinv_r, mu, mu_target, x, y, tau_curr, tau_anchor,
   ) -> float:
@@ -2114,7 +2120,16 @@ class QTQP:
 
     # Distance-to-path diagnostics are pure stats consumers: skip the
     # per-iteration vector work entirely on the default fast path.
-    if collect_stats:
+    if collect_stats and self.z == self.m:
+      # No complementarity pairs, so mu_hat is 0 by construction and there
+      # is no central path to measure a distance from. Report both path
+      # diagnostics as absent, as lambda_init already is for this case,
+      # rather than a floored number that means nothing. This is also the
+      # one well-formed input on which the barrier metric would divide by
+      # zero: with no inequality rows h_y is mu throughout.
+      stats_i["delta_path"] = None
+      stats_i["delta_path_local"] = None
+    elif collect_stats:
       # A posteriori distance-to-path certificate. The regularized path map
       # T_mu is mu-strongly monotone, so
       #     ||u - u*(mu)|| <= ||T_mu(u)|| / mu  =: delta_path,

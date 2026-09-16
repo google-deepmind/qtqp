@@ -19,6 +19,7 @@ import importlib
 import os
 import sys
 import types
+import warnings
 import numpy as np
 import pytest
 import qtqp
@@ -4009,6 +4010,28 @@ def test_equality_only_stats_schema_matches_main_loop():
   }
   missing = base_keys - sol.stats[0].keys()
   assert not missing, f"equality stats row missing {missing}"
+
+
+def test_equality_only_path_diagnostics_are_absent():
+  """With z == m there is no central path: both path stats are None.
+
+  mu_hat is 0 by construction on an all-equality problem, so a floored
+  distance-to-path number would be an artefact. Grading the initial point
+  must also not divide by zero on the way to reporting None.
+  """
+  rng = np.random.default_rng(1961)
+  m, n = 12, 8
+  a, b, c, p = _gen_feasible(m, n, m, random_state=rng)
+  with warnings.catch_warnings():
+    warnings.simplefilter('error', RuntimeWarning)
+    sol = qtqp.QTQP(a=a, b=b, c=c, z=m, p=p).solve(
+        verbose=False, collect_stats=True
+    )
+  assert sol.status == qtqp.SolutionStatus.SOLVED
+  assert sol.iterations == 0
+  assert sol.stats[0]['delta_path'] is None
+  assert sol.stats[0]['delta_path_local'] is None
+  assert sol.stats[0]['lambda_init'] is None
 
 
 def test_semidefinite_p_equality_only_solves_on_every_backend():
