@@ -34,6 +34,45 @@ jobs:
         # reach without a GPU runner.
         run: ruff check --select E9,F src/
 
+  security:
+    name: Security (pip-audit, bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # One ubuntu leg rather than the test matrix: each test leg installs a
+      # different subset of the optional conda-forge backends, so auditing all
+      # twelve would compare twelve different dependency sets and report the
+      # same advisory up to twelve times. The pip-installable dependencies are
+      # the same on every leg, and they are the ones an advisory can reach.
+      - name: Install the package and the scanners
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e '.[test]'
+          python -m pip install pip-audit bandit
+
+      - name: Audit dependencies for known vulnerabilities
+        # pip-audit reads the resolved environment, which is where a
+        # transitive advisory shows up. Dependabot only ever sees the
+        # manifest, and only once an advisory has produced a version bump, so
+        # the two are complements rather than a duplication. The weekly cron
+        # above is what makes this useful between pull requests: an advisory
+        # published against an unchanged dependency turns the schedule red.
+        run: pip-audit
+
+      - name: Scan for risky code patterns
+        # The code-pattern half that the E9,F lint gate deliberately excludes.
+        # Gated at high severity: src/ reports twelve low findings, all B101
+        # (assert_used), and every one of them is a deliberate
+        # programming-error check on an argument the caller chose. Raising the
+        # gate to low would mean either #nosec noise or dropping the asserts.
+        run: bandit -r src/ --severity-level high
+
   test:
     name: Test (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}

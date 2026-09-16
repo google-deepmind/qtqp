@@ -36,16 +36,23 @@ partial environment still gives a useful run.
 
 ### Checks
 
-These are the same two gates CI runs, so a green run locally is a green run on
+These are the same gates CI runs, so a green run locally is a green run on
 the pull request:
 
 ```bash
 ruff check --select E9,F src/   # syntax errors, undefined names, unused imports
 pytest                          # the full suite, including doctests in src/
+pip-audit                       # known vulnerabilities in the resolved env
+bandit -r src/ --severity-level high   # risky code patterns
 ```
 
 Style rules are deliberately excluded from the lint gate; only correctness
 rules (`E9`, `F`) are enforced.
+
+`bandit` is gated at high severity. `src/` reports twelve low findings, all
+`B101` (`assert_used`), and each one is a deliberate programming-error check on
+an argument the caller chose; `pip-audit` audits whatever is installed, so run
+it from the environment you built above rather than an isolated one.
 
 To see what the suite reaches, run it with coverage:
 
