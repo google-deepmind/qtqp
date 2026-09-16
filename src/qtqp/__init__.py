@@ -1133,6 +1133,128 @@ class QTQP:
     Returns:
       A Solution object containing the solution and solve stats.
     """
+    self._validate_solve_params(
+        tol_feas=tol_feas,
+        tol_gap_abs=tol_gap_abs,
+        tol_gap_rel=tol_gap_rel,
+        tol_infeas_abs=tol_infeas_abs,
+        tol_infeas_rel=tol_infeas_rel,
+        certificate_ktratio=certificate_ktratio,
+        max_iter=max_iter,
+        step_size_scale=step_size_scale,
+        min_static_regularization=min_static_regularization,
+        max_iterative_refinement_steps=max_iterative_refinement_steps,
+        linear_solver_atol=linear_solver_atol,
+        linear_solver_rtol=linear_solver_rtol,
+        adaptive_step_size=adaptive_step_size,
+        max_centrality_correctors=max_centrality_correctors,
+    )
+    a, p, b, c = self._configure_solve(
+        tol_feas=tol_feas,
+        tol_gap_abs=tol_gap_abs,
+        tol_gap_rel=tol_gap_rel,
+        tol_infeas_abs=tol_infeas_abs,
+        tol_infeas_rel=tol_infeas_rel,
+        certificate_ktratio=certificate_ktratio,
+        verbose=verbose,
+        equilibration_strategy=equilibration_strategy,
+        linear_solver=linear_solver,
+        min_static_regularization=min_static_regularization,
+        max_iterative_refinement_steps=max_iterative_refinement_steps,
+        linear_solver_atol=linear_solver_atol,
+        linear_solver_rtol=linear_solver_rtol,
+        refinement_strategy=refinement_strategy,
+        gmres_restart=gmres_restart,
+    )
+
+    stats = []
+    self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
+    self._best_almost_score = math.inf
+    self._best_almost_iterate = None
+
+    initial = self._initial_point(
+        a, p, b, c, warm_start=warm_start,
+        warm_start_threshold=warm_start_threshold,
+    )
+    if initial is None:
+      # The cold initialization broke down numerically and left no iterate
+      # to salvage, so there is nothing to grade or to iterate on.
+      y, s = self._postsolve(
+          np.full(self.m, np.nan), np.full(self.m, np.nan),
+          y_dropped=np.nan, s_dropped=np.nan,
+      )
+      return Solution(
+          np.full(self.n, np.nan), y, s, stats, SolutionStatus.FAILED,
+          iterations=self._iterations,
+      )
+    x, y, s, tau = initial
+
+    self._log_header()
+
+    # Grade the initial point before the first step, as Clarabel does: an
+    # exact initialization - every all-equality problem, since the
+    # initialization solves that KKT system - or an accepted warm start can
+    # already meet the criteria. With no complementarity pairs (z == m)
+    # there is nothing to iterate on, so that point is the answer either
+    # way; otherwise the loop below takes over from it.
+    self.it = 0
+    stats_i = {
+        "lambda_init": self.lambda_init,
+        "q_lin_sys_stats": getattr(self, "_init_lin_stats", None) or {},
+        "predictor_lin_sys_stats": {},
+        "corrector_lin_sys_stats": {},
+    }
+    x, y, tau, s = self._normalize(x, y, tau, s)
+    status = self._check_termination(
+        x, y, tau, s, 0.0, 0.0, 0.0, stats_i, collect_stats
+    )
+    run_loop = status is SolutionStatus.UNFINISHED and self.z < self.m
+    if not run_loop:
+      self._log_iteration(stats_i)
+      if collect_stats:
+        stats.append(stats_i)
+
+    status, x, y, tau, s = self._run_ipm_loop(
+        p=p,
+        x=x,
+        y=y,
+        tau=tau,
+        s=s,
+        status=status,
+        run_loop=run_loop,
+        max_iter=max_iter,
+        step_size_scale=step_size_scale,
+        collect_stats=collect_stats,
+        stats=stats,
+    )
+    return self._finalize_solution(status, x, y, tau, s, stats)
+
+  def _validate_solve_params(
+      self,
+      *,
+      tol_feas,
+      tol_gap_abs,
+      tol_gap_rel,
+      tol_infeas_abs,
+      tol_infeas_rel,
+      certificate_ktratio,
+      max_iter,
+      step_size_scale,
+      min_static_regularization,
+      max_iterative_refinement_steps,
+      linear_solver_atol,
+      linear_solver_rtol,
+      adaptive_step_size,
+      max_centrality_correctors,
+  ) -> None:
+    """Check solve()'s numeric arguments and record the step-size policy.
+
+    Every bound here is a programming-error check on a value the caller
+    chose, so they stay asserts. max_centrality_correctors is the one
+    exception: 0 is a meaningful setting (correctors disabled) and a
+    negative count is a plausible mistake rather than an impossible one,
+    so it raises ValueError and reaches the caller under -O as well.
+    """
     assert tol_feas >= 0
     assert tol_gap_abs >= 0
     assert tol_gap_rel >= 0
@@ -1150,6 +1272,32 @@ class QTQP:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
 
+  def _configure_solve(
+      self,
+      *,
+      tol_feas,
+      tol_gap_abs,
+      tol_gap_rel,
+      tol_infeas_abs,
+      tol_infeas_rel,
+      certificate_ktratio,
+      verbose,
+      equilibration_strategy,
+      linear_solver,
+      min_static_regularization,
+      max_iterative_refinement_steps,
+      linear_solver_atol,
+      linear_solver_rtol,
+      refinement_strategy,
+      gmres_restart,
+  ):
+    """Record this run's settings, equilibrate, and build the KKT solver.
+
+    Returns the operating-scale (a, p, b, c): the equilibrated data when
+    equilibration is on, the original data otherwise. Everything else it
+    produces is stored on self, because the iteration, the termination
+    check and the unequilibration on the way out all read it from there.
+    """
     self.start_time = timeit.default_timer()
     self.tol_feas = tol_feas
     self.tol_gap_abs, self.tol_gap_rel = tol_gap_abs, tol_gap_rel
@@ -1213,58 +1361,74 @@ class QTQP:
         refinement_strategy=refinement_strategy,
         gmres_restart=gmres_restart,
     )
+    return a, p, b, c
 
-    stats = []
-    self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
-    self._best_almost_score = math.inf
-    self._best_almost_iterate = None
-    status = SolutionStatus.UNFINISHED
+  def _screen_warm_start(self, a, p, b, c, warm_start, warm_start_threshold):
+    """Score four interior embeddings of a warm start and pick the best.
 
-    # Empirical warm-start screen: try four interior embeddings and accept
-    # the smallest guarded local residual score below the threshold.
-    # Rejection falls back to cold initialization; acceptance guarantees
-    # neither proximity to the path nor fewer iterations than a cold solve.
+    Empirical warm-start screen: try four interior embeddings and accept
+    the smallest guarded local residual score below the threshold.
+    Rejection falls back to cold initialization; acceptance guarantees
+    neither proximity to the path nor fewer iterations than a cold solve.
+
+    Returns the accepted (x, y, s, tau) in the operating scale, or None
+    when no warm start was given, screening was skipped, or every
+    candidate scored above the threshold. warm_lambda and warm_accepted
+    are set either way.
+    """
     self.warm_lambda = None
     self.warm_accepted = False
     validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
-    if validated_warm is not None and self.z < self.m:
+    if validated_warm is None or self.z == self.m:
       # (An all-equality problem is solved by the initialization; a warm
       # start has nothing to improve there.)
-      wx, wy, ws = validated_warm
-      if self.equilibration_strategy is not EquilibrationStrategy.NONE:
-        wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
-      # Only y and s are shifted. Every candidate's x is the same wx times
-      # its radial normalization scale, so share these primal products.
-      awx, pwx = a @ wx, p @ wx
-      best = (math.inf, None)
-      for eta in (1e-6, 1e-4, 1e-2, 1.0):
-        cx = wx.copy()
-        cy = wy.copy()
-        cs = ws.copy()
-        cy[self.z :] = np.maximum(cy[self.z :], eta)
-        cs[self.z :] = np.maximum(cs[self.z :], eta)
-        cs[: self.z] = 0.0
-        ctau = 1.0
-        cx, cy, ctau, cs = self._normalize(cx, cy, ctau, cs)
-        # The pre-normalization tau is one, so ctau is exactly the scale
-        # applied to wx. Only A.T@cy needs a fresh matvec for this shift.
-        lam = self._lambda_local(
-            cx, cy, cs, ctau, a, p, b, c, ax=ctau * awx, px=ctau * pwx
-        )
-        if lam < best[0]:
-          best = (lam, (cx, cy, cs, ctau))
-      del awx, pwx  # Screening products are not needed by the IPM loop.
-      self.warm_lambda = best[0]
-      if best[0] <= warm_start_threshold:
-        cx, cy, cs, ctau = best[1]
-        self.warm_accepted = True
-      logging.debug(
-          "warm start: lambda = %e, accepted = %s",
-          self.warm_lambda, self.warm_accepted,
+      return None
+    wx, wy, ws = validated_warm
+    if self.equilibration_strategy is not EquilibrationStrategy.NONE:
+      wx, wy, ws = self._equilibrate_iterates(wx, wy, ws)
+    # Only y and s are shifted. Every candidate's x is the same wx times
+    # its radial normalization scale, so share these primal products.
+    awx, pwx = a @ wx, p @ wx
+    best = (math.inf, None)
+    for eta in (1e-6, 1e-4, 1e-2, 1.0):
+      cx = wx.copy()
+      cy = wy.copy()
+      cs = ws.copy()
+      cy[self.z :] = np.maximum(cy[self.z :], eta)
+      cs[self.z :] = np.maximum(cs[self.z :], eta)
+      cs[: self.z] = 0.0
+      ctau = 1.0
+      cx, cy, ctau, cs = self._normalize(cx, cy, ctau, cs)
+      # The pre-normalization tau is one, so ctau is exactly the scale
+      # applied to wx. Only A.T@cy needs a fresh matvec for this shift.
+      lam = self._lambda_local(
+          cx, cy, cs, ctau, a, p, b, c, ax=ctau * awx, px=ctau * pwx
       )
+      if lam < best[0]:
+        best = (lam, (cx, cy, cs, ctau))
+    del awx, pwx  # Screening products are not needed by the IPM loop.
+    self.warm_lambda = best[0]
+    accepted = best[0] <= warm_start_threshold
+    self.warm_accepted = accepted
+    logging.debug(
+        "warm start: lambda = %e, accepted = %s",
+        self.warm_lambda, self.warm_accepted,
+    )
+    return best[1] if accepted else None
 
-    if self.warm_accepted:
-      x, y, s, tau = cx, cy, cs, ctau
+  def _initial_point(self, a, p, b, c, *, warm_start, warm_start_threshold):
+    """Produce the starting iterate and record its lambda_init diagnostic.
+
+    Screens the warm start first; a rejected or absent one falls through to
+    the cold initialization. Returns (x, y, s, tau) in the operating scale,
+    or None when the cold initialization breaks down numerically -- the one
+    failure with no iterate to salvage, which solve() reports as FAILED.
+    """
+    warm_point = self._screen_warm_start(
+        a, p, b, c, warm_start, warm_start_threshold
+    )
+    if warm_point is not None:
+      x, y, s, tau = warm_point
     else:
       # Cold start: the initialization factorization and solves run only
       # when no warm start was given or screening vetoed it. An accepted
@@ -1280,14 +1444,7 @@ class QTQP:
       except (ArithmeticError, np.linalg.LinAlgError, RuntimeError) as exc:
         logging.warning("Numeric failure during initialization: %s", exc)
         self._log_footer("Failed to initialize")
-        y, s = self._postsolve(
-            np.full(self.m, np.nan), np.full(self.m, np.nan),
-            y_dropped=np.nan, s_dropped=np.nan,
-        )
-        return Solution(
-            np.full(self.n, np.nan), y, s, stats, SolutionStatus.FAILED,
-            iterations=self._iterations,
-        )
+        return None
 
     # The accepted candidate has already been scored at this exact point.
     # Cold starts need their own initial diagnostic; equality-only problems
@@ -1299,39 +1456,37 @@ class QTQP:
           self._lambda_local(x, y, s, tau, a, p, b, c)
           if self.z < self.m else None
       )
+    return x, y, s, tau
 
-    self._log_header()
+  def _run_ipm_loop(
+      self,
+      *,
+      p,
+      x,
+      y,
+      tau,
+      s,
+      status,
+      run_loop,
+      max_iter,
+      step_size_scale,
+      collect_stats,
+      stats,
+  ):
+    """Run the predictor-corrector iteration until it terminates.
 
-    # Grade the initial point before the first step, as Clarabel does: an
-    # exact initialization - every all-equality problem, since the
-    # initialization solves that KKT system - or an accepted warm start can
-    # already meet the criteria. With no complementarity pairs (z == m)
-    # there is nothing to iterate on, so that point is the answer either
-    # way; otherwise the loop below takes over from it.
-    self.it = 0
-    stats_i = {
-        "lambda_init": self.lambda_init,
-        "q_lin_sys_stats": getattr(self, "_init_lin_stats", None) or {},
-        "predictor_lin_sys_stats": {},
-        "corrector_lin_sys_stats": {},
-    }
-    x, y, tau, s = self._normalize(x, y, tau, s)
-    status = self._check_termination(
-        x, y, tau, s, 0.0, 0.0, 0.0, stats_i, collect_stats
-    )
-    run_loop = status is SolutionStatus.UNFINISHED and self.z < self.m
-    if not run_loop:
-      self._log_iteration(stats_i)
-      if collect_stats:
-        stats.append(stats_i)
-
+    `status` is the verdict already reached on the initial point, and is
+    returned unchanged when `run_loop` is False -- an all-equality problem,
+    or an initial point that already met the criteria, never enters the
+    loop. Returns (status, x, y, tau, s); x, y and s are updated in place
+    as well, but tau is a float and only the returned one is current.
+    """
     # Pre-allocate [x; y] and d_s to avoid repeated allocation each iteration.
     xy = np.empty(self.n + self.m)   # Combined primal-dual vector [x; y]
     d_s = np.zeros(self.m)           # Slack step direction; d_s[:z] is always 0
 
     alpha = sigma = 0.0
 
-    # --- Main Iteration Loop ---
     # Numeric failures inside the iteration (singular KKT systems,
     # NaN propagation, degenerate tau equations) are converted to a
     # FAILED status carrying the best iterate seen, per the documented
@@ -1348,180 +1503,14 @@ class QTQP:
 
         mu = max((y @ s) / (self.m - self.z), _MU_FLOOR)
 
-        # --- Take an IPM step ---
-        self._linear_solver.update(mu=mu, s=s, y=y)
-
-        # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
-        # This is reused for both predictor and corrector parts of the step.
-        self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
-            rhs=self.q, warm_start=self.kinv_q
+        d_x, d_y, d_tau, d_s, alpha, sigma = self._search_direction(
+            p=p, mu=mu, x=x, y=y, tau=tau, s=s, xy=xy, d_s=d_s,
+            stats_i=stats_i,
         )
-        stats_i["q_lin_sys_stats"] = q_lin_sys_stats
-        # The data column and leading tau coefficient are invariant across
-        # the predictor, corrector, and any Gondzio trials on this factor.
-        tau_data = self._tau_invariants(p, mu)
-
-        # --- Step 2: Predictor (Affine) Step ---
-        # Solve KKT with mu_target = 0 to find pure Newton direction.
-        xy[: self.n] = x
-        xy[self.n :] = y
-        x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
-            p=p,
-            mu=mu,
-            mu_target=0.0,
-            r_anchor=xy,
-            tau_anchor=tau,
-            x=x,
-            y=y,
-            s=s,
-            tau=tau,
-            correction=None,
-            tau_data=tau_data,
+        x, y, tau, s = self._apply_step(
+            x=x, y=y, tau=tau, s=s, d_x=d_x, d_y=d_y, d_tau=d_tau, d_s=d_s,
+            alpha=alpha, mu=mu, step_size_scale=step_size_scale,
         )
-        stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
-
-        d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
-        # Predictor slack step from the linearized complementarity condition with
-        # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
-        d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
-
-        # The Mehrotra cross term in un-divided form; consumed by the
-        # corrector RHS and by the fused slack update below.
-        cross_p = d_s[self.z :] * d_y_p[self.z :]
-
-        # Compute predictor step size and resulting centering parameter (sigma)
-        alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
-        sigma = self._compute_sigma(
-            mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
-        )
-
-        # --- Step 3: Corrector Step ---
-        # Mehrotra's second-order correction accounts for the nonlinear cross-term
-        # that the predictor's linear approximation ignores. Expanding the full
-        # complementarity condition to second order:
-        #   (y + d_y)(s + d_s) = sigma*mu
-        #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
-        # The predictor solved the linearized version (dropping d_y*d_s). Here we
-        # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
-        # (divided by y because the KKT complementarity block is scaled by 1/y),
-        # so the corrector step can incorporate it to land closer to the target.
-        correction = -cross_p / y[self.z :]
-        xy[: self.n] = x_p
-        xy[self.n :] = y_p
-        x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
-            p=p,
-            mu=mu,
-            mu_target=sigma * mu,
-            r_anchor=xy,
-            tau_anchor=tau_p,
-            x=x,
-            y=y,
-            s=s,
-            tau=tau,
-            correction=correction,
-            tau_data=tau_data,
-        )
-        stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
-
-        # --- Step 4: Update Iterates ---
-        d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
-        # Combined-numerator corrector slack step: assemble the numerator
-        # before the single division by y[z:], avoiding catastrophic
-        # cancellation when y_i is small and the three terms have similar
-        # magnitudes with opposing signs — the regime the adaptive endgame
-        # deliberately operates in (boundary margins ~1e-4). The legacy
-        # three-division form (sigma*mu/y + correction - y_c*s/y) rounds
-        # each quotient before the cancellation, amplifying the error by
-        # 1/y_i; at corpus scale the two are indistinguishable, but the
-        # fused form is correct by construction and occasionally prevents
-        # corrector directions that instantly exit the cone.
-        d_s[self.z :] = (
-            sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
-        ) / y[self.z :]
-
-        alpha = self._compute_step_size(y, s, d_y, d_s)
-        # --- Gondzio multiple centrality correctors ---
-        # Each extra corrector costs one back-solve on the existing
-        # factorization (kinv_q is shared): push the aspirational trial
-        # point's outlier complementarity products back into a symmetric
-        # neighborhood of the target, accept only if the step size improves.
-        mu_c = sigma * mu
-        # Undivided running correction numerator: starts at the Mehrotra
-        # cross term and accumulates each ACCEPTED corrector's target
-        # shift, so the fused slack update and the Newton RHS stay
-        # consistent when more than one corrector is accepted.
-        corr_num = -cross_p
-        latest_tau_method = corrector_lin_sys_stats.get("tau_method")
-        for _ in range(self._max_centrality_correctors):
-          if alpha >= 0.9:
-            break  # step already good; a corrector cannot pay for itself
-          if latest_tau_method != "quadratic":
-            break  # tau solve degraded; do not stack correctors on it
-          alpha_asp = min(1.0, 1.5 * alpha + 0.3)
-          v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
-              s[self.z :] + alpha_asp * d_s[self.z :]
-          )
-          target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
-          if np.array_equal(target, v):
-            break
-          corr_num_g = corr_num + (target - v)
-          correction_g = corr_num_g / y[self.z :]
-          xy[: self.n] = x_p
-          xy[self.n :] = y_p
-          x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
-              p=p,
-              mu=mu,
-              mu_target=mu_c,
-              r_anchor=xy,
-              tau_anchor=tau_p,
-              x=x,
-              y=y,
-              s=s,
-              tau=tau,
-              correction=correction_g,
-              tau_data=tau_data,
-          )
-          d_s_g = np.zeros_like(d_s)
-          # Single-division form, matching the primary corrector.
-          d_s_g[self.z :] = (
-              mu_c + corr_num_g - y_g[self.z :] * s[self.z :]
-          ) / y[self.z :]
-          d_y_g = y_g - y
-          alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
-          if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
-            break
-          stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
-          latest_tau_method = gondzio_lin_sys_stats.get("tau_method")
-          d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
-          d_s = d_s_g
-          correction = correction_g
-          corr_num = corr_num_g
-          alpha = alpha_g
-
-        scale_eff = step_size_scale
-        if self._adaptive_step_size and mu < 1e-3:
-          # Fraction-to-boundary schedule, engaged only in the endgame
-          # (mu < 1e-3): approach 1 as mu -> 0 to unlock the superlinear
-          # tail; step_size_scale is the floor and 0.9999 the
-          # strict-interiority cap (the swept constant; it buys the
-          # deep-contraction rescues on the pinned-residual class).
-          # Known limitation: on UNEQUILIBRATED z=0 problems the same
-          # component can block on consecutive iterations and compound
-          # (s/y ratios reach 1e40), degrading the exit to
-          # ALMOST_SOLVED. Equilibration (the default) prevents it; set
-          # adaptive_step_size=False if solving unequilibrated.
-          scale_eff = min(0.9999, max(step_size_scale, 1.0 - 10.0 * mu))
-        step = scale_eff * alpha
-        x += step * d_x
-        y += step * d_y
-        tau += step * d_tau
-        s += step * d_s
-
-        # Ensure variables stay strictly in the cone to prevent numerical issues.
-        y[self.z :] = np.maximum(y[self.z :], 1e-30)
-        s[self.z :] = np.maximum(s[self.z :], 1e-30)
-        tau = max(tau, 1e-30)
-        self._iterations += 1
 
         status = self._check_termination(
             x, y, tau, s, alpha, mu, sigma, stats_i, collect_stats
@@ -1544,7 +1533,263 @@ class QTQP:
       if collect_stats and stats:
         stats[-1]["status"] = SolutionStatus.FAILED
 
-    # We have terminated for one reason or another.
+    return status, x, y, tau, s
+
+  def _search_direction(self, *, p, mu, x, y, tau, s, xy, d_s, stats_i):
+    """Compute one iteration's step direction and the step size it allows.
+
+    Refreshes the factorization at `mu`, then takes the affine predictor,
+    Mehrotra's second-order corrector and any Gondzio centrality correctors
+    that pay for themselves. Returns (d_x, d_y, d_tau, d_s, alpha, sigma);
+    the returned d_s is the caller's preallocated array unless a Gondzio
+    corrector replaced it. `xy` and `stats_i` are written in place.
+    """
+    self._linear_solver.update(mu=mu, s=s, y=y)
+
+    # --- Step 1: Precompute kinv_q = K^{-1} @ q ---
+    # This is reused for both predictor and corrector parts of the step.
+    self.kinv_q, q_lin_sys_stats = self._linear_solver.solve(
+        rhs=self.q, warm_start=self.kinv_q
+    )
+    stats_i["q_lin_sys_stats"] = q_lin_sys_stats
+    # The data column and leading tau coefficient are invariant across
+    # the predictor, corrector, and any Gondzio trials on this factor.
+    tau_data = self._tau_invariants(p, mu)
+
+    # --- Step 2: Predictor (Affine) Step ---
+    # Solve KKT with mu_target = 0 to find pure Newton direction.
+    xy[: self.n] = x
+    xy[self.n :] = y
+    x_p, y_p, tau_p, predictor_lin_sys_stats = self._newton_step(
+        p=p,
+        mu=mu,
+        mu_target=0.0,
+        r_anchor=xy,
+        tau_anchor=tau,
+        x=x,
+        y=y,
+        s=s,
+        tau=tau,
+        correction=None,
+        tau_data=tau_data,
+    )
+    stats_i["predictor_lin_sys_stats"] = predictor_lin_sys_stats
+
+    d_x_p, d_y_p, d_tau_p = x_p - x, y_p - y, tau_p - tau
+    # Predictor slack step from the linearized complementarity condition with
+    # target=0: (y + d_y)(s + d_s) ≈ 0 => d_s = -(y + d_y)*s/y = -y_p*s/y.
+    d_s[self.z :] = -y_p[self.z :] * s[self.z :] / y[self.z :]
+
+    # The Mehrotra cross term in un-divided form; consumed by the
+    # corrector RHS and by the fused slack update below.
+    cross_p = d_s[self.z :] * d_y_p[self.z :]
+
+    # Compute predictor step size and resulting centering parameter (sigma)
+    alpha_p = self._compute_step_size(y, s, d_y_p, d_s)
+    sigma = self._compute_sigma(
+        mu, x, y, tau, s, alpha_p, d_x_p, d_y_p, d_tau_p, d_s
+    )
+
+    # --- Step 3: Corrector Step ---
+    # Mehrotra's second-order correction accounts for the nonlinear cross-term
+    # that the predictor's linear approximation ignores. Expanding the full
+    # complementarity condition to second order:
+    #   (y + d_y)(s + d_s) = sigma*mu
+    #   => y*d_s + s*d_y + d_y*d_s = sigma*mu - y*s
+    # The predictor solved the linearized version (dropping d_y*d_s). Here we
+    # feed the predictor's cross-term d_y_p*d_s_p back into the corrector RHS
+    # (divided by y because the KKT complementarity block is scaled by 1/y),
+    # so the corrector step can incorporate it to land closer to the target.
+    correction = -cross_p / y[self.z :]
+    xy[: self.n] = x_p
+    xy[self.n :] = y_p
+    x_c, y_c, tau_c, corrector_lin_sys_stats = self._newton_step(
+        p=p,
+        mu=mu,
+        mu_target=sigma * mu,
+        r_anchor=xy,
+        tau_anchor=tau_p,
+        x=x,
+        y=y,
+        s=s,
+        tau=tau,
+        correction=correction,
+        tau_data=tau_data,
+    )
+    stats_i["corrector_lin_sys_stats"] = corrector_lin_sys_stats
+
+    # --- Step 4: Update Iterates ---
+    d_x, d_y, d_tau = x_c - x, y_c - y, tau_c - tau
+    # Combined-numerator corrector slack step: assemble the numerator
+    # before the single division by y[z:], avoiding catastrophic
+    # cancellation when y_i is small and the three terms have similar
+    # magnitudes with opposing signs — the regime the adaptive endgame
+    # deliberately operates in (boundary margins ~1e-4). The legacy
+    # three-division form (sigma*mu/y + correction - y_c*s/y) rounds
+    # each quotient before the cancellation, amplifying the error by
+    # 1/y_i; at corpus scale the two are indistinguishable, but the
+    # fused form is correct by construction and occasionally prevents
+    # corrector directions that instantly exit the cone.
+    d_s[self.z :] = (
+        sigma * mu - cross_p - y_c[self.z :] * s[self.z :]
+    ) / y[self.z :]
+
+    alpha = self._compute_step_size(y, s, d_y, d_s)
+    d_x, d_y, d_tau, d_s, alpha = self._gondzio_correctors(
+        p=p,
+        mu=mu,
+        sigma=sigma,
+        cross_p=cross_p,
+        x=x,
+        y=y,
+        tau=tau,
+        s=s,
+        x_p=x_p,
+        y_p=y_p,
+        tau_p=tau_p,
+        d_x=d_x,
+        d_y=d_y,
+        d_tau=d_tau,
+        d_s=d_s,
+        alpha=alpha,
+        tau_data=tau_data,
+        xy=xy,
+        corrector_lin_sys_stats=corrector_lin_sys_stats,
+        stats_i=stats_i,
+    )
+    return d_x, d_y, d_tau, d_s, alpha, sigma
+
+  def _gondzio_correctors(
+      self,
+      *,
+      p,
+      mu,
+      sigma,
+      cross_p,
+      x,
+      y,
+      tau,
+      s,
+      x_p,
+      y_p,
+      tau_p,
+      d_x,
+      d_y,
+      d_tau,
+      d_s,
+      alpha,
+      tau_data,
+      xy,
+      corrector_lin_sys_stats,
+      stats_i,
+  ):
+    """Try extra centrality correctors on the corrector's direction.
+
+    Each trial costs one back-solve on the existing factorization, so it is
+    accepted only when it buys a materially longer step. Returns the best
+    (d_x, d_y, d_tau, d_s, alpha) found, which is the corrector's own
+    direction unchanged when no trial is accepted.
+    """
+    # Each extra corrector costs one back-solve on the existing
+    # factorization (kinv_q is shared): push the aspirational trial
+    # point's outlier complementarity products back into a symmetric
+    # neighborhood of the target, accept only if the step size improves.
+    mu_c = sigma * mu
+    # Undivided running correction numerator: starts at the Mehrotra
+    # cross term and accumulates each ACCEPTED corrector's target
+    # shift, so the fused slack update and the Newton RHS stay
+    # consistent when more than one corrector is accepted.
+    corr_num = -cross_p
+    latest_tau_method = corrector_lin_sys_stats.get("tau_method")
+    for _ in range(self._max_centrality_correctors):
+      if alpha >= 0.9:
+        break  # step already good; a corrector cannot pay for itself
+      if latest_tau_method != "quadratic":
+        break  # tau solve degraded; do not stack correctors on it
+      alpha_asp = min(1.0, 1.5 * alpha + 0.3)
+      v = (y[self.z :] + alpha_asp * d_y[self.z :]) * (
+          s[self.z :] + alpha_asp * d_s[self.z :]
+      )
+      target = np.clip(v, 0.1 * mu_c, 10.0 * mu_c)
+      if np.array_equal(target, v):
+        break
+      corr_num_g = corr_num + (target - v)
+      correction_g = corr_num_g / y[self.z :]
+      xy[: self.n] = x_p
+      xy[self.n :] = y_p
+      x_g, y_g, tau_g, gondzio_lin_sys_stats = self._newton_step(
+          p=p,
+          mu=mu,
+          mu_target=mu_c,
+          r_anchor=xy,
+          tau_anchor=tau_p,
+          x=x,
+          y=y,
+          s=s,
+          tau=tau,
+          correction=correction_g,
+          tau_data=tau_data,
+      )
+      d_s_g = np.zeros_like(d_s)
+      # Single-division form, matching the primary corrector.
+      d_s_g[self.z :] = (
+          mu_c + corr_num_g - y_g[self.z :] * s[self.z :]
+      ) / y[self.z :]
+      d_y_g = y_g - y
+      alpha_g = self._compute_step_size(y, s, d_y_g, d_s_g)
+      if alpha_g <= alpha + 0.1 * (alpha_asp - alpha):
+        break
+      stats_i["gondzio_lin_sys_stats"] = gondzio_lin_sys_stats
+      latest_tau_method = gondzio_lin_sys_stats.get("tau_method")
+      d_x, d_y, d_tau = x_g - x, d_y_g, tau_g - tau
+      d_s = d_s_g
+      corr_num = corr_num_g
+      alpha = alpha_g
+
+    return d_x, d_y, d_tau, d_s, alpha
+
+  def _apply_step(
+      self, *, x, y, tau, s, d_x, d_y, d_tau, d_s, alpha, mu,
+      step_size_scale,
+  ):
+    """Advance the iterate along the direction and clamp it into the cone.
+
+    Operates in place on the iterate arrays and returns them along with the
+    updated tau, which is a float, in the same style as _normalize.
+    """
+    scale_eff = step_size_scale
+    if self._adaptive_step_size and mu < 1e-3:
+      # Fraction-to-boundary schedule, engaged only in the endgame
+      # (mu < 1e-3): approach 1 as mu -> 0 to unlock the superlinear
+      # tail; step_size_scale is the floor and 0.9999 the
+      # strict-interiority cap (the swept constant; it buys the
+      # deep-contraction rescues on the pinned-residual class).
+      # Known limitation: on UNEQUILIBRATED z=0 problems the same
+      # component can block on consecutive iterations and compound
+      # (s/y ratios reach 1e40), degrading the exit to
+      # ALMOST_SOLVED. Equilibration (the default) prevents it; set
+      # adaptive_step_size=False if solving unequilibrated.
+      scale_eff = min(0.9999, max(step_size_scale, 1.0 - 10.0 * mu))
+    step = scale_eff * alpha
+    x += step * d_x
+    y += step * d_y
+    tau += step * d_tau
+    s += step * d_s
+
+    # Ensure variables stay strictly in the cone to prevent numerical issues.
+    y[self.z :] = np.maximum(y[self.z :], 1e-30)
+    s[self.z :] = np.maximum(s[self.z :], 1e-30)
+    tau = max(tau, 1e-30)
+    self._iterations += 1
+    return x, y, tau, s
+
+  def _finalize_solution(self, status, x, y, tau, s, stats):
+    """Turn the terminated iterate into the Solution for `status`.
+
+    Unequilibrates, undoes the homogeneous embedding by dividing through
+    by tau, and restores the presolved rows. HIT_MAX_ITER and UNFINISHED
+    share a branch because both get the best-iterate salvage first.
+    """
     if self.equilibration_strategy is not EquilibrationStrategy.NONE:
       x, y, s = self._unequilibrate_iterates(x, y, s)
     match status:
@@ -2118,6 +2363,123 @@ class QTQP:
     dres = _norm(px_plus_aty * inv_tau + self.c)
     gap = abs((ctx + bty + xpx * inv_tau) * inv_tau)
 
+    self._path_diagnostics(
+        collect_stats=collect_stats,
+        stats_i=stats_i,
+        x_w=x_w,
+        y_w=y_w,
+        tau=tau,
+        mu_hat=mu_hat,
+        ax=ax,
+        aty=aty,
+        px=px,
+        ctx=ctx,
+        bty=bty,
+        xpx=xpx,
+    )
+
+    # Clarabel's termination criteria, evaluated on the returned point
+    # (x, y, s) / tau: 2-norm residuals over max(1, data inf-norm + iterate
+    # 2-norms), and a duality gap that may pass absolutely or relatively.
+    norm_x = _norm(x) * inv_tau
+    norm_y = _norm(y) * inv_tau
+    norm_s = _norm(s) * inv_tau
+    prelrhs = max(1.0, self._norm_b + norm_x + norm_s)
+    drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
+    res_primal = pres / prelrhs
+    res_dual = dres / drelrhs
+    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
+
+    # Certificate quality: Clarabel's infeasibility residuals, violations
+    # over max(1, ||ray||), evaluated on the ray scaled to unit slope
+    # (b'y = -1, c'x = -1), which is the certificate actually returned.
+    # Clarabel's floor at 1 makes the test scale-dependent, so it has to
+    # be evaluated at one definite scale; on the unit-slope ray it reads
+    # violations / max(|slope|, ||ray||) in the homogeneous frame.
+    norm_x_h = _norm(x)
+    norm_y_h = _norm(y)
+    norm_s_h = _norm(s)
+    pinfeas = _norm(aty) / max(abs(bty), norm_y_h, _EPS)
+    dinfeas_a = _norm(ax_plus_s) / max(abs(ctx), norm_x_h + norm_s_h, _EPS)
+    dinfeas_p = _norm(px) / max(abs(ctx), norm_x_h, _EPS)
+    dinfeas = max(dinfeas_a, dinfeas_p)
+
+    status, on_solution_side, ktratio = self._classify_status(
+        yts_work=yts_work,
+        tau=tau,
+        res_primal=res_primal,
+        res_dual=res_dual,
+        gap=gap,
+        gap_rel=gap_rel,
+        bty=bty,
+        ctx=ctx,
+        pinfeas=pinfeas,
+        dinfeas=dinfeas,
+    )
+
+
+    # Best iterate for the ALMOST_SOLVED salvage: the same criteria at the
+    # reduced tolerances, scored by the largest ratio to its bar (the gap
+    # takes the better of its absolute and relative ratios).
+    almost_score = max(
+        res_primal / _REDUCED_TOL_FEAS,
+        res_dual / _REDUCED_TOL_FEAS,
+        min(gap / _REDUCED_TOL_GAP_ABS, gap_rel / _REDUCED_TOL_GAP_REL),
+    )
+    new_best_almost = (
+        on_solution_side and almost_score < self._best_almost_score
+    )
+    if new_best_almost:
+      self._best_almost_score = almost_score
+      self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
+
+    stats_i.update({
+        "iter": self.it,
+        "iterations": self._iterations,
+        "ctx": ctx,
+        "bty": bty,
+        "pcost": pcost,
+        "dcost": dcost,
+        "pres": pres,
+        "dres": dres,
+        "gap": gap,
+        "pinfeas": pinfeas,
+        "dinfeas": dinfeas,
+        "dinfeas_a": dinfeas_a,
+        "dinfeas_p": dinfeas_p,
+        "mu": float(y @ s) / max(self.m - self.z, 1),
+        "sigma": sigma,
+        "alpha": alpha,
+        "tau": tau,
+        "norm_x": norm_x,
+        "norm_y": norm_y,
+        "status": status,
+        "time": timeit.default_timer() - self.start_time,
+        "prelrhs": prelrhs,
+        "drelrhs": drelrhs,
+        "res_primal": res_primal,
+        "res_dual": res_dual,
+        "gap_rel": gap_rel,
+        "ktratio": ktratio,
+    })
+
+    self._collect_iterate_stats(
+        collect_stats=collect_stats, stats_i=stats_i, y=y, s=s,
+        inv_tau=inv_tau,
+    )
+
+    return status
+
+  def _path_diagnostics(
+      self, *, collect_stats, stats_i, x_w, y_w, tau, mu_hat, ax, aty, px,
+      ctx, bty, xpx,
+  ):
+    """Record the two distance-to-path diagnostics on `stats_i`.
+
+    The working-scale (x_w, y_w) and the original-scale products are both
+    passed in because the certificate is evaluated in the operating frame
+    while the caller has already computed the products in the original one.
+    """
     # Distance-to-path diagnostics are pure stats consumers: skip the
     # per-iteration vector work entirely on the default fast path.
     if collect_stats and self.z == self.m:
@@ -2172,32 +2534,15 @@ class QTQP:
           t_x, t_y, t_tau, y_w, tau, mu_hat
       )
 
-    # Clarabel's termination criteria, evaluated on the returned point
-    # (x, y, s) / tau: 2-norm residuals over max(1, data inf-norm + iterate
-    # 2-norms), and a duality gap that may pass absolutely or relatively.
-    norm_x = _norm(x) * inv_tau
-    norm_y = _norm(y) * inv_tau
-    norm_s = _norm(s) * inv_tau
-    prelrhs = max(1.0, self._norm_b + norm_x + norm_s)
-    drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
-    res_primal = pres / prelrhs
-    res_dual = dres / drelrhs
-    gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
+  def _classify_status(
+      self, *, yts_work, tau, res_primal, res_dual, gap, gap_rel, bty, ctx,
+      pinfeas, dinfeas,
+  ):
+    """Decide this iterate's status from the residuals and the kappa/tau gate.
 
-    # Certificate quality: Clarabel's infeasibility residuals, violations
-    # over max(1, ||ray||), evaluated on the ray scaled to unit slope
-    # (b'y = -1, c'x = -1), which is the certificate actually returned.
-    # Clarabel's floor at 1 makes the test scale-dependent, so it has to
-    # be evaluated at one definite scale; on the unit-slope ray it reads
-    # violations / max(|slope|, ||ray||) in the homogeneous frame.
-    norm_x_h = _norm(x)
-    norm_y_h = _norm(y)
-    norm_s_h = _norm(s)
-    pinfeas = _norm(aty) / max(abs(bty), norm_y_h, _EPS)
-    dinfeas_a = _norm(ax_plus_s) / max(abs(ctx), norm_x_h + norm_s_h, _EPS)
-    dinfeas_p = _norm(px) / max(abs(ctx), norm_x_h, _EPS)
-    dinfeas = max(dinfeas_a, dinfeas_p)
-
+    Returns (status, on_solution_side, ktratio); the caller needs the latter
+    two for the ALMOST_SOLVED salvage and the stats row respectively.
+    """
     # Embedding dichotomy gate on kappa / tau. With kappa eliminated through
     # tau * kappa = mu the ratio is mu / tau^2 (y's / (nu * tau^2) here):
     # below 1 the iterate is on the solution side; certificates require it
@@ -2237,52 +2582,15 @@ class QTQP:
       status = SolutionStatus.UNBOUNDED
     else:
       status = SolutionStatus.UNFINISHED
+    return status, on_solution_side, ktratio
 
-    # Best iterate for the ALMOST_SOLVED salvage: the same criteria at the
-    # reduced tolerances, scored by the largest ratio to its bar (the gap
-    # takes the better of its absolute and relative ratios).
-    almost_score = max(
-        res_primal / _REDUCED_TOL_FEAS,
-        res_dual / _REDUCED_TOL_FEAS,
-        min(gap / _REDUCED_TOL_GAP_ABS, gap_rel / _REDUCED_TOL_GAP_REL),
-    )
-    new_best_almost = (
-        on_solution_side and almost_score < self._best_almost_score
-    )
-    if new_best_almost:
-      self._best_almost_score = almost_score
-      self._best_almost_iterate = (x.copy(), y.copy(), s.copy(), tau)
 
-    stats_i.update({
-        "iter": self.it,
-        "iterations": self._iterations,
-        "ctx": ctx,
-        "bty": bty,
-        "pcost": pcost,
-        "dcost": dcost,
-        "pres": pres,
-        "dres": dres,
-        "gap": gap,
-        "pinfeas": pinfeas,
-        "dinfeas": dinfeas,
-        "dinfeas_a": dinfeas_a,
-        "dinfeas_p": dinfeas_p,
-        "mu": float(y @ s) / max(self.m - self.z, 1),
-        "sigma": sigma,
-        "alpha": alpha,
-        "tau": tau,
-        "norm_x": norm_x,
-        "norm_y": norm_y,
-        "status": status,
-        "time": timeit.default_timer() - self.start_time,
-        "prelrhs": prelrhs,
-        "drelrhs": drelrhs,
-        "res_primal": res_primal,
-        "res_dual": res_dual,
-        "gap_rel": gap_rel,
-        "ktratio": ktratio,
-    })
+  def _collect_iterate_stats(self, *, collect_stats, stats_i, y, s, inv_tau):
+    """Add the optional per-iterate complementarity statistics to `stats_i`.
 
+    Skipped entirely unless stats are being collected; the per-inequality
+    spread is meaningful only when there are inequality rows.
+    """
     if collect_stats:
       stats_i["complementarity"] = abs((y @ s) * inv_tau * inv_tau)
       stats_i["norm_s"] = _norm(s, np.inf)
@@ -2299,7 +2607,6 @@ class QTQP:
             "mean_s_over_y": np.mean(s_over_y),
             "std_s_over_y": np.std(s_over_y),
         })
-    return status
 
   def _log_header(self):
     """Prints the iteration table header when verbose."""
