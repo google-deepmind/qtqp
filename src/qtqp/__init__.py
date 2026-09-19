@@ -586,6 +586,8 @@ class QTQP:
       # Duplicate entries are summed by the KKT assembly but not by the
       # equilibration norms: canonicalize.
       self.a.sum_duplicates()
+    # Stored zeros must not contribute to AUTO's density estimate.
+    self.a.eliminate_zeros()
     if not np.all(np.isfinite(self.a.data)):
       raise ValueError("Constraint matrix 'a' must contain only finite values.")
 
@@ -625,6 +627,8 @@ class QTQP:
       p = p.astype(np.float64)
       if not p.has_canonical_format:
         p.sum_duplicates()
+      # nnz also selects LP initialization, so an all-zero P must be empty.
+      p.eliminate_zeros()
       if not np.all(np.isfinite(p.data)):
         raise ValueError("QP matrix 'p' must contain only finite values.")
       asymmetry = p - p.T
