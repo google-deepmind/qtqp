@@ -1137,18 +1137,30 @@ class QTQP:
     Returns:
       A Solution object containing the solution and solve stats.
     """
-    assert tol_feas >= 0
-    assert tol_gap_abs >= 0
-    assert tol_gap_rel >= 0
-    assert tol_infeas_abs >= 0
-    assert tol_infeas_rel >= 0
-    assert certificate_ktratio >= 1.0
-    assert max_iter > 0
-    assert 0 < step_size_scale < 1
-    assert min_static_regularization >= 0
-    assert max_iterative_refinement_steps >= 1
-    assert linear_solver_atol >= 0
-    assert linear_solver_rtol >= 0
+    if not (tol_feas >= 0):
+      raise ValueError("tol_feas must be >= 0.")
+    if not (tol_gap_abs >= 0):
+      raise ValueError("tol_gap_abs must be >= 0.")
+    if not (tol_gap_rel >= 0):
+      raise ValueError("tol_gap_rel must be >= 0.")
+    if not (tol_infeas_abs >= 0):
+      raise ValueError("tol_infeas_abs must be >= 0.")
+    if not (tol_infeas_rel >= 0):
+      raise ValueError("tol_infeas_rel must be >= 0.")
+    if not (certificate_ktratio >= 1.0):
+      raise ValueError("certificate_ktratio must be >= 1.")
+    if not (max_iter > 0):
+      raise ValueError("max_iter must be > 0.")
+    if not (0 < step_size_scale < 1):
+      raise ValueError("step_size_scale must be between 0 and 1.")
+    if not (min_static_regularization >= 0):
+      raise ValueError("min_static_regularization must be >= 0.")
+    if not (max_iterative_refinement_steps >= 1):
+      raise ValueError("max_iterative_refinement_steps must be >= 1.")
+    if not (linear_solver_atol >= 0):
+      raise ValueError("linear_solver_atol must be >= 0.")
+    if not (linear_solver_rtol >= 0):
+      raise ValueError("linear_solver_rtol must be >= 0.")
     self._adaptive_step_size = bool(adaptive_step_size)
     if max_centrality_correctors < 0:
       raise ValueError("max_centrality_correctors must be >= 0.")
