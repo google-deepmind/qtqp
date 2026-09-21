@@ -1827,9 +1827,9 @@ class QTQP:
 
   def _max_step_size(self, y: np.ndarray, delta_y: np.ndarray) -> float:
     """Finds maximum step `alpha` in [0, 1] s.t. y + alpha * delta_y >= 0."""
-    # Only consider directions that reduce the variable (delta_y < 0)
-    # Use a small tolerance to ignore numerical noise
-    idx = delta_y < -_EPS
+    # Only directions that cross zero within a full step can limit alpha.
+    # Compare with y, not an absolute epsilon: small variables still bind.
+    idx = delta_y < -y
     if not np.any(idx):
       return 1.0
     # The step to hit zero for these variables is -y / delta_y
