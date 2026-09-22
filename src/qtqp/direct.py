@@ -268,7 +268,8 @@ class DirectKktSolver:
     self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
     if refinement_strategy is RefinementStrategy.GMRES:
       # GMRES work arrays, allocated once for the largest cycle.
-      k, dim = gmres_restart, self.n + self.m
+      k = min(gmres_restart, max_iterative_refinement_steps)
+      dim = self.n + self.m
       self._gm_v = np.empty((k + 1, dim))
       self._gm_z = np.empty((k, dim))
       self._gm_h = np.zeros((k + 1, k))
