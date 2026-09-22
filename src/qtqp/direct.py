@@ -225,7 +225,11 @@ class DirectKktSolver:
       refinement_strategy: Which iterative-refinement scheme to drive the KKT
         solve with. See RefinementStrategy for descriptions.
       gmres_restart: Krylov dimension per restart cycle (inner Arnoldi steps
-        before restart). Ignored when refinement_strategy is RICHARDSON.
+        before restart). Effectively capped by
+        max_iterative_refinement_steps, which bounds the applies any one
+        cycle can consume and hence the work arrays allocated here; the
+        requested value is still reported as self.gmres_restart. Ignored
+        when refinement_strategy is RICHARDSON.
     """
     if refinement_strategy is RefinementStrategy.GMRES and gmres_restart < 1:
       raise ValueError("gmres_restart must be >= 1.")
@@ -267,9 +271,11 @@ class DirectKktSolver:
     self._kkt_rhs = np.empty(self.n + self.m, dtype=np.float64)    # RHS with cone block negated
     self._diag_correction = np.zeros(self.n + self.m, dtype=np.float64)  # reg - true
     if refinement_strategy is RefinementStrategy.GMRES:
-      # GMRES work arrays, allocated once for the largest cycle.
-      k = min(gmres_restart, max_iterative_refinement_steps)
-      dim = self.n + self.m
+      # GMRES work arrays, allocated once for the largest reachable cycle.
+      # _solve_gmres never asks for more inner steps than this bound, so
+      # the slices _gmres_cycle takes are always full-length.
+      self._gm_k = min(gmres_restart, max_iterative_refinement_steps)
+      k, dim = self._gm_k, self.n + self.m
       self._gm_v = np.empty((k + 1, dim))
       self._gm_z = np.empty((k, dim))
       self._gm_h = np.zeros((k + 1, k))
@@ -593,6 +599,13 @@ class DirectKktSolver:
     the 2-norm, so this is a safe (slightly conservative) trigger for the
     inf-norm convergence test the outer loop applies.
     """
+    if max_inner > self._gm_k:
+      raise ValueError(
+          f"GMRES cycle budget {max_inner} exceeds the allocated workspace "
+          f"{self._gm_k} = min(gmres_restart, max_iterative_refinement_steps). "
+          "numpy truncates over-long slices silently, so this would corrupt "
+          "the Arnoldi recurrence rather than fail at the slice."
+      )
     v = self._gm_v[: max_inner + 1]
     z = self._gm_z[:max_inner]
     h = self._gm_h[: max_inner + 1, :max_inner]

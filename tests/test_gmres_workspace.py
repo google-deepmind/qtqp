@@ -22,11 +22,12 @@ from scipy import sparse
 import qtqp
 
 
-def _solver(restart, budget, strategy=qtqp.RefinementStrategy.GMRES):
+def _solver(restart, budget, strategy=qtqp.RefinementStrategy.GMRES,
+            min_static_regularization=1e-8):
   return qtqp.direct.DirectKktSolver(
       a=sparse.csc_matrix([[1., 0.], [0., 1.], [-1., -1.]]),
       p=sparse.eye(2, format="csc"), z=0,
-      min_static_regularization=1e-8,
+      min_static_regularization=min_static_regularization,
       max_iterative_refinement_steps=budget, atol=1e-12, rtol=1e-12,
       solver=qtqp.LinearSolver.SCIPY.value(),
       refinement_strategy=strategy, gmres_restart=restart,
@@ -71,6 +72,35 @@ def test_bounded_workspace_preserves_solves_and_is_reused(restart, budget):
       for name, buffer in zip(
           ("_gm_v", "_gm_z", "_gm_h", "_gm_cs", "_gm_sn", "_gm_g"), buffers):
         assert getattr(solver, name) is buffer
+  finally:
+    solver.free()
+    reference.free()
+
+
+@pytest.mark.parametrize("restart,budget", [(20, 2), (20, 3), (100, 4)])
+def test_capped_workspace_spans_a_budget_consuming_refinement(restart, budget):
+  """The cap must hold when refinement writes to every row it reserves.
+
+  With the regularization clamp inactive the preconditioner inverts the
+  operator exactly, so a cycle converges after one Arnoldi step and touches
+  only the first row of each work array -- a workspace of one row would pass
+  the shape-free checks above. Raising min_static_regularization above the
+  true cone diagonal (s/y + mu) makes the preconditioner inexact, so the
+  cycle consumes the whole budget and exercises the full allocation.
+  """
+  clamped = dict(min_static_regularization=1e-2)
+  solver = _solver(restart, budget, **clamped)
+  reference = _solver(min(restart, budget), budget, **clamped)
+  rhs = np.array([1., -2., 3., -4., 5.])
+  try:
+    for item in (solver, reference):
+      item.update(mu=1e-10, s=np.full(3, 1e-12), y=np.ones(3))
+    actual, stats = solver.solve(rhs, np.zeros(5))
+    expected, expected_stats = reference.solve(rhs, np.zeros(5))
+    # The point of the fixture: refinement really does use every apply.
+    assert stats["solves"] == budget
+    np.testing.assert_array_equal(actual, expected)
+    assert stats == expected_stats
   finally:
     solver.free()
     reference.free()
