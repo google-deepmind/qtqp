@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 import scipy.sparse as sp
 from scipy.linalg import solve_triangular
+from scipy.linalg.blas import dnrm2
 
 
 # DGKS reorthogonalization threshold (Daniel-Gragg-Kaufman-Stewart, 1976):
@@ -616,7 +617,8 @@ class DirectKktSolver:
     g.fill(0.0)
 
     applies = 0
-    beta = float(np.linalg.norm(residual))
+    # BLAS nrm2 scales before squaring, avoiding false zero/infinite norms.
+    beta = dnrm2(residual)
     if beta == 0.0:
       return 0, True
 
@@ -633,17 +635,17 @@ class DirectKktSolver:
       # Modified Gram-Schmidt against the existing basis, with DGKS
       # reorthogonalization if the orthogonalization pass projected out
       # too much mass (the new direction is nearly in span(v[0..j])).
-      w_norm_before = float(np.linalg.norm(w))
+      w_norm_before = dnrm2(w)
       for i in range(j + 1):
         h[i, j] = v[i] @ w
         w -= h[i, j] * v[i]
-      h_next = float(np.linalg.norm(w))
+      h_next = dnrm2(w)
       if h_next < _DGKS_REORTH_THRESHOLD * w_norm_before:
         for i in range(j + 1):
           delta = v[i] @ w
           h[i, j] += delta
           w -= delta * v[i]
-        h_next = float(np.linalg.norm(w))
+        h_next = dnrm2(w)
       h[j + 1, j] = h_next
 
       breakdown = h_next == 0.0
