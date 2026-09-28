@@ -93,7 +93,7 @@ _SCALAR_MAX = 1e4
 
 def _norm(vector: np.ndarray, order=None):
   """Vector norm, with scaled Euclidean accumulation to avoid square overflow."""
-  if order is None:
+  if order is None or order == 2:
     return dnrm2(vector) if vector.size else 0.0
   return np.linalg.norm(vector, order)
 

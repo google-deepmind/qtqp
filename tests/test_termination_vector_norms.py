@@ -34,6 +34,7 @@ def test_vector_norm_matches_scaled_reference(scale, strided):
   actual = qtqp._norm(vector)
   assert math.isfinite(actual)
   assert actual == pytest.approx(expected, rel=2e-15, abs=0.0)
+  assert qtqp._norm(vector, 2) == actual
   assert qtqp._norm(vector, np.inf) == np.max(np.abs(vector))
 
 
