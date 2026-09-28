@@ -193,3 +193,16 @@ def test_empty_zero_and_nonfinite_norm_controls():
   assert qtqp._norm(np.zeros(4)) == 0.0
   assert math.isnan(qtqp._norm(np.array([np.nan])))
   assert math.isinf(qtqp._norm(np.array([np.inf])))
+
+
+@pytest.mark.parametrize('scale', [1.0, 1e160, 1e300])
+def test_normalize_reaches_central_path_norm_at_extreme_scales(scale):
+  problem = _problem([[1.0], [-1.0]], [2.0, 0.0], [1.0])
+  x = np.array([3.0]) * scale
+  y = np.array([0.0, 4.0]) * scale
+  s = np.array([1.0, 1.0]) * scale
+  x, y, tau, s = problem._normalize(x, y, 12.0 * scale, s)
+  # ||(3, 4, 12)|| = 13, so the scale is sqrt(m - z + 1) / 13 at every level.
+  target = math.sqrt(problem.m - problem.z + 1)
+  assert math.hypot(*x, *y, tau) == pytest.approx(target, rel=1e-14)
+  np.testing.assert_allclose(s, target / 13.0, rtol=1e-14)
