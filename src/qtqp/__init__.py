@@ -41,6 +41,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import scipy.sparse as sp
+from scipy.linalg.blas import dnrm2
 
 from . import direct
 from . import solvers_dense
@@ -64,7 +65,6 @@ __all__ = [
 __version__ = "0.0.7"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
-_norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
 # ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown, the
 # best iterate seen is returned as ALMOST_SOLVED when it meets the same
@@ -89,6 +89,18 @@ _MU_FLOOR = 1e-14
 # single big-M entry in b can put ||Db||_inf at 1e12.
 _SCALAR_MIN = 1e-4
 _SCALAR_MAX = 1e4
+
+
+def _norm(vector: np.ndarray, order=None):
+  """Vector norm, with scaled Euclidean accumulation to avoid square overflow."""
+  if order is None or order == 2:
+    return dnrm2(vector) if vector.size else 0.0
+  return np.linalg.norm(vector, order)
+
+
+def _xyt_norm(x: np.ndarray, y: np.ndarray, tau: float) -> float:
+  """||(x, y, tau)||_2 without squaring overflow or underflow."""
+  return math.hypot(_norm(x), _norm(y), tau)
 
 
 class LinearSolver(enum.Enum):
@@ -1848,11 +1860,12 @@ class QTQP:
 
     # Compute mu_aff directly without calling _normalize to avoid 4 extra
     # allocations. Equivalent to: normalize then compute (y @ s) / (m - z).
-    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), so scale^2 = (m-z+1) /
-    # max(_EPS^2, ||(x,y,tau)||^2), giving mu_aff = scale^2 * (y_aff @ s_aff).
-    xyt_norm_sq = x_aff @ x_aff + y_aff @ y_aff + tau_aff * tau_aff
-    scale_sq = (self.m - self.z + 1) / max(_EPS * _EPS, xyt_norm_sq)
-    mu_aff = scale_sq * (y_aff @ s_aff) / (self.m - self.z)
+    # scale = sqrt(m-z+1) / max(_EPS, ||(x,y,tau)||), giving
+    # mu_aff = scale^2 * (y_aff @ s_aff).
+    scale = math.sqrt(self.m - self.z + 1) / max(
+        _EPS, _xyt_norm(x_aff, y_aff, tau_aff)
+    )
+    mu_aff = scale * scale * (y_aff @ s_aff) / (self.m - self.z)
 
     # sigma = (mu_aff / mu)^3: Mehrotra's heuristic. If the affine step already
     # drives mu close to zero, sigma is small (aggressive, little centering).
@@ -2082,8 +2095,7 @@ class QTQP:
 
     Operates in-place on the iterate arrays and returns them for convenience.
     """
-    xyt_norm = math.sqrt(x @ x + y @ y + tau * tau)
-    scale = math.sqrt(self.m - self.z + 1) / max(_EPS, xyt_norm)
+    scale = math.sqrt(self.m - self.z + 1) / max(_EPS, _xyt_norm(x, y, tau))
     x *= scale
     y *= scale
     tau *= scale
