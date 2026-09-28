@@ -41,6 +41,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import scipy.sparse as sp
+from scipy.linalg.blas import dnrm2
 
 from . import direct
 from . import solvers_dense
@@ -64,7 +65,6 @@ __all__ = [
 __version__ = "0.0.7"
 _HEADER = """| iter |      pcost |      dcost |     pres |     dres |      gap |   infeas |       mu |  q, p, c |     time |"""
 _SEPARA = """|------|------------|------------|----------|----------|----------|----------|----------|----------|----------|"""
-_norm = np.linalg.norm
 _EPS = 1e-15  # Standard epsilon for numerical safety
 # ALMOST_SOLVED acceptance: on HIT_MAX_ITER or numerical breakdown, the
 # best iterate seen is returned as ALMOST_SOLVED when it meets the same
@@ -89,6 +89,13 @@ _MU_FLOOR = 1e-14
 # single big-M entry in b can put ||Db||_inf at 1e12.
 _SCALAR_MIN = 1e-4
 _SCALAR_MAX = 1e4
+
+
+def _norm(vector: np.ndarray, order=None):
+  """Vector norm, with scaled Euclidean accumulation to avoid square overflow."""
+  if order is None:
+    return dnrm2(vector) if vector.size else 0.0
+  return np.linalg.norm(vector, order)
 
 
 class LinearSolver(enum.Enum):
