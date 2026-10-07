@@ -14,6 +14,8 @@
 
 """Residual normalizers must not overflow before a representable division."""
 
+import math
+
 import numpy as np
 import pytest
 from scipy import sparse
@@ -70,3 +72,26 @@ def test_exact_stationary_solution_still_passes():
   status, stats = _check(problem, [10.], [10.], [0.])
   assert status is qtqp.SolutionStatus.SOLVED
   assert stats['res_primal'] == stats['res_dual'] == 0.
+
+
+def test_solve_keeps_overflowed_primal_normalizer_finite():
+  problem = qtqp.QTQP(
+      a=sparse.csc_matrix([[-1e100, -1e-308], [-1e300, 1e-100]]),
+      b=np.array([-9e307, 0.]),
+      c=np.zeros(2),
+      z=0,
+  )
+  with np.errstate(over='ignore', invalid='ignore', under='ignore'):
+    solution = problem.solve(
+        verbose=False,
+        max_iter=1,
+        linear_solver=qtqp.LinearSolver.SCIPY,
+        equilibration_strategy=qtqp.EquilibrationStrategy.RUIZ,
+        collect_stats=True,
+    )
+
+  stats = solution.stats[0]
+  assert np.isfinite(stats['pres'])
+  assert stats['pres'] > 1e308
+  assert math.isinf(stats['prelrhs'])
+  assert stats['res_primal'] == pytest.approx(1 / np.sqrt(2))

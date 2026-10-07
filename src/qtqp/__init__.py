@@ -2220,8 +2220,22 @@ class QTQP:
     norm_s = _norm(s) * inv_tau
     prelrhs = max(1.0, self._norm_b + norm_x + norm_s)
     drelrhs = max(1.0, self._norm_c + norm_x + norm_y)
-    res_primal = _divide_by_norm_sum(pres, 1.0, self._norm_b, norm_x, norm_s)
-    res_dual = _divide_by_norm_sum(dres, 1.0, self._norm_c, norm_x, norm_y)
+    res_primal = pres / prelrhs
+    res_dual = dres / drelrhs
+    # Keep the ordinary path identical. Only rescale when the sum itself
+    # overflowed even though each summand is finite.
+    if math.isinf(prelrhs) and all(
+        math.isfinite(value) for value in (self._norm_b, norm_x, norm_s)
+    ):
+      res_primal = _divide_by_norm_sum(
+          pres, 1.0, self._norm_b, norm_x, norm_s
+      )
+    if math.isinf(drelrhs) and all(
+        math.isfinite(value) for value in (self._norm_c, norm_x, norm_y)
+    ):
+      res_dual = _divide_by_norm_sum(
+          dres, 1.0, self._norm_c, norm_x, norm_y
+      )
     gap_rel = gap / max(1.0, min(abs(pcost), abs(dcost)))
 
     # Certificate quality: Clarabel's infeasibility residuals, violations
@@ -2234,9 +2248,18 @@ class QTQP:
     norm_y_h = _norm(y)
     norm_s_h = _norm(s)
     pinfeas = _norm(aty) / max(abs(bty), norm_y_h, _EPS)
-    dinfeas_a = _divide_by_norm_sum(
-        _norm(ax_plus_s), max(abs(ctx), _EPS), norm_x_h, norm_s_h
-    )
+    norm_xs_h = norm_x_h + norm_s_h
+    dinfeas_a_den = max(abs(ctx), norm_xs_h, _EPS)
+    dinfeas_a = _norm(ax_plus_s) / dinfeas_a_den
+    if (
+        math.isinf(norm_xs_h)
+        and math.isfinite(ctx)
+        and math.isfinite(norm_x_h)
+        and math.isfinite(norm_s_h)
+    ):
+      dinfeas_a = _divide_by_norm_sum(
+          _norm(ax_plus_s), max(abs(ctx), _EPS), norm_x_h, norm_s_h
+      )
     dinfeas_p = _norm(px) / max(abs(ctx), norm_x_h, _EPS)
     dinfeas = max(dinfeas_a, dinfeas_p)
 
