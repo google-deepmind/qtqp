@@ -14,7 +14,6 @@
 # ==============================================================================
 
 """Interior point method for solving QPs.
-
   Algorithm: Mehrotra predictor-corrector interior point method with a
   homogeneous embedding. Each iteration does:
 
