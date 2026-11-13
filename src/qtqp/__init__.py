@@ -35,6 +35,7 @@ import dataclasses
 import enum
 import logging
 import math
+import numbers
 import sys
 import timeit
 from typing import Any, Dict, List
@@ -89,6 +90,11 @@ _MU_FLOOR = 1e-14
 # single big-M entry in b can put ||Db||_inf at 1e12.
 _SCALAR_MIN = 1e-4
 _SCALAR_MAX = 1e4
+
+
+def _is_integer_count(value) -> bool:
+  """Accept Python and NumPy integer counts, excluding booleans."""
+  return isinstance(value, numbers.Integral) and not isinstance(value, bool)
 
 
 def _norm(vector: np.ndarray, order=None):
@@ -597,6 +603,8 @@ class QTQP:
       TypeError: QTQP.__init__() takes 1 positional argument but 5 were given
     """
     self.m, self.n = a.shape
+    if not _is_integer_count(z):
+      raise ValueError("z must be an integer number of equality rows.")
     self.z = z
 
     # Input validation
@@ -1173,21 +1181,26 @@ class QTQP:
       raise ValueError("tol_infeas_rel must be >= 0.")
     if not (certificate_ktratio >= 1.0):
       raise ValueError("certificate_ktratio must be >= 1.")
-    if not (max_iter > 0):
-      raise ValueError("max_iter must be > 0.")
+    if not _is_integer_count(max_iter) or max_iter <= 0:
+      raise ValueError("max_iter must be a positive integer.")
     if not (0 < step_size_scale < 1):
       raise ValueError("step_size_scale must be between 0 and 1.")
     if not (min_static_regularization >= 0):
       raise ValueError("min_static_regularization must be >= 0.")
-    if not (max_iterative_refinement_steps >= 1):
-      raise ValueError("max_iterative_refinement_steps must be >= 1.")
+    if (not _is_integer_count(max_iterative_refinement_steps)
+        or max_iterative_refinement_steps < 1):
+      raise ValueError("max_iterative_refinement_steps must be an integer >= 1.")
     if not (linear_solver_atol >= 0):
       raise ValueError("linear_solver_atol must be >= 0.")
     if not (linear_solver_rtol >= 0):
       raise ValueError("linear_solver_rtol must be >= 0.")
+    if (refinement_strategy is RefinementStrategy.GMRES
+        and (not _is_integer_count(gmres_restart) or gmres_restart < 1)):
+      raise ValueError("gmres_restart must be an integer >= 1 for GMRES.")
     self._adaptive_step_size = bool(adaptive_step_size)
-    if max_centrality_correctors < 0:
-      raise ValueError("max_centrality_correctors must be >= 0.")
+    if (not _is_integer_count(max_centrality_correctors)
+        or max_centrality_correctors < 0):
+      raise ValueError("max_centrality_correctors must be an integer >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
 
     self.start_time = timeit.default_timer()
