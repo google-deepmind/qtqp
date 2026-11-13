@@ -330,9 +330,18 @@ def _resolve_linear_solver(
 
   cached = _AUTO_SOLVER_CACHE.get(sys.platform)
   if cached is not None:
-    return cached, _instantiate_linear_solver(cached)
+    try:
+      return cached, _instantiate_linear_solver(cached)
+    except _AUTO_UNAVAILABLE_ERRORS as e:
+      # A cached optional backend may become unavailable during a session.
+      # Retry discovery rather than making AUTO less resilient than its
+      # uncached path.
+      logging.debug("AUTO cached %s is unavailable: %s", cached.name, e)
+      _AUTO_SOLVER_CACHE.pop(sys.platform, None)
 
   for candidate in _auto_linear_solver_order():
+    if candidate is cached:
+      continue  # Already tried this backend and found it unavailable.
     try:
       backend = _instantiate_linear_solver(candidate)
       _AUTO_SOLVER_CACHE[sys.platform] = candidate
