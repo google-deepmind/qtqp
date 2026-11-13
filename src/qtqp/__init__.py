@@ -602,6 +602,8 @@ class QTQP:
     # Input validation
     if not sp.isspmatrix_csc(a):
       raise TypeError("Constraint matrix 'a' must be in CSC format.")
+    if np.iscomplexobj(a.data):
+      raise ValueError("Constraint matrix 'a' must be real-valued.")
     # Cast to float64 before canonicalizing (sum_duplicates() on an
     # integer matrix wraps); astype copies, so the caller's matrix is
     # never mutated.
@@ -615,10 +617,14 @@ class QTQP:
     if not np.all(np.isfinite(self.a.data)):
       raise ValueError("Constraint matrix 'a' must contain only finite values.")
 
+    if np.iscomplexobj(b):
+      raise ValueError("Right-hand side 'b' must be real-valued.")
     self.b = np.array(b, dtype=np.float64)
     if self.b.shape != (self.m,):
       raise ValueError(f"b must have shape ({self.m},), got {self.b.shape}")
 
+    if np.iscomplexobj(c):
+      raise ValueError("Cost vector 'c' must be real-valued.")
     self.c = np.array(c, dtype=np.float64)
     if self.c.shape != (self.n,):
       raise ValueError(f"c must have shape ({self.n},), got {self.c.shape}")
@@ -642,6 +648,8 @@ class QTQP:
     else:
       if not sp.isspmatrix_csc(p):
         raise TypeError("QP matrix 'p' must be in CSC format.")
+      if np.iscomplexobj(p.data):
+        raise ValueError("QP matrix 'p' must be real-valued.")
       if p.shape != (self.n, self.n):
         raise ValueError(
             f"p must have shape ({self.n}, {self.n}), got {p.shape}"
