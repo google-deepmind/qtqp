@@ -1161,16 +1161,16 @@ class QTQP:
     Returns:
       A Solution object containing the solution and solve stats.
     """
-    if not (tol_feas >= 0):
-      raise ValueError("tol_feas must be >= 0.")
-    if not (tol_gap_abs >= 0):
-      raise ValueError("tol_gap_abs must be >= 0.")
-    if not (tol_gap_rel >= 0):
-      raise ValueError("tol_gap_rel must be >= 0.")
-    if not (tol_infeas_abs >= 0):
-      raise ValueError("tol_infeas_abs must be >= 0.")
-    if not (tol_infeas_rel >= 0):
-      raise ValueError("tol_infeas_rel must be >= 0.")
+    if not (math.isfinite(tol_feas) and tol_feas >= 0):
+      raise ValueError("tol_feas must be finite and >= 0.")
+    if not (math.isfinite(tol_gap_abs) and tol_gap_abs >= 0):
+      raise ValueError("tol_gap_abs must be finite and >= 0.")
+    if not (math.isfinite(tol_gap_rel) and tol_gap_rel >= 0):
+      raise ValueError("tol_gap_rel must be finite and >= 0.")
+    if not (math.isfinite(tol_infeas_abs) and tol_infeas_abs >= 0):
+      raise ValueError("tol_infeas_abs must be finite and >= 0.")
+    if not (math.isfinite(tol_infeas_rel) and tol_infeas_rel >= 0):
+      raise ValueError("tol_infeas_rel must be finite and >= 0.")
     if not (certificate_ktratio >= 1.0):
       raise ValueError("certificate_ktratio must be >= 1.")
     if not (max_iter > 0):

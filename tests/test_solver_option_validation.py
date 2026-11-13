@@ -38,6 +38,9 @@ _INVALID_OPTIONS = [
     ("max_iterative_refinement_steps", 0),
     ("linear_solver_atol", -1.), ("linear_solver_rtol", -1.),
     ("tol_feas", float("nan")), ("step_size_scale", float("nan")),
+    ("tol_feas", float("inf")), ("tol_gap_abs", float("inf")),
+    ("tol_gap_rel", float("inf")), ("tol_infeas_abs", float("inf")),
+    ("tol_infeas_rel", float("inf")),
 ]
 
 
