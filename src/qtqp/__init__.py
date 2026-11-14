@@ -91,6 +91,15 @@ _SCALAR_MIN = 1e-4
 _SCALAR_MAX = 1e4
 
 
+def _is_csc(mat) -> bool:
+  """Whether `mat` is sparse CSC data: a csc_matrix or a csc_array.
+
+  sp.isspmatrix_csc is False for SciPy's sparse arrays, which store the same
+  CSC data and are the interface SciPy recommends for new code.
+  """
+  return sp.issparse(mat) and mat.format == "csc"
+
+
 def _norm(vector: np.ndarray, order=None):
   """Vector norm, with scaled Euclidean accumulation to avoid square overflow."""
   if order is None or order == 2:
@@ -600,12 +609,13 @@ class QTQP:
     self.z = z
 
     # Input validation
-    if not sp.isspmatrix_csc(a):
+    if not _is_csc(a):
       raise TypeError("Constraint matrix 'a' must be in CSC format.")
     # Cast to float64 before canonicalizing (sum_duplicates() on an
     # integer matrix wraps); astype copies, so the caller's matrix is
-    # never mutated.
-    self.a = a.astype(np.float64)
+    # never mutated. A csc_array is held as a csc_matrix, the type the
+    # solver is written against.
+    self.a = sp.csc_matrix(a.astype(np.float64))
     if not self.a.has_canonical_format:
       # Duplicate entries are summed by the KKT assembly but not by the
       # equilibration norms: canonicalize.
@@ -640,15 +650,16 @@ class QTQP:
     if p is None:
       self.p = sp.csc_matrix((self.n, self.n))
     else:
-      if not sp.isspmatrix_csc(p):
+      if not _is_csc(p):
         raise TypeError("QP matrix 'p' must be in CSC format.")
       if p.shape != (self.n, self.n):
         raise ValueError(
             f"p must have shape ({self.n}, {self.n}), got {p.shape}"
         )
       # Cast to float64 before canonicalizing and before the symmetry
-      # check: integer arithmetic wraps in both.
-      p = p.astype(np.float64)
+      # check: integer arithmetic wraps in both. As with `a`, a csc_array
+      # is held as a csc_matrix.
+      p = sp.csc_matrix(p.astype(np.float64))
       if not p.has_canonical_format:
         p.sum_duplicates()
       # nnz also selects LP initialization, so an all-zero P must be empty.
