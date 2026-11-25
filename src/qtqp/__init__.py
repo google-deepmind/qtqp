@@ -718,7 +718,12 @@ class QTQP:
           "warm_start_threshold must be a positive finite float, got"
           f" {warm_start_threshold}"
       )
-    wx, wy, ws = (np.asarray(v, dtype=float).copy() for v in warm_start)
+    arrays = tuple(np.asarray(v) for v in warm_start)
+    if len(arrays) != 3:
+      raise ValueError("warm_start must contain exactly three arrays (x, y, s).")
+    if any(np.iscomplexobj(v) for v in arrays):
+      raise ValueError("warm_start arrays must be real-valued.")
+    wx, wy, ws = (np.array(v, dtype=float, copy=True) for v in arrays)
     ps = self._presolve_state
     full_m = self.m + (len(ps.b_dropped) if ps is not None else 0)
     if (ps is not None and wx.shape == (self.n,)
@@ -1190,6 +1195,8 @@ class QTQP:
       raise ValueError("max_centrality_correctors must be >= 0.")
     self._max_centrality_correctors = int(max_centrality_correctors)
 
+    validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
+
     self.start_time = timeit.default_timer()
     self.tol_feas = tol_feas
     self.tol_gap_abs, self.tol_gap_rel = tol_gap_abs, tol_gap_rel
@@ -1266,7 +1273,6 @@ class QTQP:
     # neither proximity to the path nor fewer iterations than a cold solve.
     self.warm_lambda = None
     self.warm_accepted = False
-    validated_warm = self._validate_warm_start(warm_start, warm_start_threshold)
     if validated_warm is not None and self.z < self.m:
       # (An all-equality problem is solved by the initialization; a warm
       # start has nothing to improve there.)
