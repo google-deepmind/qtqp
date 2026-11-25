@@ -211,8 +211,8 @@ class CupyDenseSolver(_GpuSolver):
         kkt[:n, n:].T.toarray(order="F"), dtype=cp.float64
     )
     P_block = kkt[:n, :n].toarray()
-    P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
+    P_block = P_block + P_block.T
     self._P_offdiag_gpu = cp.asarray(P_block, dtype=cp.float64)
 
   def update_diag(self, diag: np.ndarray) -> None:

@@ -106,8 +106,8 @@ class ScipyDenseSolver(LinearSolver):
         kkt[:n, n:].T.toarray(order="F"), dtype=np.float64
     )
     P_block = kkt[:n, :n].toarray()
-    P_block = P_block + P_block.T - np.diag(np.diag(P_block))
     np.fill_diagonal(P_block, 0.0)
+    P_block = P_block + P_block.T
     self._P_offdiag = np.asfortranarray(P_block)
 
   def update_diag(self, diag: np.ndarray) -> None:

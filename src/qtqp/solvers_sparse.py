@@ -26,8 +26,11 @@ from .direct import diag_data_indices
 
 def _full_symmetric_from_upper(kkt: sp.spmatrix, format: Literal["csc", "csr"]) -> sp.spmatrix:
   """Reconstruct a full symmetric matrix from stored upper-triangular entries."""
-  diag = sp.diags(kkt.diagonal(), format=format)
-  return (kkt + kkt.T - diag).asformat(format)
+  # Mirror only the strict upper triangle, avoiding diagonal overflow.
+  full = (kkt + sp.triu(kkt, k=1).T).asformat(format)
+  # Sparse addition drops zeros; retain every scaffold diagonal for updates.
+  full.setdiag(kkt.diagonal())
+  return full
 
 
 class MklPardisoSolver(LinearSolver):
