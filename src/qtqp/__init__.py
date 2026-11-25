@@ -31,6 +31,7 @@
 
 """
 
+import contextlib
 import dataclasses
 import enum
 import logging
@@ -1210,49 +1211,54 @@ class QTQP:
     resolved_linear_solver, linear_solver_backend = _resolve_linear_solver(
         linear_solver
     )
-    if verbose:
-      print(
-          f"| QTQP v{__version__}:"
-          f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
-          f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
-          f" equilibration={equilibration_strategy.name}"
+    # Until the KKT wrapper is fully constructed, setup owns the backend.
+    # Transfer ownership to solve() only after construction succeeds.
+    with contextlib.ExitStack() as setup:
+      setup.callback(linear_solver_backend.free)
+      if verbose:
+        print(
+            f"| QTQP v{__version__}:"
+            f" m={self.m}, n={self.n}, z={self.z}, nnz(A)={self.a.nnz},"
+            f" nnz(P)={self.p.nnz}, linear_solver={resolved_linear_solver.name},"
+            f" equilibration={equilibration_strategy.name}"
+        )
+      if equilibration_strategy is EquilibrationStrategy.NONE:
+        a, p, b, c = self.a, self.p, self.b, self.c
+        self.d, self.e, self.sigma_eq, self.gamma_eq = None, None, 1.0, 1.0
+      else:
+        a, p, b, c, self.d, self.e, self.sigma_eq, self.gamma_eq = (
+            self._equilibrate()
+        )
+      # Operating-scale b, c, kept for the distance-to-path certificate.
+      self._b_op, self._c_op = b, c
+
+      # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
+      # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
+      # K is the augmented KKT matrix, so the full Newton RHS has the form r - q *
+      # tau+. Solving kinv_q = K^{-1} q once per iteration lets us write the
+      # parametric solution as: [x+; y+] = kinv_r - kinv_q * tau+ and reuse kinv_q
+      # in both the predictor and corrector steps.
+      self.q = np.concatenate([c, b])
+
+      # Precompute constant norms used in termination checks. _check_termination
+      # unequilibrates iterates and compares against the original self.b / self.c,
+      # so we use self.b and self.c here (not the equilibrated local b, c).
+      self._norm_b = _norm(self.b, np.inf)
+      self._norm_c = _norm(self.c, np.inf)
+
+      self._linear_solver = direct.DirectKktSolver(
+          a=a,
+          p=p,
+          z=self.z,
+          min_static_regularization=min_static_regularization,
+          max_iterative_refinement_steps=max_iterative_refinement_steps,
+          atol=linear_solver_atol,
+          rtol=linear_solver_rtol,
+          solver=linear_solver_backend,
+          refinement_strategy=refinement_strategy,
+          gmres_restart=gmres_restart,
       )
-    if equilibration_strategy is EquilibrationStrategy.NONE:
-      a, p, b, c = self.a, self.p, self.b, self.c
-      self.d, self.e, self.sigma_eq, self.gamma_eq = None, None, 1.0, 1.0
-    else:
-      a, p, b, c, self.d, self.e, self.sigma_eq, self.gamma_eq = (
-          self._equilibrate()
-      )
-    # Operating-scale b, c, kept for the distance-to-path certificate.
-    self._b_op, self._c_op = b, c
-
-    # q = [c; b]: the KKT right-hand side. The primal and dual feasibility
-    # conditions at optimality can be written as: K @ [x; y] = -q * tau, where
-    # K is the augmented KKT matrix, so the full Newton RHS has the form r - q *
-    # tau+. Solving kinv_q = K^{-1} q once per iteration lets us write the
-    # parametric solution as: [x+; y+] = kinv_r - kinv_q * tau+ and reuse kinv_q
-    # in both the predictor and corrector steps.
-    self.q = np.concatenate([c, b])
-
-    # Precompute constant norms used in termination checks. _check_termination
-    # unequilibrates iterates and compares against the original self.b / self.c,
-    # so we use self.b and self.c here (not the equilibrated local b, c).
-    self._norm_b = _norm(self.b, np.inf)
-    self._norm_c = _norm(self.c, np.inf)
-
-    self._linear_solver = direct.DirectKktSolver(
-        a=a,
-        p=p,
-        z=self.z,
-        min_static_regularization=min_static_regularization,
-        max_iterative_refinement_steps=max_iterative_refinement_steps,
-        atol=linear_solver_atol,
-        rtol=linear_solver_rtol,
-        solver=linear_solver_backend,
-        refinement_strategy=refinement_strategy,
-        gmres_restart=gmres_restart,
-    )
+      setup.pop_all()
 
     stats = []
     self.kinv_q = np.zeros_like(self.q)  # K^{-1}q, warm-started across iterations.
